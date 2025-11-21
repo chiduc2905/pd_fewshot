@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 import os
 
 parser = argparse.ArgumentParser(description='PD Scalogram 1-shot Testing')
-parser.add_argument('--dataset_path', type=str, default='../ML/scalogram_images/', help='Path to scalogram dataset')
+parser.add_argument('--dataset_path', type=str, default='./scalogram_images/', help='Path to scalogram dataset')
 parser.add_argument('--model_path', type=str, help='Path to trained model', required=True)
 parser.add_argument('--episode_num_test', type=int, default=75, help='Number of testing episodes')
 parser.add_argument('--way_num', type=int, default=3, help='Number of classes')
@@ -45,7 +45,7 @@ test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=F
 
 # Load model
 print(f'Loading model from {args.model_path}...')
-net = torch.load(args.model_path)
+net = torch.load(args.model_path, weights_only=False)
 net = net.to(args.device)
 net.eval()
 
@@ -53,12 +53,23 @@ net.eval()
 print('Testing...')
 true_labels, predictions = function.predicted_fewshot_1shot(test_dataloader, net, args.device)
 
-# Calculate metrics
-accuracy = accuracy_score(true_labels, predictions)
-conf_matrix = confusion_matrix(true_labels, predictions)
+# Calculate detailed metrics
+accuracy, f1_score, recall, precision = function.cal_metrics_1shot(test_dataloader, net, args.device, args.way_num)
 
 print(f'\nAccuracy: {accuracy:.4f}')
-print(f'\nConfusion Matrix:\n{conf_matrix}')
-print(f'\nClassification Report:\n{classification_report(true_labels, predictions)}')
+print(f'Precision: {precision:.4f}')
+print(f'Recall: {recall:.4f}')
+print(f'F1-Score: {f1_score:.4f}')
+
+# Plot confusion matrix
+print('\nPlotting Confusion Matrix...')
+function.plot_confusion_matrix(true_labels, predictions, 
+                              save_path='checkpoints/confusion_matrix_1shot.png')
+
+# Plot t-SNE
+print('\nPlotting t-SNE...')
+features, labels = function.get_features_for_tsne(test_dataloader, net, args.device)
+function.plot_tsne(features, labels, 
+                  save_path='checkpoints/tsne_1shot.png')
 
 torch.cuda.empty_cache()

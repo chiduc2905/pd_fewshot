@@ -19,18 +19,19 @@ class CovarianceNet(nn.Module):
     def forward(self, query, support):
         # query: (way, C, H, W)
         # support: (way, shot, C, H, W)
-        q_feat = self.encoder(query.unsqueeze(0))
-        q_feat = q_feat.view(q_feat.size(0), -1)
-        q_feat = self.fc(q_feat)
+        q_feat = self.encoder(query)  # (way, 128, 1, 1)
+        q_feat = q_feat.view(q_feat.size(0), -1)  # (way, 128)
+        q_feat = self.fc(q_feat)  # (way, 64)
         
         support_feats = []
-        for s in support:
-            s_feat = self.encoder(s)
-            s_feat = s_feat.view(s_feat.size(0), -1)
-            s_feat = self.fc(s_feat)
-            support_feats.append(s_feat.mean(0, keepdim=True))
+        for i, s in enumerate(support):
+            # s shape: (shot, C, H, W)
+            s_feat = self.encoder(s)  # (shot, 128, 1, 1)
+            s_feat = s_feat.view(s_feat.size(0), -1)  # (shot, 128)
+            s_feat = self.fc(s_feat)  # (shot, 64)
+            support_feats.append(s_feat.mean(0, keepdim=True))  # (1, 64)
         
-        support_feats = torch.cat(support_feats, dim=0)
+        support_feats = torch.cat(support_feats, dim=0)  # (way, 64)
         
         # Compute similarity scores
         scores = torch.nn.functional.cosine_similarity(q_feat, support_feats)

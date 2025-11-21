@@ -19,24 +19,22 @@ class FewshotDataset(Dataset):
         support_images = []
         support_targets = []
 
-        label_indices = torch.randperm(len(self.train_label)).cuda()
-        train_label_gpu = self.train_label.cuda()
-        train_data_gpu = self.train_data.cuda()
-
+        label_indices = torch.randperm(len(self.train_label))
+        
         for label_num in range(self.way_num):
-            support_idxs = torch.nonzero(train_label_gpu[label_indices] == label_num, as_tuple=False).flatten()
+            support_idxs = torch.where(self.train_label[label_indices] == label_num)[0]
             support_idxs = support_idxs[:self.shot_num]
-            support_data = train_data_gpu[label_indices][support_idxs]
+            support_data = self.train_data[label_indices[support_idxs]]
 
-            query_idxs = torch.nonzero(train_label_gpu[label_indices] == label_num, as_tuple=False).flatten()
+            query_idxs = torch.where(self.train_label[label_indices] == label_num)[0]
             query_idxs = query_idxs[~torch.isin(query_idxs, support_idxs)][:self.query_num]
-            query_data = train_data_gpu[label_indices][query_idxs]
-            query_data_targets = train_label_gpu[label_indices][query_idxs]
+            query_data = self.train_data[label_indices[query_idxs]]
+            query_data_targets = self.train_label[label_indices[query_idxs]]
 
             query_images.append(query_data)
             query_targets.append(query_data_targets)
             support_images.append(support_data)
-            support_targets.append(torch.full((self.shot_num,), label_num).cuda())
+            support_targets.append(torch.full((self.shot_num,), label_num))
 
         query_images = torch.cat(query_images, dim=0)
         query_targets = torch.cat(query_targets, dim=0)

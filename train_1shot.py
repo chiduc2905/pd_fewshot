@@ -18,7 +18,7 @@ from sklearn.metrics import confusion_matrix
 
 parser = argparse.ArgumentParser(description='PD Scalogram Fewshot Configuration')
 parser.add_argument('--seed', type=int, default=42, help='Seed for reproducibility')
-parser.add_argument('--dataset_path', type=str, default='../ML/scalogram_images/', help='Path to scalogram dataset')
+parser.add_argument('--dataset_path', type=str, default='./scalogram_images/', help='Path to scalogram dataset')
 parser.add_argument('--training_samples', type=int, default=100, help='Number of training samples')
 parser.add_argument('--model_name', type=str, default='pd_scalogram', help='Model name')
 parser.add_argument('--episode_num_train', type=int, default=100, help='Number of training episodes')
@@ -47,14 +47,30 @@ print(f'Train samples: {len(data.X_train)}, Test samples: {len(data.X_test)}')
 data.X_train = data.X_train.astype(np.float32)
 data.X_test = data.X_test.astype(np.float32)
 
+# Ensure data has correct shape (N, H, W, C)
+print(f'Raw X_train shape: {data.X_train.shape}')
+print(f'Raw X_test shape: {data.X_test.shape}')
+
 train_data = torch.from_numpy(data.X_train)
 train_label = torch.from_numpy(data.y_train)
 test_data = torch.from_numpy(data.X_test)
 test_label = torch.from_numpy(data.y_test)
 
+print(f'Tensor X_train shape before permute: {train_data.shape}')
+print(f'Tensor X_test shape before permute: {test_data.shape}')
+
 # Reshape: (N, H, W, C) -> (N, C, H, W)
-train_data = train_data.permute(0, 3, 1, 2)
-test_data = test_data.permute(0, 3, 1, 2)
+if len(train_data.shape) == 4:
+    train_data = train_data.permute(0, 3, 1, 2)
+else:
+    print(f'Error: train_data has unexpected shape {train_data.shape}')
+    raise ValueError(f'Expected 4D tensor (N, H, W, C), got shape {train_data.shape}')
+
+if len(test_data.shape) == 4:
+    test_data = test_data.permute(0, 3, 1, 2)
+else:
+    print(f'Error: test_data has unexpected shape {test_data.shape}')
+    raise ValueError(f'Expected 4D tensor (N, H, W, C), got shape {test_data.shape}')
 
 print(f'Train data shape: {train_data.shape}')
 print(f'Test data shape: {test_data.shape}')

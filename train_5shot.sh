@@ -1,6 +1,6 @@
 #!/bin/bash
 python train_5shot.py \
-    --dataset_path ../ML/scalogram_images/ \
+    --dataset_path ./scalogram_images/ \
     --model_name pd_scalogram \
     --episode_num_train 100 \
     --episode_num_test 75 \

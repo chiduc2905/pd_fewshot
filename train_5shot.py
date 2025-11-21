@@ -17,7 +17,7 @@ from net.pam_mamba import CovarianceNet
 
 parser = argparse.ArgumentParser(description='PD Scalogram 5-shot Configuration')
 parser.add_argument('--seed', type=int, default=42, help='Seed for reproducibility')
-parser.add_argument('--dataset_path', type=str, default='../ML/scalogram_images/', help='Path to scalogram dataset')
+parser.add_argument('--dataset_path', type=str, default='./scalogram_images/', help='Path to scalogram dataset')
 parser.add_argument('--training_samples', type=int, default=100, help='Number of training samples')
 parser.add_argument('--model_name', type=str, default='pd_scalogram', help='Model name')
 parser.add_argument('--episode_num_train', type=int, default=100, help='Number of training episodes')

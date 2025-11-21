@@ -13,6 +13,10 @@ class_idx = {
 class PDScalogram:
     def __init__(self, data_path):
         self.data_path = data_path
+        # Normalize path: handle relative and absolute paths
+        if not os.path.isabs(data_path):
+            self.data_path = os.path.abspath(data_path)
+        
         self.classes = sorted(list(class_idx.keys()), key=lambda c: class_idx[c])
         self.nclasses = len(self.classes)
         
@@ -21,6 +25,7 @@ class PDScalogram:
         self.X_test = []
         self.y_test = []
         
+        print(f'Using dataset path: {self.data_path}')
         self._load_data()
         self._shuffle()
         
@@ -29,7 +34,9 @@ class PDScalogram:
         
         for class_name in self.classes:
             class_path = os.path.join(self.data_path, class_name)
+            print(f'Checking class path: {class_path}, exists: {os.path.isdir(class_path)}')
             if not os.path.isdir(class_path):
+                print(f'Warning: Class path not found: {class_path}')
                 continue
                 
             class_label = class_idx[class_name]
