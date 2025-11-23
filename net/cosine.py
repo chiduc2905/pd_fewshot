@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 
-class CovarianceNet(nn.Module):
+class CosineNet(nn.Module):
     def __init__(self):
-        super(CovarianceNet, self).__init__()
+        super(CosineNet, self).__init__()
         # Placeholder - Replace with actual pam_mamba architecture
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),

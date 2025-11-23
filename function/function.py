@@ -5,7 +5,7 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tsnecuda import TSNE
+# from tsnecuda import TSNE
 from sklearn.metrics import confusion_matrix
 
 def seed_func():
