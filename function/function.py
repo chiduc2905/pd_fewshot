@@ -44,7 +44,9 @@ def plot_confusion_matrix(true_labels, predictions, num_classes=3, save_path=Non
     
     # Calculate percentages
     row_sums = conf_matrix.sum(axis=1)[:, np.newaxis]
-    conf_matrix_percent = conf_matrix.astype('float') / (row_sums + 1e-6) * 100
+    # Avoid division by zero
+    row_sums[row_sums == 0] = 1
+    conf_matrix_percent = conf_matrix.astype('float') / row_sums * 100
     
     # Create figure
     fig, ax = plt.subplots(figsize=(8, 7))
@@ -80,3 +82,55 @@ def plot_confusion_matrix(true_labels, predictions, num_classes=3, save_path=Non
         print(f'Confusion matrix saved to: {save_path}')
     plt.close()
 
+def plot_tsne(features, labels, num_classes=3, save_path=None):
+    """
+    Plot t-SNE visualization of features.
+    
+    Requirements:
+    - Use seaborn or matplotlib
+    - Each class gets a different color
+    - Scatter points, round shape, size ~30-40
+    - Slight transparency (alpha approx 0.7)
+    - White background
+    - No grid
+    """
+    # Run t-SNE
+    n_samples = len(features)
+    # Perplexity must be less than n_samples
+    perp = min(30, n_samples - 1) if n_samples > 1 else 1
+    
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perp, n_iter=1000)
+    features_embedded = tsne.fit_transform(features)
+    
+    # Setup plot
+    plt.figure(figsize=(10, 8))
+    sns.set_style("white")  # White background, no grid
+    
+    # Create scatter plot
+    # Using seaborn scatterplot for easy legend and hue handling
+    scatter = sns.scatterplot(
+        x=features_embedded[:, 0],
+        y=features_embedded[:, 1],
+        hue=labels,
+        palette=sns.color_palette("bright", n_colors=num_classes),
+        style=labels,      # Optional: different markers for classes if desired, but user asked for round shape
+        markers=['o'] * num_classes, # Ensure all are round
+        s=40,              # Size 30-40
+        alpha=0.7,         # Transparency 0.7
+        legend='full'
+    )
+    
+    # Remove grid and spines if needed (sns.set_style("white") handles most, but ensuring)
+    sns.despine()
+    plt.grid(False)
+    
+    plt.title("t-SNE Visualization", fontsize=15)
+    plt.xlabel("Dimension 1", fontsize=12)
+    plt.ylabel("Dimension 2", fontsize=12)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f't-SNE plot saved to: {save_path}')
+    plt.close()

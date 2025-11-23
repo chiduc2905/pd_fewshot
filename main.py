@@ -13,7 +13,7 @@ from sklearn.metrics import precision_recall_fscore_support
 # Local imports
 from dataset import PDScalogram
 from dataloader.dataloader import FewshotDataset
-from function.function import ContrastiveLoss, seed_func, plot_confusion_matrix
+from function.function import ContrastiveLoss, seed_func, plot_confusion_matrix, plot_tsne
 
 # Models
 from net.cosine import CosineNet
@@ -151,9 +151,11 @@ def calculate_p_value(acc, baseline=0.33, n=75):
     if n <= 0: return 1.0
     p = acc
     p0 = baseline
-    if p * (1 - p) == 0: return 0.0
+    # Removed the check for p*(1-p)==0 to allow calculation even if accuracy is 1.0 or 0.0
+    # The standard error uses p0 (null hypothesis), not p.
     z = (p - p0) / np.sqrt(p0 * (1 - p0) / n)
-    # Two-tailed p-value from z-score (simplified)
+    
+    # Two-tailed p-value from z-score
     from scipy.stats import norm
     # Use survival function (sf = 1 - cdf) for better precision with small p-values
     p_value = 2 * norm.sf(abs(z))
@@ -164,6 +166,7 @@ def test_full(net, loader, args):
     
     all_preds = []
     all_targets = []
+    all_features = []
     
     device = args.device
     net.eval()
@@ -187,6 +190,21 @@ def test_full(net, loader, args):
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
             
+            # Extract Features
+            q_flat = q.view(-1, C, H, W)
+            if hasattr(net, 'encoder'):
+                feat = net.encoder(q_flat)
+            elif hasattr(net, 'features'):
+                feat = net.features(q_flat)
+            else:
+                feat = None
+            
+            if feat is not None:
+                 if feat.dim() > 2:
+                     feat = nn.functional.adaptive_avg_pool2d(feat, (1, 1))
+                     feat = feat.view(feat.size(0), -1)
+                 all_features.append(feat.cpu().numpy())
+                 
     final_acc = total_correct / total_samples
     
     # Calculate Metrics: Precision, Recall, F1
@@ -234,6 +252,18 @@ def test_full(net, loader, args):
         plot_confusion_matrix(all_targets, all_preds, num_classes=args.way_num, save_path=save_path_cm)
     except Exception as e:
         print(f"Skipping confusion matrix: {e}")
+    
+    # t-SNE
+    if all_features:
+        all_features = np.vstack(all_features)
+        all_targets_arr = np.array(all_targets)
+        save_path_tsne = os.path.join(res_dir, f"tsne_{args.model}_{args.shot_num}shot.png")
+        try:
+            # Use only a subset if points > 2000 for speed, or full set for accuracy
+            plot_tsne(all_features, all_targets_arr, num_classes=args.way_num, save_path=save_path_tsne)
+        except Exception as e:
+            print(f"Skipping t-SNE: {e}")
+
 
 
 def main():
