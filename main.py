@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument('--query_num', type=int, default=1, help='Number of query samples per class')
     
     # Training settings
-    parser.add_argument('--training_samples', type=int, default=None, help='Number of training samples per class (e.g. 30, 60). If None, use all.')
+    parser.add_argument('--training_samples', type=int, default=None, help='Total number of training samples across ALL classes (e.g. 30, 60). If None, use all.')
     parser.add_argument('--episode_num_train', type=int, default=100, help='Number of episodes per epoch (train)')
     parser.add_argument('--episode_num_test', type=int, default=75, help='Number of episodes per epoch (test)')
     parser.add_argument('--num_epochs', type=int, default=100, help='Total training epochs')
@@ -273,7 +273,8 @@ def main():
         os.makedirs(args.path_results)
         
     print("Loading Dataset...")
-    dataset = PDScalogram(args.dataset_path, samples_per_class=args.training_samples)
+    # Pass total_training_samples constraint to dataset loader
+    dataset = PDScalogram(args.dataset_path, total_training_samples=args.training_samples)
     
     def prep_data(X, y):
         X = torch.from_numpy(X.astype(np.float32))

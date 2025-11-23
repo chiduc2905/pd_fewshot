@@ -11,15 +11,16 @@ class_idx = {
 }
 
 class PDScalogram:
-    def __init__(self, data_path, samples_per_class=None):
+    def __init__(self, data_path, total_training_samples=None):
         """
         Args:
             data_path: Path to dataset
-            samples_per_class: If set (e.g. 30, 60), strictly limit training samples per class.
-                               If None, use all available training data.
+            total_training_samples: If set (e.g. 30, 60), this is the TOTAL number of training samples 
+                                    across all classes. They will be distributed evenly among classes.
+                                    If None, use all available training data.
         """
         self.data_path = data_path
-        self.samples_per_class = samples_per_class
+        self.total_training_samples = total_training_samples
         
         # Normalize path: handle relative and absolute paths
         if not os.path.isabs(data_path):
@@ -39,6 +40,12 @@ class PDScalogram:
     def _load_data(self):
         # Fixed test set size: 75 samples per class
         TEST_SAMPLES_PER_CLASS = 75
+        
+        # Determine samples per class for training if a total limit is set
+        samples_per_class_train = None
+        if self.total_training_samples is not None:
+            samples_per_class_train = self.total_training_samples // self.nclasses
+            print(f"Limiting training data: {self.total_training_samples} total -> ~{samples_per_class_train} per class")
         
         for class_name in self.classes:
             class_path = os.path.join(self.data_path, class_name)
@@ -63,12 +70,12 @@ class PDScalogram:
                 test_files = image_files[:TEST_SAMPLES_PER_CLASS]
                 train_files = image_files[TEST_SAMPLES_PER_CLASS:]
             
-            # Limit training samples if requested (e.g. 30, 60)
-            if self.samples_per_class is not None:
-                if len(train_files) > self.samples_per_class:
-                    train_files = train_files[:self.samples_per_class]
+            # Limit training samples based on calculated per-class limit
+            if samples_per_class_train is not None:
+                if len(train_files) > samples_per_class_train:
+                    train_files = train_files[:samples_per_class_train]
                 else:
-                     print(f"Warning: Requested {self.samples_per_class} training samples for {class_name}, but only {len(train_files)} available.")
+                     print(f"Warning: Class {class_name} only has {len(train_files)} training samples, fewer than requested {samples_per_class_train}.")
 
             # Load Train
             for fname in train_files:
@@ -93,7 +100,7 @@ class PDScalogram:
         
         print(f"Data loaded: Train: {len(self.X_train)} (Total), Test: {len(self.X_test)} (Total)")
         
-        # Balance Check (Optional, but good for logging)
+        # Balance Check
         unique, counts = np.unique(self.y_train, return_counts=True)
         print(f"Training Class Distribution: {dict(zip(unique, counts))}")
 
