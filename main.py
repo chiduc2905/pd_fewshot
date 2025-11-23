@@ -13,7 +13,7 @@ from sklearn.metrics import precision_recall_fscore_support
 # Local imports
 from dataset import PDScalogram
 from dataloader.dataloader import FewshotDataset
-from function.function import ContrastiveLoss, seed_func, plot_confusion_matrix
+from function.function import ContrastiveLoss, seed_func, plot_confusion_matrix, plot_tsne
 
 # Models
 from net.cosine import CosineNet
@@ -243,8 +243,24 @@ def test_full(net, loader, args):
     print(f"Results saved to {res_file}")
 
     # Plotting
+    # Confusion Matrix
     save_path_cm = os.path.join(res_dir, f"confusion_matrix_{args.model}_{args.shot_num}shot.png")
-    plot_confusion_matrix(all_targets, all_preds, num_classes=args.way_num, save_path=save_path_cm)
+    try:
+        plot_confusion_matrix(all_targets, all_preds, num_classes=args.way_num, save_path=save_path_cm)
+    except Exception as e:
+        print(f"Skipping confusion matrix: {e}")
+    
+    # t-SNE
+    if all_features:
+        all_features = np.vstack(all_features)
+        all_targets_arr = np.array(all_targets)
+        save_path_tsne = os.path.join(res_dir, f"tsne_{args.model}_{args.shot_num}shot.png")
+        try:
+            # Use only a subset if points > 2000 for speed, or full set for accuracy
+            # Warning: t-SNE on small dataset (225 points) is unstable but will run.
+            plot_tsne(all_features, all_targets_arr, num_classes=args.way_num, save_path=save_path_tsne)
+        except Exception as e:
+            print(f"Skipping t-SNE: {e}")
 
 def main():
     args = get_args()
