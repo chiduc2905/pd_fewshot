@@ -1,0 +1,8 @@
+Model: cosine
+Shot: 1
+Training Samples: None
+Accuracy: 0.9864
+Precision: 0.9868
+Recall: 0.9860
+F1-Score: 0.9863
+p-value: 0.0000e+00

@@ -6,7 +6,7 @@ from net.cova_block import CovaBlock
 from net.utils import init_weights
 
 class CovarianceNet(nn.Module):
-    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, init_type='normal', use_gpu=True, input_size=224):
+    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, init_type='normal', use_gpu=True, input_size=64):
         super(CovarianceNet, self).__init__()
         
         if type(norm_layer) == str:

@@ -35,29 +35,60 @@ class PDScalogram:
         self.X_test = []
         self.y_test = []
         
-        # Define Normalization Transform with Resize
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+        # Initial transform (without normalization) to compute mean/std
+        self.resize_transform = transforms.Compose([
+            transforms.Resize((64, 64)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
         ])
+        
+        # Will be set after computing dataset statistics
+        self.transform = None
+        self.mean = None
+        self.std = None
 
         print(f'Using dataset path: {self.data_path}')
+        self._compute_mean_std()
         self._load_data()
         self._shuffle()
+    
+    def _compute_mean_std(self):
+        """Compute mean and std from all images in the dataset."""
+        print("Computing dataset mean and std...")
+        all_pixels = []
+        
+        for class_name in class_idx.keys():
+            class_path = os.path.join(self.data_path, class_name)
+            if not os.path.exists(class_path):
+                continue
+            
+            files = [f for f in os.listdir(class_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            
+            for fname in files:
+                fpath = os.path.join(class_path, fname)
+                img = Image.open(fpath).convert('RGB')
+                img_tensor = self.resize_transform(img)  # (3, H, W)
+                all_pixels.append(img_tensor)
+        
+        # Stack all images: (N, 3, H, W)
+        all_images = np.stack([t.numpy() for t in all_pixels], axis=0)
+        
+        # Compute mean and std per channel
+        self.mean = all_images.mean(axis=(0, 2, 3)).tolist()  # [mean_R, mean_G, mean_B]
+        self.std = all_images.std(axis=(0, 2, 3)).tolist()    # [std_R, std_G, std_B]
+        
+        print(f"Dataset mean: {self.mean}")
+        print(f"Dataset std: {self.std}")
+        
+        # Define final transform with computed normalization
+        self.transform = transforms.Compose([
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=self.mean, std=self.std)
+        ])
         
     def _load_data(self):
-        # Fixed test set size: 75 samples per class
-        samples_per_class_test = 75
+        # Dataset split: 70% train, 30% test
         
-        # Calculate training samples per class
-        samples_per_class_train = None
-        if self.total_training_samples is not None:
-            samples_per_class_train = self.total_training_samples // self.nclasses
-            print(f"Limiting training data: {samples_per_class_train} samples per class "
-                  f"(Total: {self.total_training_samples})")
-            
         for class_name, class_label in class_idx.items():
             class_path = os.path.join(self.data_path, class_name)
             if not os.path.exists(class_path):
@@ -66,39 +97,33 @@ class PDScalogram:
                 
             files = sorted([f for f in os.listdir(class_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
             
-            # Ensure we have enough files
-            total_needed = samples_per_class_test
-            if samples_per_class_train is not None:
-                total_needed += samples_per_class_train
-                
-            if len(files) < total_needed:
-                 print(f"Warning: Class {class_name} has {len(files)} images, but need {total_needed}.")
+            if len(files) == 0:
+                print(f"Warning: Class {class_name} has no images.")
+                continue
             
-            # For reproducibility, we should shuffle or sort. 
-            # We sorted above. Now we can shuffle with a fixed seed if we want consistent splits,
-            # or just take the first N. Let's assume the files are randomized enough or we just take sorted.
-            # To be safe and consistent with "training samples" selection, let's shuffle files locally with seed 42 first.
+            # Shuffle files with fixed seed for reproducibility
             random.Random(42).shuffle(files)
             
-            # Split Test / Train
-            # Strategy: Take Test set first (fixed 75), then Train set
-            test_files = files[:samples_per_class_test]
-            remaining_files = files[samples_per_class_test:]
+            # Calculate split sizes (70% train, 30% test)
+            total_files = len(files)
+            train_size = int(total_files * 0.7)
+            # Remaining goes to test
             
-            if samples_per_class_train is None:
-                train_files = remaining_files
-            else:
-                if len(remaining_files) >= samples_per_class_train:
-                    train_files = remaining_files[:samples_per_class_train]
-                else:
-                     print(f"Warning: Class {class_name} only has {len(train_files)} training samples, fewer than requested {samples_per_class_train}.")
-                     train_files = remaining_files
-
+            # Apply training_samples limit if specified
+            if self.total_training_samples is not None:
+                samples_per_class_train = self.total_training_samples // self.nclasses
+                train_size = min(train_size, samples_per_class_train)
+                print(f"Limiting training data: {samples_per_class_train} samples per class "
+                      f"(Total: {self.total_training_samples})")
+            
+            # Split files
+            train_files = files[:train_size]
+            test_files = files[train_size:]
+            
             # Load Train
             for fname in train_files:
                 fpath = os.path.join(class_path, fname)
                 img = Image.open(fpath).convert('RGB')
-                # self.transform handles Resize, ToTensor and Normalize
                 img_tensor = self.transform(img)
                 self.X_train.append(img_tensor.numpy())
                 self.y_train.append(class_label)
@@ -119,8 +144,10 @@ class PDScalogram:
         print(f"Data loaded: Train: {len(self.X_train)} (Total), Test: {len(self.X_test)} (Total)")
         
         # Balance Check
-        unique, counts = np.unique(self.y_train, return_counts=True)
-        print(f"Training Class Distribution: {dict(zip(unique, counts))}")
+        unique_train, counts_train = np.unique(self.y_train, return_counts=True)
+        unique_test, counts_test = np.unique(self.y_test, return_counts=True)
+        print(f"Training Class Distribution: {dict(zip(unique_train, counts_train))}")
+        print(f"Test Class Distribution: {dict(zip(unique_test, counts_test))}")
 
     def _shuffle(self):
         # shuffle training samples

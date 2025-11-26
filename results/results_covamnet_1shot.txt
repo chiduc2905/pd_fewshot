@@ -1,7 +1,0 @@
-Model: covamnet
-Shot: 1
-Accuracy: 0.6356
-Precision: 0.6198
-Recall: 0.6356
-F1-Score: 0.5897
-p-value: 0.0000e+00

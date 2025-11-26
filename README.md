@@ -59,9 +59,18 @@ python main.py --model covamnet --shot_num 1 --mode test --weights checkpoints/m
 
 - `--dataset_path`: Path to the image dataset (default: `./scalogram_images/`).
 - `--way_num`: Number of classes per episode (default: 3).
-- `--episode_num_train`: Number of episodes per epoch during training.
-- `--num_epochs`: Total number of training epochs.
+- `--shot_num`: Number of support samples per class (1 or 5).
+- `--query_num`: Number of query samples per class. Default: 19 for 1-shot, 15 for 5-shot.
+- `--episode_num_train`: Number of episodes per epoch during training. Default: 1000 for 1-shot, 600 for 5-shot.
+- `--num_epochs`: Total number of training epochs. Default: 100 for 1-shot, 50 for 5-shot (use early stopping).
 - `--device`: `cuda` or `cpu`.
+
+### Dataset Configuration
+
+- Dataset split: **70% train / 15% validation / 15% test**
+- N-way K-shot setup:
+  - **1-shot**: N=3, K=1, Q=19 (episodes/epoch=1000, epochs=100-300)
+  - **5-shot**: N=3, K=5, Q=15 (episodes/epoch=600, epochs=50-200)
 
 ## Results
 

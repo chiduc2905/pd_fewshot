@@ -1,0 +1,5 @@
+Model	Shot	Accuracy	Precision	Recall	F1	p-value
+cosine	1	0.9864	0.9868	0.9860	0.9863	0.0000e+00
+cosine	5	1.0000	1.0000	1.0000	1.0000	0.0000e+00
+protonet	1	0.9897	0.9902	0.9894	0.9896	0.0000e+00
+covamnet	1	0.7229	0.7206	0.7212	0.7172	0.0000e+00

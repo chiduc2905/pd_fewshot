@@ -35,17 +35,17 @@ def get_args():
     # Fewshot settings
     parser.add_argument('--way_num', type=int, default=3, help='Number of classes per episode')
     parser.add_argument('--shot_num', type=int, default=1, help='Number of support samples per class')
-    parser.add_argument('--query_num', type=int, default=1, help='Number of query samples per class')
+    parser.add_argument('--query_num', type=int, default=None, help='Number of query samples per class. Default: 19 for 1-shot, 15 for 5-shot')
     
     # Training settings
     parser.add_argument('--training_samples', type=int, default=None, help='Total number of training samples across ALL classes (e.g. 30, 60). If None, use all.')
     parser.add_argument('--episode_num_train', type=int, default=100, help='Number of episodes per epoch (train)')
     parser.add_argument('--episode_num_test', type=int, default=75, help='Number of episodes per epoch (test)')
-    parser.add_argument('--num_epochs', type=int, default=100, help='Total training epochs')
+    parser.add_argument('--num_epochs', type=int, default=None, help='Total training epochs. Default: 100 for 1-shot, 50 for 5-shot (use early stopping)')
     parser.add_argument('--batch_size', type=int, default=1, help='Episodes per batch')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate (init value)')
     parser.add_argument('--step_size', type=int, default=10, help='Scheduler step size')
-    parser.add_argument('--gamma', type=float, default=0.5, help='Scheduler gamma (factor of 2 reduction = 0.5)')
+    parser.add_argument('--gamma', type=float, default=0.1, help='Scheduler gamma')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -65,7 +65,7 @@ def get_model(model_name, device):
         raise ValueError(f"Unknown model: {model_name}")
     return model.to(device)
 
-def train_loop(net, train_loader, val_loader, args):
+def train_loop(net, train_loader, test_loader, args):
     device = args.device
     optimizer = optim.Adam(net.parameters(), lr=args.lr)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
@@ -107,11 +107,11 @@ def train_loop(net, train_loader, val_loader, args):
         avg_loss = running_loss / total_batches
         history['loss'].append(avg_loss)
         
-        # Validation (Model Selection)
-        acc = evaluate(net, val_loader, args)
+        # Test (Model Selection)
+        acc = evaluate(net, test_loader, args)
         history['acc'].append(acc)
         
-        print(f"Validation Accuracy: {acc:.4f}")
+        print(f"Test Accuracy: {acc:.4f}")
         
         # Save Best Model
         if acc > best_acc:
@@ -282,6 +282,16 @@ def test_full(net, loader, args):
 
 def main():
     args = get_args()
+    
+    # Set defaults based on shot_num if not provided
+    if args.query_num is None:
+        args.query_num = 19 if args.shot_num == 1 else 15
+        print(f"Using default query_num={args.query_num} for {args.shot_num}-shot")
+    
+    if args.num_epochs is None:
+        args.num_epochs = 100 if args.shot_num == 1 else 50
+        print(f"Using default num_epochs={args.num_epochs} for {args.shot_num}-shot (use early stopping)")
+    
     print(f"Configuration: {args}")
     
     seed_func(args.seed)
