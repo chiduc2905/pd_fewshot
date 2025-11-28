@@ -36,12 +36,12 @@ Input (3×64×64) → Conv64F_Encoder (64×16×16) → Model Head → Scores (wa
 
 ### Training
 ```
-Train Data → FewshotDataset → Episodes (K-shot, 15-query) → Model → Loss
+Train Data → FewshotDataset → 100 episodes (K-shot, 1-query) → Model → Loss
 ```
 
 ### Validation (Model Selection)
 ```
-Val Data → 75 episodes × 1-query/class → Accuracy → Save Best
+Val Data → 75 episodes × K-shot × 1-query/class → Accuracy → Save Best
 ```
 
 ### Final Test

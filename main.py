@@ -39,7 +39,7 @@ def get_args():
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=15, help='Queries per class (training)')
+    parser.add_argument('--query_num', type=int, default=1, help='Queries per class per episode')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
@@ -298,11 +298,10 @@ def main():
         train_y = torch.cat(y_list)
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
-    # Create data loaders
+    # Create data loaders (all use 1 query per class)
     train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                              args.way_num, args.shot_num, args.query_num, args.seed)
+                              args.way_num, args.shot_num, 1, args.seed)
     
-    # Validation: 1 query per class (same as final test)
     val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
                             args.way_num, args.shot_num, 1, args.seed)
     

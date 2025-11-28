@@ -33,23 +33,25 @@ python main.py --model covamnet --shot_num 1 --mode test
 | `--model` | covamnet | Model: cosine, protonet, covamnet |
 | `--way_num` | 3 | Classes per episode |
 | `--shot_num` | 1 | Support samples per class |
-| `--query_num` | 15 | Query samples per class (training) |
+| `--query_num` | 1 | Query samples per class |
 | `--training_samples` | all | Total training samples (e.g., 30=10/class) |
 | `--num_epochs` | 100/70 | Training epochs (1-shot/5-shot) |
 | `--lr` | 1e-3 | Learning rate |
 
 ## Evaluation Protocol
 
-### Training Phase
-- Episodes: 100/epoch
-- Support: K-shot per class
-- Query: 15 per class
-- Validation: 75 episodes, 1 query/class
+### All Phases (Train/Val/Test)
+- **Query**: 1 per class per episode
+- **Support**: K-shot per class
 
-### Final Test Phase
-- **150 episodes**
-- **1-shot, 1-query per class**
-- Total predictions: 450 (150 × 3 classes)
+| Phase | Episodes | Total Predictions |
+|-------|----------|-------------------|
+| Training | 100/epoch | 300 (100 × 3) |
+| Validation | 75 | 225 (75 × 3) |
+| Final Test | 150 | 450 (150 × 3) |
+
+### Final Test Metrics
+- Accuracy, Precision, Recall, F1, p-value
 - Confusion matrix: each row sums to 150
 
 ## Dataset
