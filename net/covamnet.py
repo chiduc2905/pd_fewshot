@@ -10,14 +10,14 @@ from net.utils import init_weights
 class CovarianceNet(nn.Module):
     """Few-shot classifier using covariance-based similarity."""
     
-    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, init_type='normal', use_gpu=True, input_size=64):
+    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, init_type='normal', use_gpu=True, input_size=64, use_classifier=False):
         super(CovarianceNet, self).__init__()
-        
+
         if type(norm_layer) == str:
              norm_layer = get_norm_layer(norm_layer)
         elif norm_layer is None:
              norm_layer = nn.BatchNorm2d
-             
+
         # Check norm_layer to decide bias
         if type(norm_layer) == functools.partial:
             use_bias = norm_layer.func == nn.InstanceNorm2d
@@ -26,18 +26,20 @@ class CovarianceNet(nn.Module):
 
         self.features = Conv64F_Encoder(norm_layer=norm_layer)
         self.covariance = CovaBlock()
-        
+
         # Feature map size: input_size / 4 (2 max-pool layers)
         self.feature_h = input_size // 4
         self.feature_w = input_size // 4
         kernel_size = self.feature_h * self.feature_w
-        
-        # Learnable classifier
-        self.classifier = nn.Sequential(
-            nn.LeakyReLU(0.2, True),
-            nn.Dropout(),
-            nn.Conv1d(1, 1, kernel_size=kernel_size, stride=kernel_size, bias=use_bias),
-        )
+
+        # Learnable classifier (optional)
+        self.use_classifier = use_classifier
+        if use_classifier:
+            self.classifier = nn.Sequential(
+                nn.LeakyReLU(0.2, True),
+                nn.Dropout(),
+                nn.Conv1d(1, 1, kernel_size=kernel_size, stride=kernel_size, bias=use_bias),
+            )
         
         init_weights(self, init_type=init_type)
         if use_gpu and torch.cuda.is_available():
@@ -71,10 +73,17 @@ class CovarianceNet(nn.Module):
             
             # Compute covariance similarity
             x1 = self.covariance(q_feat, s_feats)
-            
-            # Apply classifier
-            x1 = self.classifier(x1.view(x1.size(0), 1, -1))
-            output = x1.squeeze(1)
+
+            # Apply classifier if enabled, otherwise use raw similarity scores
+            if self.use_classifier:
+                x1 = self.classifier(x1.view(x1.size(0), 1, -1))
+                output = x1.squeeze(1)
+            else:
+                # Global average pooling for similarity scores
+                # x1 shape: (B, Way * h * w), reshape to (B, Way, h * w) then average over spatial dims
+                B, total_features = x1.shape
+                spatial_features = total_features // Way
+                output = x1.view(B, Way, spatial_features).mean(dim=2)  # Average over spatial dimensions
             
             scores_list.append(output)
             

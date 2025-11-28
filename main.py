@@ -9,7 +9,7 @@ import time
 from tqdm import tqdm
 import os
 from torch.utils.data import DataLoader
-from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
 from dataset import PDScalogram
 from dataloader.dataloader import FewshotDataset
@@ -30,6 +30,7 @@ def get_args():
     
     # Model
     parser.add_argument('--model', type=str, default='covamnet', choices=['cosine', 'protonet', 'covamnet'], help='Model architecture')
+    parser.add_argument('--covamnet_classifier', action='store_true', help='Use learnable classifier in CovaMNet (default: False, use similarity scores only)')
     
     # Fewshot settings
     parser.add_argument('--way_num', type=int, default=3, help='Number of classes per episode')
@@ -53,14 +54,20 @@ def get_args():
     
     return parser.parse_args()
 
-def get_model(model_name, device):
+def get_classifier_suffix(args):
+    """Get classifier suffix for filenames when using CovaMNet."""
+    if args.model == 'covamnet':
+        return "_classifier" if args.covamnet_classifier else "_similarity"
+    return ""
+
+def get_model(model_name, device, use_classifier=None):
     """Initialize model by name."""
     if model_name == 'cosine':
         model = CosineNet(use_gpu=(device=='cuda'))
     elif model_name == 'protonet':
         model = ProtoNet(use_gpu=(device=='cuda'))
     elif model_name == 'covamnet':
-        model = CovaMNet(use_gpu=(device=='cuda'))
+        model = CovaMNet(use_classifier=use_classifier, use_gpu=(device=='cuda'))
     else:
         raise ValueError(f"Unknown model: {model_name}")
     return model.to(device)
@@ -117,7 +124,8 @@ def train_loop(net, train_loader, val_loader, args):
         # Save Best Model
         if acc > best_acc:
             best_acc = acc
-            save_name = f"{args.model}_{args.shot_num}shot_best.pth"
+            classifier_suffix = get_classifier_suffix(args)
+            save_name = f"{args.model}_{args.shot_num}shot{classifier_suffix}_best.pth"
             save_path = os.path.join(args.path_weights, save_name)
             torch.save(net.state_dict(), save_path)
             print(f"New best model saved to {save_path}")
@@ -161,9 +169,13 @@ def calculate_p_value(acc, baseline=0.33, n=75):
     p_value = 2 * norm.sf(abs(z))
     return p_value
 
-def test_full(net, loader, args, shot_num=None, query_num=None):
+def test_full(net, loader, args, shot_num=None, query_num=None, generate_plots=True):
     """Full evaluation with metrics, confusion matrix, and t-SNE.
-    
+
+    Args:
+        generate_plots: Whether to generate confusion matrix and t-SNE plots.
+                        Only True for final test phase (150 episodes, 1-query).
+
     For final test phase: 150 episodes, 1-shot/1-query per class.
     Confusion matrix: each row sums to 150 (one prediction per class per episode).
     t-SNE: visualizes all 150 * way_num query features.
@@ -173,7 +185,17 @@ def test_full(net, loader, args, shot_num=None, query_num=None):
     query_num = query_num if query_num is not None else args.query_num
     
     print(f"\n{'='*20} Testing: {args.model} ({shot_num}-shot, {query_num}-query) {'='*20}")
-    
+
+    # Calculate expected samples for debugging
+    if hasattr(args, 'episode_num_test'):
+        expected_episodes = args.episode_num_test
+    else:
+        # For final test, use 150 episodes
+        expected_episodes = 150
+
+    expected_total = expected_episodes * args.way_num * query_num
+    print(f"Expected: {expected_episodes} episodes × {args.way_num} classes × {query_num} queries = {expected_total} samples")
+
     all_preds = []
     all_targets = []
     all_features = []
@@ -217,9 +239,14 @@ def test_full(net, loader, args, shot_num=None, query_num=None):
                  
     final_acc = total_correct / total_samples
     
+    # Debug: Print actual sample counts
+    print(f"Actual results: {len(all_targets)} total samples, {len(set(all_targets))} unique classes")
+    cm = confusion_matrix(all_targets, all_preds)
+    print(f"Confusion matrix shape: {cm.shape}, sum per class: {cm.sum(axis=1)}")
+
     # Calculate Metrics: Precision, Recall, F1
     precision, recall, f1, support = precision_recall_fscore_support(all_targets, all_preds, average='macro')
-    
+
     # Calculate p-value (approximate, assuming random chance baseline = 1/num_classes)
     try:
         from scipy.stats import norm
@@ -245,7 +272,8 @@ def test_full(net, loader, args, shot_num=None, query_num=None):
         os.makedirs(res_dir)
         
     training_samples_str = f"_{args.training_samples}samples" if args.training_samples is not None else "_allsamples"
-    res_file = os.path.join(res_dir, f"results_{args.model}_{args.shot_num}shot{training_samples_str}.txt")
+    classifier_suffix = get_classifier_suffix(args)
+    res_file = os.path.join(res_dir, f"results_{args.model}_{args.shot_num}shot{classifier_suffix}{training_samples_str}.txt")
     
     # Save individual result
     with open(res_file, 'w') as f:
@@ -269,24 +297,30 @@ def test_full(net, loader, args, shot_num=None, query_num=None):
     print(f"Summary appended to {summary_file}")
 
 
-    # Plotting
-    # Confusion Matrix
-    save_path_cm = os.path.join(res_dir, f"confusion_matrix_{args.model}_{args.shot_num}shot{training_samples_str}.png")
-    try:
-        plot_confusion_matrix(all_targets, all_preds, num_classes=args.way_num, save_path=save_path_cm)
-    except Exception as e:
-        print(f"Skipping confusion matrix: {e}")
-    
-    # t-SNE
-    if all_features:
-        all_features = np.vstack(all_features)
-        all_targets_arr = np.array(all_targets)
-        save_path_tsne = os.path.join(res_dir, f"tsne_{args.model}_{args.shot_num}shot{training_samples_str}.png")
+    # Plotting (only for final test phase with 150 episodes)
+    if generate_plots:
+        # Confusion Matrix
+        classifier_suffix = get_classifier_suffix(args)
+        save_path_cm = os.path.join(res_dir, f"confusion_matrix_{args.model}_{args.shot_num}shot{classifier_suffix}{training_samples_str}.png")
         try:
-            # Use only a subset if points > 2000 for speed, or full set for accuracy
-            plot_tsne(all_features, all_targets_arr, num_classes=args.way_num, save_path=save_path_tsne)
+            plot_confusion_matrix(all_targets, all_preds, num_classes=args.way_num, save_path=save_path_cm)
         except Exception as e:
-            print(f"Skipping t-SNE: {e}")
+            print(f"Skipping confusion matrix: {e}")
+
+        # t-SNE
+        if all_features:
+            all_features = np.vstack(all_features)
+            all_targets_arr = np.array(all_targets)
+            save_path_tsne = os.path.join(res_dir, f"tsne_{args.model}_{args.shot_num}shot{classifier_suffix}{training_samples_str}.png")
+            try:
+                # Use only a subset if points > 2000 for speed, or full set for accuracy
+                plot_tsne(all_features, all_targets_arr, num_classes=args.way_num, save_path=save_path_tsne)
+            except Exception as e:
+                print(f"Skipping t-SNE: {e}")
+        else:
+            print("No features extracted for t-SNE")
+    else:
+        print("Skipping plots (not final test phase)")
 
 
 
@@ -296,11 +330,11 @@ def main():
     
     # Set defaults based on shot_num
     if args.query_num is None:
-        args.query_num = 19 if args.shot_num == 1 else 15
+        args.query_num = 15  # 15 queries per class for both 1-shot and 5-shot
         print(f"query_num={args.query_num} for {args.shot_num}-shot")
     
     if args.num_epochs is None:
-        args.num_epochs = 100 if args.shot_num == 1 else 50
+        args.num_epochs = 100 if args.shot_num == 1 else 70
         print(f"num_epochs={args.num_epochs} for {args.shot_num}-shot")
     
     print(f"Configuration: {args}")
@@ -371,18 +405,27 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
     
-    net = get_model(args.model, args.device)
+    net = get_model(args.model, args.device, use_classifier=args.covamnet_classifier if args.model == 'covamnet' else None)
     
     if args.mode == 'train':
         # Train with validation-based model selection
         train_loop(net, train_loader, val_loader, args)
         
         # Final Test Phase: evaluate best model on 150 one-shot episodes
-        best_path = os.path.join(args.path_weights, f"{args.model}_{args.shot_num}shot_best.pth")
+        classifier_suffix = get_classifier_suffix(args)
+        # Try new naming scheme first
+        best_path = os.path.join(args.path_weights, f"{args.model}_{args.shot_num}shot{classifier_suffix}_best.pth")
+        if not os.path.exists(best_path):
+            # Fallback to old naming scheme for backward compatibility
+            best_path = os.path.join(args.path_weights, f"{args.model}_{args.shot_num}shot_best.pth")
         if os.path.exists(best_path):
             print(f"Loading best model for final test evaluation: {best_path}")
-            net.load_state_dict(torch.load(best_path))
+            state_dict = torch.load(best_path)
+            # Use strict=False to handle classifier mode mismatches
+            net.load_state_dict(state_dict, strict=False)
+            print("Weights loaded successfully")
             # Create final test episodes: 150 episodes, 1-shot 1-query per class
+            print(f"Creating final test with: episode_num=150, way_num={args.way_num}, shot_num=1, query_num=1")
             final_test_ds = FewshotDataset(test_X, test_y,
                                            episode_num=150,
                                            way_num=args.way_num,
@@ -392,21 +435,33 @@ def main():
             final_test_loader = DataLoader(final_test_ds, batch_size=args.batch_size, shuffle=False)
             # Final test: 150 episodes × way_num queries = 450 total predictions
             # Confusion matrix rows sum to 150 (one query per class per episode)
-            test_full(net, final_test_loader, args, shot_num=1, query_num=1)
+            print(f"Final test dataset length: {len(final_test_ds)}")
+            test_full(net, final_test_loader, args, shot_num=1, query_num=1, generate_plots=True)
             
     elif args.mode == 'test':
         if args.weights is None:
-            best_path = os.path.join(args.path_weights, f"{args.model}_{args.shot_num}shot_best.pth")
+            classifier_suffix = get_classifier_suffix(args)
+            # Try new naming scheme first
+            best_path = os.path.join(args.path_weights, f"{args.model}_{args.shot_num}shot{classifier_suffix}_best.pth")
             if os.path.exists(best_path):
                 args.weights = best_path
             else:
-                print("Warning: No weights provided. Testing with random init.")
+                # Fallback to old naming scheme for backward compatibility
+                old_path = os.path.join(args.path_weights, f"{args.model}_{args.shot_num}shot_best.pth")
+                if os.path.exists(old_path):
+                    args.weights = old_path
+                    print(f"Using legacy checkpoint: {old_path}")
+                else:
+                    print("Warning: No weights provided. Testing with random init.")
         
         if args.weights:
             print(f"Loading weights: {args.weights}")
-            net.load_state_dict(torch.load(args.weights))
+            state_dict = torch.load(args.weights)
+            # Use strict=False to handle classifier mode mismatches
+            net.load_state_dict(state_dict, strict=False)
+            print("Weights loaded successfully")
             
-        test_full(net, test_loader, args)
+        test_full(net, test_loader, args, generate_plots=False)
 
 if __name__ == '__main__':
     main()
