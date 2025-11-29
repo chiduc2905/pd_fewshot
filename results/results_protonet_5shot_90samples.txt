@@ -1,8 +1,8 @@
 Model: protonet
 Shot: 5
 Training Samples: 90
-Accuracy: 0.9689
-Precision: 0.9689
-Recall: 0.9689
-F1-Score: 0.9689
-p-value: 6.72e-180
+Accuracy: 0.9911
+Precision: 0.9913
+Recall: 0.9911
+F1-Score: 0.9911
+p-value: 1.49e-192

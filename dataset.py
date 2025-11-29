@@ -2,7 +2,7 @@
 
 - Input: 64×64 RGB images
 - Normalization: Auto-computed from dataset
-- Split: 75 samples/class for val/test, remainder for training
+- Split: 30 samples/class for val, 30 samples/class for test, remainder for training
 """
 import os
 import random
@@ -17,14 +17,16 @@ CLASS_MAP = {'corona': 0, 'no_pd': 1, 'surface': 2}
 class PDScalogram:
     """Dataset loader with auto-computed normalization."""
     
-    def __init__(self, data_path, eval_per_class=75):
+    def __init__(self, data_path, val_per_class=30, test_per_class=30):
         """
         Args:
             data_path: Path to dataset directory
-            eval_per_class: Samples reserved for val/test per class (default: 75)
+            val_per_class: Samples reserved for validation per class (default: 50)
+            test_per_class: Samples reserved for test per class (default: 50)
         """
         self.data_path = os.path.abspath(data_path)
-        self.eval_per_class = eval_per_class
+        self.val_per_class = val_per_class
+        self.test_per_class = test_per_class
         self.classes = sorted(CLASS_MAP.keys(), key=lambda c: CLASS_MAP[c])
         
         # Placeholders
@@ -86,9 +88,11 @@ class PDScalogram:
                 class_sizes[class_name] = len(files)
         
         min_size = min(class_sizes.values())
-        eval_size = min(self.eval_per_class, min_size)
+        val_size = min(self.val_per_class, min_size)
+        test_size = min(self.test_per_class, min_size - val_size)
+        eval_total = val_size + test_size
         
-        print(f'Split: {eval_size}/class for val/test, rest for train')
+        print(f'Split: {val_size}/class for val, {test_size}/class for test, rest for train')
         
         for class_name, label in CLASS_MAP.items():
             path = os.path.join(self.data_path, class_name)
@@ -101,9 +105,10 @@ class PDScalogram:
             random.Random(42).shuffle(files)
             files = files[:min_size]  # Balance classes
             
-            # Split: eval_size for val/test, rest for train
-            eval_files = files[:eval_size]
-            train_files = files[eval_size:]
+            # Split: val_size for val, test_size for test, rest for train
+            val_files = files[:val_size]
+            test_files = files[val_size:eval_total]
+            train_files = files[eval_total:]
             
             # Load images
             for fname in train_files:
@@ -111,12 +116,14 @@ class PDScalogram:
                 self.X_train.append(self.transform(img).numpy())
                 self.y_train.append(label)
             
-            for fname in eval_files:
+            for fname in val_files:
                 img = Image.open(os.path.join(path, fname)).convert('RGB')
-                tensor = self.transform(img).numpy()
-                self.X_val.append(tensor)
+                self.X_val.append(self.transform(img).numpy())
                 self.y_val.append(label)
-                self.X_test.append(tensor)
+            
+            for fname in test_files:
+                img = Image.open(os.path.join(path, fname)).convert('RGB')
+                self.X_test.append(self.transform(img).numpy())
                 self.y_test.append(label)
         
         # Convert to arrays
