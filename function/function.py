@@ -37,60 +37,6 @@ class CenterLoss(nn.Module):
     
     Reference:
     Wen et al. A Discriminative Feature Learning Approach for Deep Face Recognition. ECCV 2016.
-    
-    Args:
-        num_classes (int): number of classes.
-        feat_dim (int): feature dimension.
-        use_gpu (bool): use gpu or not.
-    """
-    def __init__(self, num_classes=3, feat_dim=1600, use_gpu=True):
-        super(CenterLoss, self).__init__()
-        self.num_classes = num_classes
-        self.feat_dim = feat_dim
-        self.use_gpu = use_gpu
-
-        if self.use_gpu:
-            self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim).cuda())
-        else:
-            self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim))
-
-    def forward(self, x, labels):
-        """
-        Args:
-            x: feature matrix with shape (batch_size, feat_dim).
-            labels: ground truth labels with shape (batch_size).
-        """
-        batch_size = x.size(0)
-        distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
-                  torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(self.num_classes, batch_size).t()
-        distmat.addmm_(x, self.centers.t(), beta=1, alpha=-2)
-
-        classes = torch.arange(self.num_classes).long()
-        if self.use_gpu: classes = classes.cuda()
-        labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
-        mask = labels.eq(classes.expand(batch_size, self.num_classes))
-
-        dist = distmat * mask.float()
-        loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
-
-        return loss
-
-
-class SupConLoss(nn.Module):
-    """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
-    It also supports the unsupervised contrastive loss in SimCLR"""
-    def __init__(self, temperature=0.07, contrast_mode='all',
-                 base_temperature=0.07):
-        super(SupConLoss, self).__init__()
-        self.temperature = temperature
-        self.contrast_mode = contrast_mode
-        self.base_temperature = base_temperature
-
-    def forward(self, features, labels=None, mask=None):
-        """Compute loss for model. If both `labels` and `mask` are None,
-        it degenerates to SimCLR unsupervised loss:
-        https://arxiv.org/pdf/2002.05709.pdf
-
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
             labels: ground truth of shape [bsz].
@@ -169,22 +115,6 @@ class SupConLoss(nn.Module):
 class TripletLoss(nn.Module):
     """Triplet loss with hard positive/negative mining.
     
-    Reference:
-    Hermans et al. In Defense of the Triplet Loss for Person Re-Identification. 2017.
-    
-    Args:
-        margin (float): margin for triplet loss
-    """
-    def __init__(self, margin=0.5):
-        super(TripletLoss, self).__init__()
-        self.margin = margin
-        self.ranking_loss = nn.MarginRankingLoss(margin=margin)
-
-    def forward(self, inputs, targets):
-        """
-        Args:
-            inputs: feature matrix with shape (batch_size, feat_dim)
-            targets: ground truth labels with shape (batch_size)
         """
         n = inputs.size(0)
         

@@ -39,9 +39,9 @@ class Conv64F_Encoder(nn.Module):
             nn.LeakyReLU(0.2, True),                         
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=use_bias),
             norm_layer(64),
-            nn.LeakyReLU(0.2, True),                         
+            nn.LeakyReLU(0.2, True),
+            norm_layer(64), # Add final BN for stability as requested
         )
         
     def forward(self, x):
         return self.features(x)
-
