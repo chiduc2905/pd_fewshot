@@ -19,7 +19,11 @@ def seed_func(seed=42):
 
 
 class ContrastiveLoss(nn.Module):
-    """Softmax cross-entropy loss for few-shot classification."""
+    """Softmax cross-entropy loss for few-shot classification.
+    
+    (User requested name: ContrastiveLoss)
+    Mathematically equivalent to: -log(exp(score_target) / sum(exp(scores)))
+    """
     
     def forward(self, scores, targets):
         """
@@ -78,6 +82,9 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     For 150-episode test: 450 points (150 per class).
     """
     n = len(features)
+    unique_n = len(np.unique(features, axis=0))
+    print(f"t-SNE: Plotting {n} points (Unique: {unique_n})")
+    
     perp = min(30, max(5, n // 3))
     
     tsne = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
