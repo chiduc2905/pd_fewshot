@@ -106,7 +106,13 @@ def train_loop(net, train_loader, val_loader, args):
     else:
         criterion_main = ContrastiveLoss().to(args.device)
         
-    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=1600, use_gpu=(args.device == 'cuda'))
+    # Calculate feature dimension dynamically
+    with torch.no_grad():
+        dummy_input = torch.randn(1, 3, 64, 64).to(args.device)
+        dummy_feat = net.encoder(dummy_input)
+        feat_dim = dummy_feat.view(1, -1).size(1)
+        
+    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, use_gpu=(args.device == 'cuda'))
     
     # Optimizer (optimize both model and center loss parameters)
     optimizer = optim.Adam([
