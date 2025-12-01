@@ -52,7 +52,7 @@ def get_args():
     parser.add_argument('--episode_num_val', type=int, default=75)
     parser.add_argument('--num_epochs', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--step_size', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=42)
@@ -143,28 +143,42 @@ def train_loop(net, train_loader, val_loader, args):
             scores = net(query, support)
             
             # 1. Main Loss (Contrastive, SupCon, or Triplet)
-            if args.loss == 'supcon':
-                # SupCon needs features
+            # 1. Main Loss (Contrastive, SupCon, or Triplet)
+            if args.loss in ['supcon', 'triplet']:
+                # For metric learning losses, we need to combine support and query features
+                # to ensure we have enough positive pairs (at least 1 support + 1 query per class)
+                
+                # Extract query features
                 q_flat = query.view(-1, C, H, W)
-                features = net.encoder(q_flat)
-                features = features.view(features.size(0), -1)
+                q_feats = net.encoder(q_flat)
+                q_feats = q_feats.view(q_feats.size(0), -1)
+                q_targets = targets
+                
+                # Extract support features
+                # support shape: (B, Way, Shot, C, H, W) -> (B*Way*Shot, C, H, W)
+                s_flat = support.view(-1, C, H, W)
+                s_feats = net.encoder(s_flat)
+                s_feats = s_feats.view(s_feats.size(0), -1)
+                
+                # Create support targets
+                # s_labels shape: (B, Way, Shot) -> (B*Way*Shot)
+                s_targets = s_labels.view(-1).to(args.device)
+                
+                # Concatenate
+                all_feats = torch.cat([q_feats, s_feats], dim=0)
+                all_targets = torch.cat([q_targets, s_targets], dim=0)
                 
                 # Normalize features for stability
-                features = F.normalize(features, p=2, dim=1)
+                all_feats = F.normalize(all_feats, p=2, dim=1)
                 
-                features = features.unsqueeze(1) 
-                loss_main = criterion_main(features, targets)
-            
-            elif args.loss == 'triplet':
-                # Triplet needs features
-                q_flat = query.view(-1, C, H, W)
-                features = net.encoder(q_flat)
-                features = features.view(features.size(0), -1)
-                
-                # Normalize features for stability
-                features = F.normalize(features, p=2, dim=1)
-                
-                loss_main = criterion_main(features, targets)
+                if args.loss == 'supcon':
+                    # SupCon expects (batch, n_views, feat_dim)
+                    # We treat each sample as a separate view
+                    all_feats = all_feats.unsqueeze(1)
+                    loss_main = criterion_main(all_feats, all_targets)
+                else:
+                    # Triplet
+                    loss_main = criterion_main(all_feats, all_targets)
                 
             else:
                 # Contrastive needs scores
