@@ -35,6 +35,11 @@ class PDScalogram:
         self.X_test, self.y_test = [], []
         self.mean, self.std = None, None
         
+        # File lists placeholders
+        self.train_files = []
+        self.val_files = []
+        self.test_files = []
+        
         # Base transform (no normalization yet)
         self._base_transform = transforms.Compose([
             transforms.Resize((64, 64)),
@@ -42,42 +47,20 @@ class PDScalogram:
         ])
         
         print(f'Dataset: {self.data_path}')
+        
+        # 1. Prepare splits (identify files for train/val/test)
+        self._prepare_splits()
+        
+        # 2. Compute stats (ONLY on training data)
         self._compute_stats()
-        self._load_data()
+        
+        # 3. Load images (apply normalization)
+        self._load_images()
+        
         self._shuffle_all()
     
-    def _compute_stats(self):
-        """Compute per-channel mean and std."""
-        print('Computing mean/std...')
-        pixels = []
-        
-        for class_name in CLASS_MAP:
-            class_path = os.path.join(self.data_path, class_name)
-            if not os.path.exists(class_path):
-                continue
-            
-            for fname in os.listdir(class_path):
-                if not fname.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    continue
-                img = Image.open(os.path.join(class_path, fname)).convert('RGB')
-                pixels.append(self._base_transform(img).numpy())
-        
-        all_imgs = np.stack(pixels)  # (N, 3, H, W)
-        self.mean = all_imgs.mean(axis=(0, 2, 3)).tolist()
-        self.std = all_imgs.std(axis=(0, 2, 3)).tolist()
-        
-        print(f'  Mean: {[f"{m:.3f}" for m in self.mean]}')
-        print(f'  Std:  {[f"{s:.3f}" for s in self.std]}')
-        
-        # Final transform with normalization
-        self.transform = transforms.Compose([
-            transforms.Resize((64, 64)),
-            transforms.ToTensor(),
-            transforms.Normalize(self.mean, self.std),
-        ])
-    
-    def _load_data(self):
-        """Load and split data into train/val/test."""
+    def _prepare_splits(self):
+        """Scan directories and split files into train/val/test lists."""
         # Find min class size
         class_sizes = {}
         for class_name in CLASS_MAP:
@@ -87,6 +70,9 @@ class PDScalogram:
                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
                 class_sizes[class_name] = len(files)
         
+        if not class_sizes:
+            raise ValueError(f"No data found in {self.data_path}")
+
         min_size = min(class_sizes.values())
         val_size = min(self.val_per_class, min_size)
         test_size = min(self.test_per_class, min_size - val_size)
@@ -106,25 +92,62 @@ class PDScalogram:
             files = files[:min_size]  # Balance classes
             
             # Split: val_size for val, test_size for test, rest for train
-            val_files = files[:val_size]
-            test_files = files[val_size:eval_total]
-            train_files = files[eval_total:]
+            val_files_class = files[:val_size]
+            test_files_class = files[val_size:eval_total]
+            train_files_class = files[eval_total:]
             
-            # Load images
-            for fname in train_files:
-                img = Image.open(os.path.join(path, fname)).convert('RGB')
-                self.X_train.append(self.transform(img).numpy())
-                self.y_train.append(label)
+            # Store as (full_path, label) tuples
+            self.val_files.extend([(os.path.join(path, f), label) for f in val_files_class])
+            self.test_files.extend([(os.path.join(path, f), label) for f in test_files_class])
+            self.train_files.extend([(os.path.join(path, f), label) for f in train_files_class])
+
+    def _compute_stats(self):
+        """Compute per-channel mean and std using ONLY training data."""
+        print('Computing mean/std on training set...')
+        pixels = []
+        
+        for fpath, _ in self.train_files:
+            img = Image.open(fpath).convert('RGB')
+            pixels.append(self._base_transform(img).numpy())
+        
+        if not pixels:
+            print("Warning: No training data found for stats computation. Using default mean/std.")
+            self.mean = [0.5, 0.5, 0.5]
+            self.std = [0.5, 0.5, 0.5]
+        else:
+            all_imgs = np.stack(pixels)  # (N, 3, H, W)
+            self.mean = all_imgs.mean(axis=(0, 2, 3)).tolist()
+            self.std = all_imgs.std(axis=(0, 2, 3)).tolist()
+        
+        print(f'  Mean: {[f"{m:.3f}" for m in self.mean]}')
+        print(f'  Std:  {[f"{s:.3f}" for s in self.std]}')
+        
+        # Final transform with normalization
+        self.transform = transforms.Compose([
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize(self.mean, self.std),
+        ])
+    
+    def _load_images(self):
+        """Load images using the pre-computed splits and normalization."""
+        # Load Train
+        for fpath, label in self.train_files:
+            img = Image.open(fpath).convert('RGB')
+            self.X_train.append(self.transform(img).numpy())
+            self.y_train.append(label)
             
-            for fname in val_files:
-                img = Image.open(os.path.join(path, fname)).convert('RGB')
-                self.X_val.append(self.transform(img).numpy())
-                self.y_val.append(label)
+        # Load Val
+        for fpath, label in self.val_files:
+            img = Image.open(fpath).convert('RGB')
+            self.X_val.append(self.transform(img).numpy())
+            self.y_val.append(label)
             
-            for fname in test_files:
-                img = Image.open(os.path.join(path, fname)).convert('RGB')
-                self.X_test.append(self.transform(img).numpy())
-                self.y_test.append(label)
+        # Load Test
+        for fpath, label in self.test_files:
+            img = Image.open(fpath).convert('RGB')
+            self.X_test.append(self.transform(img).numpy())
+            self.y_test.append(label)
         
         # Convert to arrays
         self.X_train = np.array(self.X_train)
