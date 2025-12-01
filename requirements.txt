@@ -7,3 +7,4 @@ matplotlib>=3.0.0
 seaborn>=0.11.0
 scipy>=1.7.0
 tsnecuda; platform_system == "Linux"
+wandb>=0.12.0

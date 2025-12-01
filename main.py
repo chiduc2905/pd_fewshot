@@ -9,6 +9,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
+import wandb
 
 from dataset import PDScalogram
 from dataloader.dataloader import FewshotDataset
@@ -174,15 +175,26 @@ def train_loop(net, train_loader, val_loader, args):
         scheduler.step()
         
         # Validate
-        acc = evaluate(net, val_loader, args)
-        print(f'Epoch {epoch}: Loss={total_loss/len(train_loader):.4f}, Val Acc={acc:.4f}')
+        val_acc = evaluate(net, val_loader, args)
+        avg_loss = total_loss / len(train_loader)
+        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Val Acc={val_acc:.4f}')
+        
+        # Log to WandB
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": avg_loss,
+            "val_acc": val_acc,
+            "lr": optimizer.param_groups[0]['lr']
+        })
         
         # Save best
-        if acc > best_acc:
-            best_acc = acc
+        if val_acc > best_acc:
+            best_acc = val_acc
             path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_best.pth')
             torch.save(net.state_dict(), path)
-            print(f'  → Best model saved ({acc:.4f})')
+            print(f'  → Best model saved ({val_acc:.4f})')
+            # Log best model as artifact if needed, or just log the metric
+            wandb.run.summary["best_val_acc"] = best_acc
     
     return best_acc
 
@@ -277,51 +289,33 @@ def test_final(net, loader, args):
     print(f"F1-Score : {f1:.4f}")
     print(f"p-value  : {p_val:.2e}")
     
-    # Save results
-    samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
-    
-    # Individual result file (per experiment)
-    result_file = os.path.join(args.path_results, 
-                               f"results_{args.model}_{args.shot_num}shot{samples_str}.txt")
-    with open(result_file, 'w') as f:
-        f.write(f"Model: {args.model}\n")
-        f.write(f"Shot: {args.shot_num}\n")
-        f.write(f"Training Samples: {args.training_samples}\n")
-        f.write(f"Accuracy: {acc:.4f}\n")
-        f.write(f"Precision: {prec:.4f}\n")
-        f.write(f"Recall: {rec:.4f}\n")
-        f.write(f"F1-Score: {f1:.4f}\n")
-        f.write(f"p-value: {p_val:.2e}\n")
-    
-    # Append to summary by training samples
-    summary_file = os.path.join(args.path_results, f"summary{samples_str}.txt")
-    write_header = not os.path.exists(summary_file) or os.path.getsize(summary_file) == 0
-    with open(summary_file, 'a') as f:
-        if write_header:
-            f.write("Model\tShot\tAccuracy\tPrecision\tRecall\tF1\tp-value\n")
-        f.write(f"{args.model}\t{args.shot_num}\t{acc:.4f}\t{prec:.4f}\t{rec:.4f}\t{f1:.4f}\t{p_val:.2e}\n")
-    
-    # Append to model-specific summary (all results for this model)
-    model_summary_file = os.path.join(args.path_results, f"summary_{args.model}.txt")
-    write_header = not os.path.exists(model_summary_file) or os.path.getsize(model_summary_file) == 0
-    with open(model_summary_file, 'a') as f:
-        if write_header:
-            f.write("Shot\tSamples\tAccuracy\tPrecision\tRecall\tF1\tp-value\n")
-        samples_val = args.training_samples if args.training_samples else "all"
-        f.write(f"{args.shot_num}\t{samples_val}\t{acc:.4f}\t{prec:.4f}\t{rec:.4f}\t{f1:.4f}\t{p_val:.2e}\n")
+    # Log metrics to WandB
+    wandb.log({
+        "test_accuracy": acc,
+        "test_precision": prec,
+        "test_recall": rec,
+        "test_f1": f1,
+        "test_p_value": p_val
+    })
     
     # Plots
+    samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
+    
+    # Confusion Matrix
     cm_path = os.path.join(args.path_results, 
                            f"confusion_matrix_{args.model}_{args.shot_num}shot{samples_str}.png")
     plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_path)
+    wandb.log({"confusion_matrix": wandb.Image(cm_path)})
     
+    # t-SNE
     if all_features:
         features = np.vstack(all_features)
         tsne_path = os.path.join(args.path_results, 
                                  f"tsne_{args.model}_{args.shot_num}shot{samples_str}.png")
         plot_tsne(features, all_targets, args.way_num, tsne_path)
+        wandb.log({"tsne_plot": wandb.Image(tsne_path)})
     
-    print(f"\nResults saved to {args.path_results}")
+    print(f"\nResults logged to WandB and plots saved to {args.path_results}")
 
 
 # =============================================================================
@@ -336,6 +330,12 @@ def main():
         args.num_epochs = 100 if args.shot_num == 1 else 70
     
     print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs")
+    
+    # Initialize WandB with a descriptive run name
+    samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
+    run_name = f"{args.model}_{args.shot_num}shot_{args.loss}_{samples_str}"
+    
+    wandb.init(project="pd_fewshot", config=vars(args), name=run_name)
     
     seed_func(args.seed)
     os.makedirs(args.path_weights, exist_ok=True)
@@ -379,40 +379,30 @@ def main():
     val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
                             args.way_num, args.shot_num, 1, args.seed)
     
-    # Final test: 150 episodes, K-shot (same as training), 1-query
-    test_ds = FewshotDataset(test_X, test_y, 150,
+    test_ds = FewshotDataset(test_X, test_y, 150,  # Fixed 150 episodes for test
                              args.way_num, args.shot_num, 1, args.seed)
     
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
-    # Model
+    # Initialize Model
     net = get_model(args)
     
     if args.mode == 'train':
         train_loop(net, train_loader, val_loader, args)
         
-        # Load best and run final test
-        best_path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_best.pth')
-        if os.path.exists(best_path):
-            net.load_state_dict(torch.load(best_path))
-            test_final(net, test_loader, args)
-    
-    elif args.mode == 'test':
-        # Load weights
-        if args.weights:
-            path = args.weights
-        else:
-            path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_best.pth')
-        
-        if os.path.exists(path):
-            net.load_state_dict(torch.load(path))
-            print(f"Loaded: {path}")
-        else:
-            print(f"Warning: {path} not found, using random init")
-        
+        # Load best model for testing
+        path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_best.pth')
+        net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
+        
+    else:  # Test only
+        if args.weights:
+            net.load_state_dict(torch.load(args.weights))
+            test_final(net, test_loader, args)
+        else:
+            print("Error: Please specify --weights for test mode")
 
 
 if __name__ == '__main__':
