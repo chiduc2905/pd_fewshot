@@ -55,8 +55,9 @@ def get_args():
     parser.add_argument('--step_size', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--device', type=str, 
-                        default='cuda' if torch.cuda.is_available() else 'cpu')
+    # Device
+    # parser.add_argument('--device', type=str, 
+    #                     default='cuda' if torch.cuda.is_available() else 'cpu')
     
     # Loss
     parser.add_argument('--loss', type=str, default='contrastive', 
@@ -64,8 +65,8 @@ def get_args():
                         help='Loss function: contrastive (default), supcon, or triplet')
     parser.add_argument('--temp', type=float, default=0.01,
                         help='Temperature for SupCon loss (default: 0.01)')
-    parser.add_argument('--margin', type=float, default=0.5,
-                        help='Margin for Triplet loss (default: 0.5)')
+    parser.add_argument('--margin', type=float, default=0.1,
+                        help='Margin for Triplet loss (default: 0.1)')
     
     # Center Loss
     parser.add_argument('--lambda_center', type=float, default=0.1, 
@@ -79,15 +80,15 @@ def get_args():
 
 def get_model(args):
     """Initialize model based on args."""
-    device = args.device
-    use_gpu = (device == 'cuda')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    use_gpu = (device.type == 'cuda')
     
     if args.model == 'covamnet':
-        model = CovaMNet(use_gpu=use_gpu)
+        model = CovaMNet(device=device)
     elif args.model == 'protonet':
-        model = ProtoNet(use_gpu=use_gpu)
+        model = ProtoNet(device=device)
     else:  # cosine
-        model = CosineNet(use_gpu=use_gpu)
+        model = CosineNet(device=device)
     
     return model.to(device)
 
@@ -98,21 +99,27 @@ def get_model(args):
 
 def train_loop(net, train_loader, val_loader, args):
     """Train with validation-based model selection."""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
     # Loss functions
     if args.loss == 'supcon':
-        criterion_main = SupConLoss(temperature=args.temp).to(args.device)
+        criterion_main = SupConLoss(temperature=args.temp).to(device)
     elif args.loss == 'triplet':
-        criterion_main = TripletLoss(margin=args.margin).to(args.device)
+        criterion_main = TripletLoss(margin=args.margin).to(device)
     else:
-        criterion_main = ContrastiveLoss().to(args.device)
+        criterion_main = ContrastiveLoss().to(device)
         
     # Calculate feature dimension dynamically
     with torch.no_grad():
-        dummy_input = torch.randn(1, 3, 64, 64).to(args.device)
+        dummy_input = torch.randn(1, 3, 64, 64).to(device)
         dummy_feat = net.encoder(dummy_input)
         feat_dim = dummy_feat.view(1, -1).size(1)
         
-    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, use_gpu=(args.device == 'cuda'))
+<<<<<<< HEAD
+    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
+=======
+    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=args.device)
+>>>>>>> 7bcb50ced6163ac4d72da6a057bd3db392a60616
     
     # Optimizer (optimize both model and center loss parameters)
     optimizer = optim.Adam([
@@ -359,8 +366,11 @@ def main():
     # Set defaults based on shot_num
     if args.num_epochs is None:
         args.num_epochs = 100 if args.shot_num == 1 else 70
+
+    # Auto-detect device
+    args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs")
+    print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
     
     # Initialize WandB with a descriptive run name
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"

@@ -9,15 +9,14 @@ from net.utils import init_weights
 class CosineNet(nn.Module):
     """Few-shot classifier using cosine similarity metric."""
     
-    def __init__(self, init_type='normal', use_gpu=True):
+    def __init__(self, init_type='normal', device='cuda'):
         super(CosineNet, self).__init__()
         self.encoder = Conv64F_Encoder()
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(64, 64) 
         
         init_weights(self, init_type=init_type)
-        if use_gpu and torch.cuda.is_available():
-            self.cuda()
+        self.to(device)
 
     def forward(self, query, support):
         """Compute cosine similarity scores.

@@ -33,13 +33,7 @@ class CovaBlock(nn.Module):
             query_sam_norm = torch.norm(query_sam, 2, 1, True)
             query_sam = query_sam / query_sam_norm
 
-            if torch.cuda.is_available():
-                mea_sim = torch.zeros(1, len(CovaMatrix_list) * h * w).cuda()
-            else:
-                mea_sim = torch.zeros(1, len(CovaMatrix_list) * h * w)
-            
-            # Ensure device consistency if not using cuda() explicitly above or if mixed
-            mea_sim = mea_sim.to(query_sam.device)
+            mea_sim = torch.zeros(1, len(CovaMatrix_list) * h * w).to(query_sam.device)
 
             for j in range(len(CovaMatrix_list)):
                 temp_dis = torch.transpose(query_sam, 0, 1) @ CovaMatrix_list[j] @ query_sam

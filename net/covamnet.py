@@ -10,7 +10,7 @@ from net.utils import init_weights
 class CovarianceNet(nn.Module):
     """Few-shot classifier using covariance-based similarity."""
     
-    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, init_type='normal', use_gpu=True, input_size=64):
+    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, init_type='normal', device='cuda', input_size=64):
         super(CovarianceNet, self).__init__()
 
         if type(norm_layer) == str:
@@ -41,8 +41,7 @@ class CovarianceNet(nn.Module):
         )
         
         init_weights(self, init_type=init_type)
-        if use_gpu and torch.cuda.is_available():
-            self.cuda()
+        self.to(device)
 
     def forward(self, query, support):
         """Compute covariance-based similarity scores.
