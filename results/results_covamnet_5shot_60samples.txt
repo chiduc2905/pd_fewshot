@@ -1,8 +1,0 @@
-Model: covamnet
-Shot: 5
-Training Samples: 60
-Accuracy: 0.8956
-Precision: 0.9030
-Recall: 0.8956
-F1-Score: 0.8948
-p-value: 3.19e-141

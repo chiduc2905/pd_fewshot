@@ -1,2 +1,0 @@
-Model	Shot	Accuracy	Precision	Recall	F1	p-value
-protonet	1	0.9267	0.9399	0.9267	0.9258	4.71e-157
