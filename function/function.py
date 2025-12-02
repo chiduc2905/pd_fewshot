@@ -69,6 +69,39 @@ class CenterLoss(nn.Module):
         # Normalize centers to unit sphere to match normalized features
         centers_norm = torch.nn.functional.normalize(self.centers, p=2, dim=1)
         
+        distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
+                  torch.pow(centers_norm, 2).sum(dim=1, keepdim=True).expand(self.num_classes, batch_size).t()
+        distmat.addmm_(x, centers_norm.t(), beta=1, alpha=-2)
+        
+        classes = torch.arange(self.num_classes).long()
+        if self.device:
+            classes = classes.to(self.device)
+        elif self.use_gpu:
+            classes = classes.cuda()
+            
+        labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
+        mask = labels.eq(classes.expand(batch_size, self.num_classes))
+        
+        dist = distmat * mask.float()
+        loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
+        
+        return loss
+
+
+class TripletLoss(nn.Module):
+    """Triplet loss with hard positive/negative mining.
+    
+    Reference:
+    Hermans et al. In Defense of the Triplet Loss for Person Re-Identification. 2017.
+    
+    Args:
+        margin (float): margin for triplet loss
+    """
+    def __init__(self, margin=0.3):
+        super(TripletLoss, self).__init__()
+        self.margin = margin
+        self.ranking_loss = nn.MarginRankingLoss(margin=margin)
+
     def forward(self, inputs, targets):
         """
         Args:
@@ -77,7 +110,7 @@ class CenterLoss(nn.Module):
         """
         n = inputs.size(0)
         
-        # Compute pairwise distance, replace by the official when merged
+        # Compute pairwise distance
         dist = torch.pow(inputs, 2).sum(dim=1, keepdim=True).expand(n, n)
         dist = dist + dist.t()
         dist.addmm_(inputs, inputs.t(), beta=1, alpha=-2)

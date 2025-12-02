@@ -1,5 +1,11 @@
 import subprocess
 import sys
+import argparse
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Run all experiments')
+    parser.add_argument('--project', type=str, default='pd_fewshot', help='WandB project name')
+    return parser.parse_args()
 
 # Configuration
 models = ['covamnet', 'protonet', 'cosine']
@@ -11,7 +17,8 @@ lambda_centers = [0, 0.1]
 total_experiments = len(models) * len(shots) * len(samples_list) * len(losses) * len(lambda_centers)
 current_experiment = 0
 
-print(f"Starting {total_experiments} experiments...")
+args = get_args()
+print(f"Starting {total_experiments} experiments on project '{args.project}'...")
 
 for model in models:
     for shot in shots:
@@ -26,7 +33,8 @@ for model in models:
                            '--shot_num', str(shot), 
                            '--loss', loss, 
                            '--lambda_center', str(lambda_center),
-                           '--mode', 'train']
+                           '--mode', 'train',
+                           '--project', args.project]
                     
                     if samples is not None:
                         cmd.extend(['--training_samples', str(samples)])

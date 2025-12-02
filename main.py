@@ -75,6 +75,10 @@ def get_args():
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
     
+    # WandB
+    parser.add_argument('--project', type=str, default='pd_fewshot',
+                        help='WandB project name')
+    
     return parser.parse_args()
 
 
@@ -142,7 +146,6 @@ def train_loop(net, train_loader, val_loader, args):
             optimizer.zero_grad()
             scores = net(query, support)
             
-            # 1. Main Loss (Contrastive, SupCon, or Triplet)
             # 1. Main Loss (Contrastive or Triplet)
             if args.loss == 'triplet':
                 # For metric learning losses, we need to combine support and query features
@@ -364,7 +367,7 @@ def main():
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
     run_name = f"{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_{samples_str}"
     
-    wandb.init(project="pd_fewshot", config=vars(args), name=run_name, group=run_name, job_type=args.mode)
+    wandb.init(project=args.project, config=vars(args), name=run_name, group=run_name, job_type=args.mode)
     
     seed_func(args.seed)
     os.makedirs(args.path_weights, exist_ok=True)
