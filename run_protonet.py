@@ -1,19 +1,21 @@
 import subprocess
 import sys
+import argparse
 
-def run_experiment(model, shot, loss, samples):
+def run_experiment(model, shot, loss, samples, device):
     cmd = [
         sys.executable, "main.py",
         "--model", model,
         "--shot_num", str(shot),
         "--loss", loss,
-        "--mode", "train"
+        "--mode", "train",
+        "--device", device
     ]
     if samples is not None:
         cmd.extend(["--training_samples", str(samples)])
     
     print(f"\n{'='*50}")
-    print(f"Running: {model} | {shot}-shot | {loss} | {samples if samples else 'all'} samples")
+    print(f"Running: {model} | {shot}-shot | {loss} | {samples if samples else 'all'} samples | Device: {device}")
     print(f"Command: {' '.join(cmd)}")
     print(f"{'='*50}\n")
     
@@ -23,6 +25,10 @@ def run_experiment(model, shot, loss, samples):
         print(f"Error: {e}")
 
 def main():
+    parser = argparse.ArgumentParser(description='Run ProtoNet experiments')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use (e.g., cuda:0, cuda:1)')
+    args = parser.parse_args()
+
     model = 'protonet'
     shots = [1, 5]
     losses = ['contrastive', 'supcon', 'triplet']
@@ -31,7 +37,7 @@ def main():
     for shot in shots:
         for loss in losses:
             for samples in sample_sizes:
-                run_experiment(model, shot, loss, samples)
+                run_experiment(model, shot, loss, samples, args.device)
 
 if __name__ == "__main__":
     main()
