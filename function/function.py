@@ -43,13 +43,17 @@ class CenterLoss(nn.Module):
         feat_dim (int): feature dimension.
         use_gpu (bool): use gpu or not.
     """
-    def __init__(self, num_classes=3, feat_dim=1600, use_gpu=True):
+    def __init__(self, num_classes=3, feat_dim=1600, use_gpu=True, device='cpu'):
         super(CenterLoss, self).__init__()
         self.num_classes = num_classes
         self.feat_dim = feat_dim
         self.use_gpu = use_gpu
+        self.device = device
 
-        if self.use_gpu:
+        # Use device if provided, otherwise fallback to use_gpu flag
+        if self.device:
+             self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim).to(self.device))
+        elif self.use_gpu:
             self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim).cuda())
         else:
             self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim))
@@ -70,7 +74,11 @@ class CenterLoss(nn.Module):
         distmat.addmm_(x, centers_norm.t(), beta=1, alpha=-2)
 
         classes = torch.arange(self.num_classes).long()
-        if self.use_gpu: classes = classes.cuda()
+        if self.device:
+            classes = classes.to(self.device)
+        elif self.use_gpu: 
+            classes = classes.cuda()
+            
         labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
         mask = labels.eq(classes.expand(batch_size, self.num_classes))
 
@@ -103,9 +111,7 @@ class SupConLoss(nn.Module):
         Returns:
             A loss scalar.
         """
-        device = (torch.device('cuda')
-                  if features.is_cuda
-                  else torch.device('cpu'))
+        device = features.device
 
         if len(features.shape) < 3:
             raise ValueError('`features` needs to be [bsz, n_views, ...],'
@@ -154,6 +160,21 @@ class SupConLoss(nn.Module):
             torch.arange(batch_size * anchor_count).view(-1, 1).to(device),
             0
         )
+        mask = mask * logits_mask
+
+        # compute log_prob
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+
+        # compute mean of log-likelihood over positive
+        # modified to handle NaN when mask.sum(1) is 0
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
+
+        # loss
+        loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
+        loss = loss.view(anchor_count, batch_size).mean()
+
+        return loss
 
 
 class TripletLoss(nn.Module):
