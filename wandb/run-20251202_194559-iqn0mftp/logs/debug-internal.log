@@ -1,0 +1,19 @@
+{"time":"2025-12-02T19:45:59.315985091+07:00","level":"INFO","msg":"stream: starting","core version":"0.23.0"}
+{"time":"2025-12-02T19:45:59.752554314+07:00","level":"INFO","msg":"stream: created new stream","id":"iqn0mftp"}
+{"time":"2025-12-02T19:45:59.752687577+07:00","level":"INFO","msg":"handler: started","stream_id":"iqn0mftp"}
+{"time":"2025-12-02T19:45:59.753052835+07:00","level":"INFO","msg":"stream: started","id":"iqn0mftp"}
+{"time":"2025-12-02T19:45:59.753092396+07:00","level":"INFO","msg":"writer: started","stream_id":"iqn0mftp"}
+{"time":"2025-12-02T19:45:59.753119458+07:00","level":"INFO","msg":"sender: started","stream_id":"iqn0mftp"}
+{"time":"2025-12-02T19:46:15.567846587+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":1155}
+{"time":"2025-12-02T19:46:15.658925828+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":10}
+{"time":"2025-12-02T19:46:30.609201925+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":3056}
+{"time":"2025-12-02T19:46:30.612623602+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":6}
+{"time":"2025-12-02T19:47:00.570677289+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":6714}
+{"time":"2025-12-02T19:47:00.619207883+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":7}
+{"time":"2025-12-02T19:47:15.556664359+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":8585}
+{"time":"2025-12-02T19:47:15.620748827+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":8}
+{"time":"2025-12-02T19:47:42.213360589+07:00","level":"INFO","msg":"stream: closing","id":"iqn0mftp"}
+{"time":"2025-12-02T19:47:43.299486563+07:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-12-02T19:47:43.650617701+07:00","level":"INFO","msg":"handler: closed","stream_id":"iqn0mftp"}
+{"time":"2025-12-02T19:47:43.650803908+07:00","level":"INFO","msg":"sender: closed","stream_id":"iqn0mftp"}
+{"time":"2025-12-02T19:47:43.650846547+07:00","level":"INFO","msg":"stream: closed","id":"iqn0mftp"}

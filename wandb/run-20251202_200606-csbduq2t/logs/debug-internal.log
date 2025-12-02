@@ -1,0 +1,21 @@
+{"time":"2025-12-02T20:06:06.608280491+07:00","level":"INFO","msg":"stream: starting","core version":"0.23.0"}
+{"time":"2025-12-02T20:06:07.050152218+07:00","level":"INFO","msg":"stream: created new stream","id":"csbduq2t"}
+{"time":"2025-12-02T20:06:07.050267532+07:00","level":"INFO","msg":"handler: started","stream_id":"csbduq2t"}
+{"time":"2025-12-02T20:06:07.050504479+07:00","level":"INFO","msg":"stream: started","id":"csbduq2t"}
+{"time":"2025-12-02T20:06:07.050550636+07:00","level":"INFO","msg":"sender: started","stream_id":"csbduq2t"}
+{"time":"2025-12-02T20:06:07.050545253+07:00","level":"INFO","msg":"writer: started","stream_id":"csbduq2t"}
+{"time":"2025-12-02T20:06:22.85953957+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":1059}
+{"time":"2025-12-02T20:06:22.895681554+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":4}
+{"time":"2025-12-02T20:06:37.892200881+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":2849}
+{"time":"2025-12-02T20:06:37.920601626+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":3}
+{"time":"2025-12-02T20:06:52.823785388+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":4617}
+{"time":"2025-12-02T20:06:52.947524713+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":19}
+{"time":"2025-12-02T20:07:07.92098578+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":6339}
+{"time":"2025-12-02T20:07:07.943680593+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":3}
+{"time":"2025-12-02T20:07:22.873719569+07:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":8174}
+{"time":"2025-12-02T20:07:22.887079821+07:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":3}
+{"time":"2025-12-02T20:07:25.539517421+07:00","level":"INFO","msg":"stream: closing","id":"csbduq2t"}
+{"time":"2025-12-02T20:07:26.863569894+07:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-12-02T20:07:27.197039117+07:00","level":"INFO","msg":"handler: closed","stream_id":"csbduq2t"}
+{"time":"2025-12-02T20:07:27.197234805+07:00","level":"INFO","msg":"sender: closed","stream_id":"csbduq2t"}
+{"time":"2025-12-02T20:07:27.197265221+07:00","level":"INFO","msg":"stream: closed","id":"csbduq2t"}

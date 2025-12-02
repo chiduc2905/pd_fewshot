@@ -1,0 +1,17 @@
+Dataset: /mnt/disk2/nhatnc/res/scalogram_fewshot/pd_fewshot/scalogram_images
+Split: 30/class for val, 30/class for test, rest for train
+Computing mean/std on training set...
+  Mean: ['0.040', '0.060', '0.623']
+  Std:  ['0.177', '0.205', '0.156']
+Loaded: Train=171, Val=90, Test=90
+Using 60 training samples (20/class)
+initialization method [normal]
+Epoch 1/70:   0%|                                                                                                                                 | 0/100 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/mnt/disk2/nhatnc/res/scalogram_fewshot/pd_fewshot/main.py", line 440, in <module>
+    main()
+  File "/mnt/disk2/nhatnc/res/scalogram_fewshot/pd_fewshot/main.py", line 424, in main
+    train_loop(net, train_loader, val_loader, args)
+  File "/mnt/disk2/nhatnc/res/scalogram_fewshot/pd_fewshot/main.py", line 198, in train_loop
+    loss = loss_main + args.lambda_center * loss_center
+TypeError: unsupported operand type(s) for +: 'NoneType' and 'Tensor'

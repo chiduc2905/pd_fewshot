@@ -1,0 +1,118 @@
+_wandb:
+    value:
+        cli_version: 0.23.0
+        e:
+            wwqhozf6jcvm3ygqx7w59fyyucju8fi6:
+                args:
+                    - --model
+                    - cosine
+                    - --shot_num
+                    - "5"
+                    - --loss
+                    - supcon
+                    - --mode
+                    - train
+                    - --training_samples
+                    - "90"
+                codePath: main.py
+                codePathLocal: main.py
+                cpu_count: 12
+                cpu_count_logical: 24
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "982683541504"
+                        used: "915954081792"
+                email: chiducdodaihoc@gmail.com
+                executable: /home/ubuntu/anaconda3/envs/scalogram/bin/python
+                git:
+                    commit: bd53802ae6b6bf7ed5b01e264a8fdb85cc6025f9
+                    remote: https://github.com/chiduc2905/pd_fewshot.git
+                gpu: NVIDIA GeForce RTX 3090
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10496
+                      memoryTotal: "25769803776"
+                      name: NVIDIA GeForce RTX 3090
+                      uuid: GPU-54c92c59-e63f-07b5-38b4-8aa7c7b21165
+                    - architecture: Ampere
+                      cudaCores: 10496
+                      memoryTotal: "25769803776"
+                      name: NVIDIA GeForce RTX 3090
+                      uuid: GPU-eb8e5c7b-31a6-7a56-b126-cdbc99dbc056
+                host: artx30902
+                memory:
+                    total: "269922889728"
+                os: Linux-5.15.0-139-generic-x86_64-with-glibc2.31
+                program: /mnt/disk2/nhatnc/res/scalogram_fewshot/pd_fewshot/main.py
+                python: CPython 3.10.12
+                root: /mnt/disk2/nhatnc/res/scalogram_fewshot/pd_fewshot
+                startedAt: "2025-12-02T14:00:01.280818Z"
+                writerId: wwqhozf6jcvm3ygqx7w59fyyucju8fi6
+        m: []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+                - 5
+                - 41
+                - 53
+            "2":
+                - 1
+                - 5
+                - 41
+                - 53
+            "3":
+                - 13
+                - 16
+            "4": 3.10.12
+            "5": 0.23.0
+            "12": 0.23.0
+            "13": linux-x86_64
+batch_size:
+    value: 1
+dataset_path:
+    value: ./scalogram_images/
+device:
+    value: cuda
+episode_num_train:
+    value: 100
+episode_num_val:
+    value: 75
+gamma:
+    value: 0.1
+lambda_center:
+    value: 0.1
+loss:
+    value: supcon
+lr:
+    value: 0.0001
+margin:
+    value: 0.5
+mode:
+    value: train
+model:
+    value: cosine
+num_epochs:
+    value: 70
+path_results:
+    value: results/
+path_weights:
+    value: checkpoints/
+query_num:
+    value: 1
+seed:
+    value: 42
+shot_num:
+    value: 5
+step_size:
+    value: 10
+temp:
+    value: 0.01
+training_samples:
+    value: 90
+way_num:
+    value: 3
+weights:
+    value: null
