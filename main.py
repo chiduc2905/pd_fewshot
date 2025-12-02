@@ -37,8 +37,7 @@ def get_args():
     # Model
     parser.add_argument('--model', type=str, default='covamnet', 
                         choices=['cosine', 'protonet', 'covamnet'])
-    parser.add_argument('--covamnet_classifier', action='store_true',
-                        help='Use learnable classifier in CovaMNet (default: pure metric)')
+
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
@@ -84,7 +83,7 @@ def get_model(args):
     use_gpu = (device == 'cuda')
     
     if args.model == 'covamnet':
-        model = CovaMNet(use_classifier=args.covamnet_classifier, use_gpu=use_gpu)
+        model = CovaMNet(use_gpu=use_gpu)
     elif args.model == 'protonet':
         model = ProtoNet(use_gpu=use_gpu)
     else:  # cosine
