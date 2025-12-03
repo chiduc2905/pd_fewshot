@@ -8,7 +8,7 @@ def get_norm_layer(norm_type='batch'):
     if norm_type == 'batch':
         norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
     elif norm_type == 'instance':
-        norm_layer = functools.partial(nn.InstanceNorm2d, affine=False)
+        norm_layer = functools.partial(nn.InstanceNorm2d, affine=True)
     elif norm_type == 'none':
         norm_layer = None
     else:
@@ -18,7 +18,7 @@ def get_norm_layer(norm_type='batch'):
 class Conv64F_Encoder(nn.Module):
     """4-layer CNN encoder. Input: 3x64x64 -> Output: 64x16x16."""
     
-    def __init__(self, norm_layer=nn.InstanceNorm2d):
+    def __init__(self, norm_layer=functools.partial(nn.InstanceNorm2d, affine=True)):
         super(Conv64F_Encoder, self).__init__()
         if type(norm_layer) == functools.partial:
             use_bias = norm_layer.func == nn.InstanceNorm2d
