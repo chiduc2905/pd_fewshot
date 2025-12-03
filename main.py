@@ -138,6 +138,8 @@ def train_loop(net, train_loader, val_loader, args):
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{args.num_epochs}')
         for query, q_labels, support, s_labels in pbar:
+            optimizer.zero_grad()  # Reset gradients!
+            
             B = query.shape[0]
             C, H, W = query.shape[2], query.shape[3], query.shape[4]
             
