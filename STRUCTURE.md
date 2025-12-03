@@ -1,16 +1,3 @@
-# Project Structure
-
-## Architecture
-
-```
-Input (3×64×64) → Conv64F_Encoder (64×16×16) → Model Head → Scores (way_num)
-```
-
-### Models
-
-| Model | Head | Metric |
-|-------|------|--------|
-| CosineNet | AvgPool → FC | Cosine similarity |
 | ProtoNet | AvgPool | Negative Euclidean |
 | CovaMNet | CovaBlock | Covariance-based |
 

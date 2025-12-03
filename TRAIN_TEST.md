@@ -31,20 +31,7 @@
 ## Training
 
 ```bash
-<<<<<<< HEAD
-# Default (CovaMNet 3-way 1-shot, Contrastive + Center Loss)
-python main.py --mode train --lambda_center 0.001
-
-# SupCon Loss + Center Loss
-python main.py --mode train --loss supcon --temp 0.1 --lambda_center 0.001
-
-# Triplet Loss + Center Loss
-python main.py --mode train --loss triplet --margin 0.5 --lambda_center 0.001
-
-# ProtoNet 5-shot
-python main.py --model protonet --shot_num 5 --mode train
-=======
-# Default (CovaMNet 2-way 1-shot)
+# Default (CovaMNet 2-way 1-shot, Contrastive + Center Loss)
 python main.py --mode train
 
 # ProtoNet 5-shot
@@ -52,7 +39,9 @@ python main.py --model protonet --shot_num 5 --mode train
 
 # Limited samples (40 total = 20/class)
 python main.py --model cosine --training_samples 40 --mode train
->>>>>>> 051989f71e953b580b9f773333b5ca5a9e8d0716
+
+# Triplet Loss + Center Loss
+python main.py --mode train --loss triplet --margin 0.5 --lambda_center 0.1
 ```
 
 ## Testing

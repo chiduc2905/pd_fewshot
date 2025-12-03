@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 
 def seed_func(seed=42):
@@ -195,10 +197,25 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     unique_n = len(np.unique(features, axis=0))
     print(f"t-SNE: Plotting {n} points (Unique: {unique_n})")
     
+    # 1. StandardScaler
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+    
+    # 2. PCA (reduce to 30 dims or less)
+    n_components = min(30, n, features.shape[1])
+    pca = PCA(n_components=n_components, random_state=42)
+    features_pca = pca.fit_transform(features_scaled)
+    print(f"  PCA reduced to {n_components} dimensions")
+    
     perp = min(30, max(5, n // 3))
     
     tsne = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
-    embedded = tsne.fit_transform(features)
+    embedded = tsne.fit_transform(features_pca)
+    
+    # Rescale to fit within [-50, 50]
+    max_val = np.abs(embedded).max()
+    if max_val > 0:
+        embedded = embedded / max_val * 45  # Scale to max 45 to leave margin
     
     plt.figure(figsize=(12, 10))
     sns.set_style('white')
@@ -214,6 +231,8 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     plt.title(f't-SNE ({n} samples)', fontsize=20, fontweight='bold')
     plt.xlabel('Dim 1', fontsize=16, fontweight='bold')
     plt.ylabel('Dim 2', fontsize=16, fontweight='bold')
+    plt.xlim(-50, 50)
+    plt.ylim(-50, 50)
     plt.tick_params(axis='both', which='major', labelsize=14)
     
     plt.tight_layout()
