@@ -4,9 +4,9 @@
 # Actual training/testing is controlled via command line arguments in main.py.
 
 ## Dataset Configuration
-# DATASET_PATH = ./scalogram_images/
-# CLASSES = ['corona', 'no_pd', 'surface']
-# NUM_CLASSES = 3
+# DATASET_PATH = ./prpd_images_for_cnn/
+# CLASSES = ['surface', 'corona']
+# NUM_CLASSES = 2
 # SPLIT = 70% train / 15% validation / 15% test
 
 ## Training Configuration
@@ -17,7 +17,7 @@
 # BATCH_SIZE = 1  # Episodes per batch
 
 ## Few-Shot Settings
-# WAY_NUM = 3    # Number of classes per episode
+# WAY_NUM = 2    # Number of classes per episode
 # SHOT_NUM = 1   # Support samples per class (1 or 5)
 # QUERY_NUM = 19 (1-shot) or 15 (5-shot)  # Query samples per class
 # EPISODE_NUM_TRAIN = 1000 (1-shot) or 600 (5-shot)

@@ -29,7 +29,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='PD Scalogram Few-shot Learning')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='./scalogram_images/')
+    parser.add_argument('--dataset_path', type=str, default='./prpd_images_for_cnn/')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')
@@ -40,7 +40,7 @@ def get_args():
 
     
     # Few-shot settings
-    parser.add_argument('--way_num', type=int, default=3)
+    parser.add_argument('--way_num', type=int, default=2)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=1, help='Queries per class per episode')
     
@@ -127,6 +127,13 @@ def train_loop(net, train_loader, val_loader, args):
     
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
     
+    if args.use_arcface:
+        print("Initializing ArcFace Auxiliary Loss...")
+        # Input: 64 (Encoder output) -> Output: Way (2)
+        arcface = ArcFace(in_features=64, out_features=args.way_num).to(args.device)
+        # Add ArcFace parameters to optimizer
+        optimizer.add_param_group({'params': arcface.parameters()})
+    
     best_acc = 0.0
     
     for epoch in range(1, args.num_epochs + 1):
@@ -143,7 +150,7 @@ def train_loop(net, train_loader, val_loader, args):
             query = query.to(args.device)
             targets = q_labels.view(-1).to(args.device)
             
-            optimizer.zero_grad()
+            # Forward Main
             scores = net(query, support)
             
             # 1. Main Loss (Contrastive or Triplet)
@@ -202,7 +209,6 @@ def train_loop(net, train_loader, val_loader, args):
             pbar.set_postfix(loss=f'{loss.item():.4f}')
         
         scheduler.step()
-        
         # Validate
         val_acc = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)

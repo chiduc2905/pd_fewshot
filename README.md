@@ -1,3 +1,4 @@
+# prpd_fewshot
 # PD Scalogram Few-Shot Learning
 
 Few-shot classification of Partial Discharge patterns using scalogram images.
@@ -31,7 +32,7 @@ python main.py --model covamnet --shot_num 1 --mode test
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--model` | covamnet | Model: cosine, protonet, covamnet |
-| `--way_num` | 3 | Classes per episode |
+| `--way_num` | 2 | Classes per episode |
 | `--shot_num` | 1 | Support samples per class |
 | `--query_num` | 1 | Query samples per class |
 | `--training_samples` | all | Total training samples (e.g., 30=10/class) |
@@ -46,9 +47,9 @@ python main.py --model covamnet --shot_num 1 --mode test
 
 | Phase | Episodes | Total Predictions |
 |-------|----------|-------------------|
-| Training | 100/epoch | 300 (100 × 3) |
-| Validation | 75 | 225 (75 × 3) |
-| Final Test | 150 | 450 (150 × 3) |
+| Training | 100/epoch | 200 (100 × 2) |
+| Validation | 75 | 150 (75 × 2) |
+| Final Test | 150 | 300 (150 × 2) |
 
 ### Final Test Metrics
 - Accuracy, Precision, Recall, F1, p-value
@@ -57,10 +58,9 @@ python main.py --model covamnet --shot_num 1 --mode test
 ## Dataset
 
 ```
-scalogram_images/
-├── corona/    # Class 0
-├── no_pd/     # Class 1  
-└── surface/   # Class 2
+prpd_images_for_cnn/
+├── surface/   # Class 0
+└── corona/    # Class 1
 ```
 
 - **Input**: 64×64 RGB

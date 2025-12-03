@@ -11,18 +11,18 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 
-CLASS_MAP = {'corona': 0, 'no_pd': 1, 'surface': 2}
+CLASS_MAP = {'surface': 0, 'corona': 1}
 
 
 class PDScalogram:
-    """Dataset loader with auto-computed normalization."""
+    """Dataset loader with auto-computed normalization (from training set only)."""
     
     def __init__(self, data_path, val_per_class=30, test_per_class=30):
         """
         Args:
             data_path: Path to dataset directory
-            val_per_class: Samples reserved for validation per class (default: 50)
-            test_per_class: Samples reserved for test per class (default: 50)
+            val_per_class: Samples reserved for validation per class
+            test_per_class: Samples reserved for test per class
         """
         self.data_path = os.path.abspath(data_path)
         self.val_per_class = val_per_class
@@ -69,23 +69,28 @@ class PDScalogram:
                 files = [f for f in os.listdir(path) 
                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
                 class_sizes[class_name] = len(files)
+            else:
+                class_sizes[class_name] = 0
         
         if not class_sizes:
             raise ValueError(f"No data found in {self.data_path}")
 
         min_size = min(class_sizes.values())
+        if min_size == 0:
+            print("Warning: Found empty class or no images.")
+            return {}, {}, {}
+
         val_size = min(self.val_per_class, min_size)
         test_size = min(self.test_per_class, min_size - val_size)
         eval_total = val_size + test_size
         
         print(f'Split: {val_size}/class for val, {test_size}/class for test, rest for train')
         
-        for class_name, label in CLASS_MAP.items():
+        for class_name in CLASS_MAP:
             path = os.path.join(self.data_path, class_name)
             if not os.path.exists(path):
-                print(f'  Warning: {path} not found')
                 continue
-            
+                
             files = sorted([f for f in os.listdir(path) 
                            if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
             random.Random(42).shuffle(files)
@@ -164,7 +169,8 @@ class PDScalogram:
         for X, y, seed in [(self.X_train, self.y_train, 0),
                            (self.X_val, self.y_val, 1),
                            (self.X_test, self.y_test, 2)]:
-            idx = list(range(len(X)))
-            random.Random(seed).shuffle(idx)
-            X[:] = X[idx]
-            y[:] = y[idx]
+            if len(X) > 0:
+                idx = list(range(len(X)))
+                random.Random(seed).shuffle(idx)
+                X[:] = X[idx]
+                y[:] = y[idx]
