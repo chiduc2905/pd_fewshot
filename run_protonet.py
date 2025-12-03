@@ -33,14 +33,13 @@ def main():
     model = 'protonet'
     shots = [1, 5]
     losses = ['contrastive', 'triplet']
-    lambda_centers = [0, 0.1]
+    lambda_center = 0.1
     sample_sizes = [12, 60, None]
     
     for shot in shots:
         for loss in losses:
-            for lambda_center in lambda_centers:
-                for samples in sample_sizes:
-                    run_experiment(model, shot, loss, samples, lambda_center, args.project)
+            for samples in sample_sizes:
+                run_experiment(model, shot, loss, samples, lambda_center, args.project)
 
 if __name__ == "__main__":
     main()

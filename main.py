@@ -346,6 +346,24 @@ def test_final(net, loader, args):
         wandb.log({"tsne_plot": wandb.Image(tsne_path)})
     
     print(f"\nResults logged to WandB and plots saved to {args.path_results}")
+    
+    # Save results to text file
+    txt_path = os.path.join(args.path_results, 
+                            f"results_{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}{samples_str}.txt")
+    with open(txt_path, 'w') as f:
+        f.write(f"Model: {args.model}\n")
+        f.write(f"Shot: {args.shot_num}\n")
+        f.write(f"Loss: {args.loss}\n")
+        f.write(f"Lambda Center: {args.lambda_center}\n")
+        f.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
+        f.write("-" * 30 + "\n")
+        f.write(f"Accuracy : {acc:.4f}\n")
+        f.write(f"Precision: {prec:.4f}\n")
+        f.write(f"Recall   : {rec:.4f}\n")
+        f.write(f"F1-Score : {f1:.4f}\n")
+        f.write(f"p-value  : {p_val:.2e}\n")
+    
+    print(f"Results saved to {txt_path}")
 
 
 # =============================================================================
