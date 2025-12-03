@@ -11,7 +11,7 @@ def get_norm_layer(norm_type='group'):
         norm_layer = functools.partial(nn.InstanceNorm2d, affine=True)
     elif norm_type == 'group':
         # Use 8 groups for 64 channels (8 channels per group)
-        norm_layer = functools.partial(nn.GroupNorm, num_groups=8)
+        norm_layer = functools.partial(nn.GroupNorm, 8)
     elif norm_type == 'none':
         norm_layer = None
     else:
@@ -21,7 +21,7 @@ def get_norm_layer(norm_type='group'):
 class Conv64F_Encoder(nn.Module):
     """4-layer CNN encoder. Input: 3x64x64 -> Output: 64x16x16."""
     
-    def __init__(self, norm_layer=functools.partial(nn.GroupNorm, num_groups=8)):
+    def __init__(self, norm_layer=functools.partial(nn.GroupNorm, 8)):
         super(Conv64F_Encoder, self).__init__()
         # GroupNorm and BatchNorm use bias=False in conv, others use bias=True
         if type(norm_layer) == functools.partial:
