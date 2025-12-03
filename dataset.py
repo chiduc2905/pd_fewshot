@@ -102,6 +102,7 @@ class PDScalogram:
             train_files_class = files[eval_total:]
             
             # Store as (full_path, label) tuples
+            label = CLASS_MAP[class_name]
             self.val_files.extend([(os.path.join(path, f), label) for f in val_files_class])
             self.test_files.extend([(os.path.join(path, f), label) for f in test_files_class])
             self.train_files.extend([(os.path.join(path, f), label) for f in train_files_class])
