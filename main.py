@@ -37,6 +37,9 @@ def get_args():
     # Model
     parser.add_argument('--model', type=str, default='covamnet', 
                         choices=['cosine', 'protonet', 'covamnet'])
+    parser.add_argument('--encoder_type', type=str, default='default',
+                        choices=['default', 'paper'],
+                        help='Encoder type for ProtoNet: default (GroupNorm) or paper (BatchNorm, official)')
 
     
     # Few-shot settings
@@ -90,7 +93,7 @@ def get_model(args):
     if args.model == 'covamnet':
         model = CovaMNet(device=device)
     elif args.model == 'protonet':
-        model = ProtoNet(device=device)
+        model = ProtoNet(encoder_type=args.encoder_type, device=device)
     else:  # cosine
         model = CosineNet(device=device)
     
