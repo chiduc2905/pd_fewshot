@@ -307,7 +307,11 @@ def test_final(net, loader, args):
             q_flat = query.view(-1, C, H, W)
             if hasattr(net, 'encoder'):
                 feat = net.encoder(q_flat)
-                feat = nn.functional.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
+                # Handle both 4D feature maps and 2D flattened features
+                if feat.dim() == 4:  # (B, C, H, W) - default encoder
+                    feat = nn.functional.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
+                elif feat.dim() == 2:  # (B, feat_dim) - paper encoder, already flattened
+                    pass  # Already flattened
                 all_features.append(feat.cpu().numpy())
     
     # Metrics
