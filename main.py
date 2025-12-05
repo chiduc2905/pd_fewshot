@@ -39,7 +39,7 @@ def get_args():
     # Model
     parser.add_argument('--model', type=str, default='covamnet', 
                         choices=['cosine', 'protonet', 'covamnet', 'matchingnet', 'relationnet'])
-    parser.add_argument('--encoder_type', type=str, default='default',
+    parser.add_argument('--encoder_type', type=str, default='paper',
                         choices=['default', 'paper'],
                         help='Encoder type for ProtoNet: default (GroupNorm) or paper (BatchNorm, official)')
 
@@ -53,7 +53,7 @@ def get_args():
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
     parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=75)
+    parser.add_argument('--episode_num_val', type=int, default=100)
     parser.add_argument('--num_epochs', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -74,8 +74,8 @@ def get_args():
                         help='Margin for Triplet loss (default: 0.1)')
     
     # Center Loss
-    parser.add_argument('--lambda_center', type=float, default=0.1, 
-                        help='Weight for Center Loss (default: 0.1)')
+    parser.add_argument('--lambda_center', type=float, default=0.0, 
+                        help='Weight for Center Loss (default: 0.0, disabled)')
     
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
@@ -110,8 +110,16 @@ def get_model(args):
 # Training
 # =============================================================================
 
-def train_loop(net, train_loader, val_loader, args):
-    """Train with validation-based model selection."""
+def train_loop(net, train_loader, val_X, val_y, args):
+    """Train with validation-based model selection.
+    
+    Args:
+        net: Model to train
+        train_loader: Training data loader
+        val_X: Validation images tensor
+        val_y: Validation labels tensor
+        args: Training arguments
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Loss functions - Auto-select based on model
@@ -219,7 +227,13 @@ def train_loop(net, train_loader, val_loader, args):
             pbar.set_postfix(loss=f'{loss.item():.4f}')
         
         scheduler.step()
-        # Validate
+        
+        # Validate - Create new validation dataset each epoch with seed+epoch
+        # This ensures different episodes per epoch while maintaining reproducibility
+        val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
+                                args.way_num, args.shot_num, 1, args.seed + epoch)
+        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
+        
         val_acc = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)
         print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Val Acc={val_acc:.4f}')
@@ -442,25 +456,25 @@ def main():
         train_y = torch.cat(y_list)
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
-    # Create data loaders (all use 1 query per class)
+    # Create data loaders
+    # Training: Fixed seed, shuffled loader for varied batch order
     train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
                               args.way_num, args.shot_num, 1, args.seed)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     
-    val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                            args.way_num, args.shot_num, 1, args.seed)
+    # Validation: Will be recreated each epoch with seed+epoch in train_loop
+    # This ensures different episodes per epoch but reproducibility across program runs
     
+    # Test: Fixed seed ensures identical episodes across all runs
     test_ds = FewshotDataset(test_X, test_y, 150,  # Fixed 150 episodes for test
                              args.way_num, args.shot_num, 1, args.seed)
-    
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
     # Initialize Model
     net = get_model(args)
     
     if args.mode == 'train':
-        train_loop(net, train_loader, val_loader, args)
+        train_loop(net, train_loader, val_X, val_y, args)
         
         # Load best model for testing
         path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_best.pth')
