@@ -31,7 +31,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='PD Scalogram Few-shot Learning')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='./prpd_images_for_cnn/')
+    parser.add_argument('--dataset_path', type=str, default='./scalogram_images/')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')
@@ -47,7 +47,7 @@ def get_args():
 
     
     # Few-shot settings
-    parser.add_argument('--way_num', type=int, default=2)
+    parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=1, help='Queries per class per episode')
     

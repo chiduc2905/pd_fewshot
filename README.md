@@ -1,4 +1,3 @@
-# prpd_fewshot
 # PD Scalogram Few-Shot Learning
 
 Few-shot classification of Partial Discharge patterns using scalogram images.
@@ -10,6 +9,8 @@ Few-shot classification of Partial Discharge patterns using scalogram images.
 | **CovaMNet** | Covariance Metric Network |
 | **ProtoNet** | Prototypical Network |
 | **CosineNet** | Cosine Similarity Network |
+| **MatchingNet** | Matching Network |
+| **RelationNet** | Relation Network |
 
 ## Quick Start
 
@@ -31,13 +32,13 @@ python main.py --model covamnet --shot_num 1 --mode test
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model` | covamnet | Model: cosine, protonet, covamnet |
-| `--way_num` | 2 | Classes per episode |
+| `--model` | covamnet | Model: cosine, protonet, covamnet, matchingnet, relationnet |
+| `--way_num` | 3 | Classes per episode |
 | `--shot_num` | 1 | Support samples per class |
 | `--query_num` | 1 | Query samples per class |
-| `--training_samples` | all | Total training samples (e.g., 30=10/class) |
+| `--training_samples` | all | Total training samples |
 | `--num_epochs` | 100/70 | Training epochs (1-shot/5-shot) |
-| `--lr` | 1e-3 | Learning rate |
+| `--lr` | 1e-4 | Learning rate |
 
 ## Evaluation Protocol
 
@@ -47,29 +48,30 @@ python main.py --model covamnet --shot_num 1 --mode test
 
 | Phase | Episodes | Total Predictions |
 |-------|----------|-------------------|
-| Training | 100/epoch | 200 (100 × 2) |
-| Validation | 75 | 150 (75 × 2) |
-| Final Test | 150 | 300 (150 × 2) |
+| Training | 100/epoch | 300 (100 × 3) |
+| Validation | 100 | 300 (100 × 3) |
+| Final Test | 150 | 450 (150 × 3) |
 
 ### Final Test Metrics
 - Accuracy, Precision, Recall, F1, p-value
-- Confusion matrix: each row sums to 150
+- Confusion matrix, t-SNE plots
 
 ## Dataset
 
 ```
-prpd_images_for_cnn/
+scalogram_images/
 ├── surface/   # Class 0
-└── corona/    # Class 1
+├── corona/    # Class 1
+└── no_pd/     # Class 2
 ```
 
 - **Input**: 64×64 RGB
-- **Split**: 75/class for val/test, rest for train
-- **Normalization**: Auto-computed from dataset
+- **Split**: 40/class for val, 40/class for test, rest for train
+- **Normalization**: Auto-computed from training set
 
 ## Results
 
 Results saved to `results/`:
-- `summary_*.txt` - Metrics table
+- `results_*.txt` - Metrics
 - `confusion_matrix_*.png` - Confusion matrix
 - `tsne_*.png` - t-SNE visualization

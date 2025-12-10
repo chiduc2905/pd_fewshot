@@ -11,7 +11,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 
-CLASS_MAP = {'surface': 0, 'corona': 1}
+CLASS_MAP = {'surface': 0, 'corona': 1, 'no_pd': 2}
 
 
 class PDScalogram:

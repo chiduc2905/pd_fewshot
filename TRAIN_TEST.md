@@ -4,7 +4,7 @@
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--dataset_path` | `./prpd_images_for_cnn/` | Dataset path |
+| `--dataset_path` | `./scalogram_images/` | Dataset path |
 | `--path_weights` | `checkpoints/` | Checkpoint directory |
 | `--path_results` | `results/` | Results directory |
 | `--weights` | None | Custom weights for testing |
