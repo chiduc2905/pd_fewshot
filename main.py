@@ -348,7 +348,12 @@ def test_final(net, loader, args):
     all_targets = np.array(all_targets)
     
     acc = (all_preds == all_targets).mean()
-    prec, rec, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average='macro')
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        all_targets, all_preds, 
+        labels=list(range(args.way_num)),  # Ensure all classes are included
+        average='macro', 
+        zero_division=0
+    )
     p_val = calculate_p_value(acc, 1.0/args.way_num, len(all_targets))
     
     print(f"\nAccuracy : {acc:.4f}")

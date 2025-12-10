@@ -11,7 +11,7 @@ def get_args():
 # matchingnet_resnet12 is a special case: matchingnet with resnet12 backbone
 models = ['covamnet', 'protonet', 'cosine', 'matchingnet', 'matchingnet_resnet12', 'relationnet']
 shots = [1, 5]
-samples_list = [12, 60, None]  # None means all samples
+samples_list = [18, 60, None]  # None means all samples
 lambda_center = 0
 
 total_experiments = len(models) * len(shots) * len(samples_list)

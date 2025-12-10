@@ -2,7 +2,7 @@ import subprocess
 import sys
 
 # Matching Networks experiments
-def run_matchingnet_experiments(shots=[1, 5], samples_list=[12, 60, None]):
+def run_matchingnet_experiments(shots=[1, 5], samples_list=[18, 60, None]):
     """Run MatchingNet experiments with different configurations."""
     
     model = 'matchingnet'

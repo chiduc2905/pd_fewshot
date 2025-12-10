@@ -2,7 +2,7 @@ import subprocess
 import sys
 
 # Relation Networks experiments
-def run_relationnet_experiments(shots=[1, 5], samples_list=[12, 60, None]):
+def run_relationnet_experiments(shots=[1, 5], samples_list=[18, 60, None]):
     """Run RelationNet experiments with different configurations."""
     
     model = 'relationnet'
