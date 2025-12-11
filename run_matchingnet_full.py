@@ -1,6 +1,14 @@
 """Run MatchingNet experiments with all backbones, image sizes, and sample configurations."""
 import subprocess
 import sys
+import argparse
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Run all MatchingNet experiments')
+    parser.add_argument('--project', type=str, default='prpd', help='WandB project name')
+    return parser.parse_args()
+
+args = get_args()
 
 # Configuration
 backbones = ['conv64f', 'resnet12', 'resnet18']
@@ -13,6 +21,7 @@ current = 0
 
 print(f"=" * 70)
 print(f"MatchingNet Full Experiment Suite")
+print(f"  Project: {args.project}")
 print(f"  Backbones: {backbones}")
 print(f"  Image Sizes: {image_sizes}")
 print(f"  Samples: {samples_list}")
@@ -35,8 +44,8 @@ for backbone in backbones:
                        '--shot_num', str(shot),
                        '--loss', 'contrastive',
                        '--lambda_center', '0',
-                       '--mode', 'train'
-                       '--project', 'baseline_scalogram_2']
+                       '--mode', 'train',
+                       '--project', args.project]
                 
                 if samples is not None:
                     cmd.extend(['--training_samples', str(samples)])
@@ -49,4 +58,6 @@ for backbone in backbones:
 
 print(f"\n{'=' * 70}")
 print(f"All {total} MatchingNet experiments completed!")
+print(f"{'=' * 70}")
+
 print(f"{'=' * 70}")
