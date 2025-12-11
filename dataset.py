@@ -1,8 +1,8 @@
 """PD Scalogram Dataset Loader.
 
-- Input: 64×64 RGB images
+- Input: Configurable size RGB images (64×64 default, 84×84 for standard benchmarks)
 - Normalization: Auto-computed from dataset
-- Split: 30 samples/class for val, 30 samples/class for test, remainder for training
+- Split: 40 samples/class for val, 40 samples/class for test, remainder for training
 """
 import os
 import random
@@ -17,16 +17,18 @@ CLASS_MAP = {'surface': 0, 'corona': 1, 'no_pd': 2}
 class PDScalogram:
     """Dataset loader with auto-computed normalization (from training set only)."""
     
-    def __init__(self, data_path, val_per_class=40, test_per_class=40):
+    def __init__(self, data_path, val_per_class=40, test_per_class=40, image_size=64):
         """
         Args:
             data_path: Path to dataset directory
             val_per_class: Samples reserved for validation per class
             test_per_class: Samples reserved for test per class
+            image_size: Input image size (default: 64, use 84 for standard benchmarks)
         """
         self.data_path = os.path.abspath(data_path)
         self.val_per_class = val_per_class
         self.test_per_class = test_per_class
+        self.image_size = image_size
         self.classes = sorted(CLASS_MAP.keys(), key=lambda c: CLASS_MAP[c])
         
         # Placeholders
@@ -42,7 +44,7 @@ class PDScalogram:
         
         # Base transform (no normalization yet)
         self._base_transform = transforms.Compose([
-            transforms.Resize((64, 64)),
+            transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
         ])
         
@@ -130,7 +132,7 @@ class PDScalogram:
         
         # Final transform with normalization
         self.transform = transforms.Compose([
-            transforms.Resize((64, 64)),
+            transforms.Resize((self.image_size, self.image_size)),
             transforms.ToTensor(),
             transforms.Normalize(self.mean, self.std),
         ])

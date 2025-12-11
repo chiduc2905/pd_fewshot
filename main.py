@@ -50,6 +50,8 @@ def get_args():
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=1, help='Queries per class per episode')
+    parser.add_argument('--image_size', type=int, default=64, choices=[64, 84],
+                        help='Input image size: 64 (default) or 84 (standard benchmark)')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
@@ -466,7 +468,7 @@ def main():
     os.makedirs(args.path_results, exist_ok=True)
     
     # Load dataset
-    dataset = PDScalogram(args.dataset_path)
+    dataset = PDScalogram(args.dataset_path, image_size=args.image_size)
     
     def to_tensor(X, y):
         X = torch.from_numpy(X.astype(np.float32))
