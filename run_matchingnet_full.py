@@ -35,7 +35,8 @@ for backbone in backbones:
                        '--shot_num', str(shot),
                        '--loss', 'contrastive',
                        '--lambda_center', '0',
-                       '--mode', 'train']
+                       '--mode', 'train'
+                       '--project', 'baseline_scalogram_2']
                 
                 if samples is not None:
                     cmd.extend(['--training_samples', str(samples)])
