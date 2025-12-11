@@ -233,6 +233,9 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         scheduler.step()
         
+        # Evaluate on training set (same episodes used for training)
+        train_acc = evaluate(net, train_loader, args)
+        
         # Validate - Create new validation dataset each epoch with seed+epoch
         # This ensures different episodes per epoch while maintaining reproducibility
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
@@ -241,13 +244,19 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         val_acc = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)
-        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Val Acc={val_acc:.4f}')
+        
+        # Calculate train-val gap (indicator of overfitting)
+        train_val_gap = train_acc - val_acc
+        
+        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f} (gap={train_val_gap:+.4f})')
         
         # Log to WandB
         wandb.log({
             "epoch": epoch,
             "train_loss": avg_loss,
+            "train_acc": train_acc,
             "val_acc": val_acc,
+            "train_val_gap": train_val_gap,
             "lr": optimizer.param_groups[0]['lr']
         })
         

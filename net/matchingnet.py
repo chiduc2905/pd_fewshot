@@ -73,7 +73,7 @@ class MatchingNet(nn.Module):
     def __init__(self, backbone='conv64f', init_type='kaiming', device='cuda'):
         """
         Args:
-            backbone: 'conv64f' (paper default, 1024 dim) or 'resnet12' (512 dim)
+            backbone: 'conv64f' (paper default, 1024 dim), 'resnet12' (512 dim), or 'resnet18' (512 dim)
             init_type: Weight initialization type
             device: Device to use
         """
@@ -83,6 +83,10 @@ class MatchingNet(nn.Module):
         if backbone == 'resnet12':
             from net.encoders.resnet12_encoder import ResNet12Encoder
             self.encoder = ResNet12Encoder()
+            feat_dim = 512
+        elif backbone == 'resnet18':
+            from net.encoders.resnet18_encoder import ResNet18Encoder
+            self.encoder = ResNet18Encoder(pretrained=False)
             feat_dim = 512
         else:  # conv64f - paper default
             self.encoder = MatchingNetEncoder()

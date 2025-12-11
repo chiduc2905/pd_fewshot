@@ -5,6 +5,7 @@ from .protonet_encoder import Conv64F_Paper_Encoder
 from .matchingnet_encoder import MatchingNetEncoder
 from .relationnet_encoder import RelationNetEncoder
 from .resnet12_encoder import ResNet12Encoder
+from .resnet18_encoder import ResNet18Encoder
 
 __all__ = [
     'Conv64F_Encoder',
@@ -12,5 +13,6 @@ __all__ = [
     'MatchingNetEncoder',
     'RelationNetEncoder',
     'ResNet12Encoder',
+    'ResNet18Encoder',
     'get_norm_layer',
 ]
