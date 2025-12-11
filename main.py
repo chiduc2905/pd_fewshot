@@ -42,8 +42,8 @@ def get_args():
     parser.add_argument('--use_base_encoder', action='store_true',
                         help='Use Conv64F_Encoder (GroupNorm) for ProtoNet instead of paper-specific encoder')
     parser.add_argument('--backbone', type=str, default='conv64f',
-                        choices=['conv64f', 'resnet12'],
-                        help='Backbone for MatchingNet: conv64f (paper, 1024 dim) or resnet12 (512 dim)')
+                        choices=['conv64f', 'resnet12', 'resnet18'],
+                        help='Backbone for MatchingNet: conv64f (paper, 1024 dim), resnet12 (512 dim), or resnet18 (512 dim)')
 
     
     # Few-shot settings
@@ -443,6 +443,8 @@ def main():
     elif args.model == 'matchingnet':
         if args.backbone == 'resnet12':
             encoder_info = "ResNet12Encoder (BatchNorm, 512 dim) [--backbone resnet12]"
+        elif args.backbone == 'resnet18':
+            encoder_info = "ResNet18Encoder (BatchNorm, 512 dim) [--backbone resnet18]"
         else:
             encoder_info = "MatchingNetEncoder (BatchNorm, 1024 dim) [default]"
     elif args.model == 'relationnet':
