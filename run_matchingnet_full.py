@@ -16,17 +16,22 @@ image_sizes = [64, 84]
 samples_list = [18, 60, None]  # None = all
 shots = [1, 5]
 
-total = len(backbones) * len(image_sizes) * len(samples_list) * len(shots)
+# Total experiments calculation:
+# conv64f: 1 size × 3 samples × 2 shots = 6
+# resnet12: 2 sizes × 3 samples × 2 shots = 12
+# resnet18: 2 sizes × 3 samples × 2 shots = 12
+# Total = 6 + 12 + 12 = 30
+total = 1 * len(samples_list) * len(shots) + 2 * len(image_sizes) * len(samples_list) * len(shots)
 current = 0
 
 print(f"=" * 70)
 print(f"MatchingNet Full Experiment Suite")
 print(f"  Project: {args.project}")
 print(f"  Backbones: {backbones}")
-print(f"  Image Sizes: {image_sizes}")
+print(f"  Image Sizes: conv64f→[64], resnet12/18→{image_sizes}")
 print(f"  Samples: {samples_list}")
 print(f"  Shots: {shots}")
-print(f"  Total: {len(backbones)} × {len(image_sizes)} × {len(samples_list)} × {len(shots)} = {total} experiments")
+print(f"  Total: {total} experiments")
 print(f"=" * 70)
 
 for backbone in backbones:
