@@ -30,7 +30,14 @@ print(f"  Total: {len(backbones)} × {len(image_sizes)} × {len(samples_list)} �
 print(f"=" * 70)
 
 for backbone in backbones:
-    for image_size in image_sizes:
+    # conv64f baseline only works with 64x64 (uses flatten, not GAP)
+    # resnet12/resnet18 work with any size (use Global Average Pooling)
+    if backbone == 'conv64f':
+        valid_sizes = [64]
+    else:
+        valid_sizes = image_sizes  # [64, 84]
+    
+    for image_size in valid_sizes:
         for samples in samples_list:
             for shot in shots:
                 current += 1
