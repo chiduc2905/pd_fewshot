@@ -201,7 +201,7 @@ def main():
         # Visualize all layers
         print(f"\nVisualizing all layers...")
         saved_paths = visualize_layer_progression(
-            encoder, image_tensor.cpu(), save_dir=args.output
+            encoder.cpu(), image_tensor.cpu(), save_dir=args.output
         )
         print(f"Created {len(saved_paths)} visualizations")
         
