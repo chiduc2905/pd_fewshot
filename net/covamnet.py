@@ -10,13 +10,13 @@ from net.utils import init_weights
 class CovarianceNet(nn.Module):
     """Few-shot classifier using covariance-based similarity."""
     
-    def __init__(self, norm_layer=functools.partial(nn.GroupNorm, 8), num_classes=5, init_type='kaiming', device='cuda', input_size=64):
+    def __init__(self, norm_layer=functools.partial(nn.BatchNorm2d, affine=True), num_classes=5, device='cuda', input_size=64):
         super(CovarianceNet, self).__init__()
 
         if type(norm_layer) == str:
              norm_layer = get_norm_layer(norm_layer)
         elif norm_layer is None:
-             norm_layer = functools.partial(nn.GroupNorm, 8)
+             norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
 
         # GroupNorm and BatchNorm use bias=False in conv, InstanceNorm uses bias=True
         if type(norm_layer) == functools.partial:
@@ -40,7 +40,7 @@ class CovarianceNet(nn.Module):
             nn.Conv1d(1, 1, kernel_size=kernel_size, stride=kernel_size, bias=use_bias),
         )
         
-        init_weights(self, init_type=init_type)
+        init_weights(self, init_type='normal')  # Paper uses normal init
         self.to(device)
 
     def forward(self, query, support):

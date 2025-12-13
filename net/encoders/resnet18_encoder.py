@@ -58,8 +58,8 @@ class ResNet18Encoder(nn.Module):
         self.out_dim = 512
         
         # Re-initialize weights if not pretrained (for fair comparison)
-        if not pretrained:
-            self._init_weights()
+        # if not pretrained:
+        #     self._init_weights()  # Temporarily disabled
     
     def _init_weights(self):
         """Initialize weights with Kaiming initialization."""

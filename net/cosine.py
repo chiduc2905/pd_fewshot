@@ -3,19 +3,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from net.encoders.base_encoder import Conv64F_Encoder
-from net.utils import init_weights
 
 
 class CosineNet(nn.Module):
     """Few-shot classifier using cosine similarity metric."""
     
-    def __init__(self, init_type='kaiming', device='cuda'):
+    def __init__(self, device='cuda'):
         super(CosineNet, self).__init__()
         self.encoder = Conv64F_Encoder()
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(64, 64) 
         
-        init_weights(self, init_type=init_type)
+        # Uses PyTorch default init
         self.to(device)
 
     def forward(self, query, support):

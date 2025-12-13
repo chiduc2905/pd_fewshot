@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from net.encoders.relationnet_encoder import RelationNetEncoder
 from net.relation_block import RelationBlock
-from net.utils import init_weights
+from net.utils import weights_init_relationnet
 
 
 class RelationNet(nn.Module):
@@ -23,10 +23,9 @@ class RelationNet(nn.Module):
     - Relation: Concat query & support features -> MLP -> relation score
     """
     
-    def __init__(self, init_type='kaiming', device='cuda'):
+    def __init__(self, device='cuda'):
         """
         Args:
-            init_type: Weight initialization type
             device: Device to use
         """
         super(RelationNet, self).__init__()
@@ -36,7 +35,7 @@ class RelationNet(nn.Module):
         # Relation module: input is concat of query and support (128 channels)
         self.relation = RelationBlock(input_size=128, hidden_size=8)
         
-        init_weights(self, init_type=init_type)
+        self.apply(weights_init_relationnet)  # Paper-specific init
         self.to(device)
     
     def forward(self, query, support):

@@ -1,5 +1,31 @@
+import torch
 import torch.nn as nn
 from torch.nn import init
+import math
+
+
+def weights_init_relationnet(m):
+    """
+    RelationNet paper-specific initialization.
+    Based on official repo: floodsung/LearningToCompare_FSL
+    
+    Conv: He-like init with variance = 2/n
+    BatchNorm: weight=1, bias=0
+    Linear: Normal(0, 0.01), bias=1
+    """
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1 and hasattr(m, 'weight'):
+        n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+        m.weight.data.normal_(0, math.sqrt(2. / n))
+        if m.bias is not None:
+            m.bias.data.zero_()
+    elif classname.find('BatchNorm') != -1 and hasattr(m, 'weight'):
+        m.weight.data.fill_(1)
+        m.bias.data.zero_()
+    elif classname.find('Linear') != -1 and hasattr(m, 'weight'):
+        n = m.weight.size(1)
+        m.weight.data.normal_(0, 0.01)
+        m.bias.data = torch.ones(m.bias.data.size())
 
 def weights_init_normal(m):
     classname = m.__class__.__name__

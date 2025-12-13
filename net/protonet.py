@@ -3,19 +3,17 @@ import torch
 import torch.nn as nn
 from net.encoders.base_encoder import Conv64F_Encoder
 from net.encoders.protonet_encoder import Conv64F_Paper_Encoder
-from net.utils import init_weights
 
 
 class ProtoNet(nn.Module):
     """Few-shot classifier using prototype-based Euclidean distance."""
     
-    def __init__(self, use_base_encoder=False, init_type='kaiming', device='cuda'):
+    def __init__(self, use_base_encoder=False, device='cuda'):
         """Initialize ProtoNet with encoder selection.
         
         Args:
-            use_base_encoder: If True, use Conv64F_Encoder (GroupNorm), 
+            use_base_encoder: If True, use Conv64F_Encoder (BatchNorm), 
                              else use Conv64F_Paper_Encoder (BatchNorm, official)
-            init_type: Weight initialization type
             device: Device to use
         """
         super(ProtoNet, self).__init__()
@@ -28,7 +26,7 @@ class ProtoNet(nn.Module):
             self.encoder = Conv64F_Paper_Encoder()  # Output: (B, 1024) flattened
             self.use_pooling = False  # Paper encoder already flattens
         
-        init_weights(self, init_type=init_type)
+        # Paper uses PyTorch default init
         self.to(device)
 
     def forward(self, query, support):

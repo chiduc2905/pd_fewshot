@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from net.encoders.matchingnet_encoder import MatchingNetEncoder
-from net.utils import init_weights
 
 
 class AttentionLSTM(nn.Module):
@@ -70,11 +69,10 @@ class MatchingNet(nn.Module):
     This implementation follows the paper exactly.
     """
     
-    def __init__(self, backbone='conv64f', init_type='kaiming', device='cuda'):
+    def __init__(self, backbone='conv64f', device='cuda'):
         """
         Args:
             backbone: 'conv64f' (paper default, 1024 dim), 'resnet12' (512 dim), or 'resnet18' (512 dim)
-            init_type: Weight initialization type
             device: Device to use
         """
         super(MatchingNet, self).__init__()
@@ -98,7 +96,7 @@ class MatchingNet(nn.Module):
         self.support_lstm = nn.LSTM(feat_dim, feat_dim // 2, batch_first=True, bidirectional=True)
         self.query_attention_lstm = AttentionLSTM(input_size=feat_dim, hidden_size=feat_dim)
         
-        init_weights(self, init_type=init_type)
+        # Paper uses PyTorch default init
         self.to(device)
     
     def forward(self, query, support):

@@ -21,13 +21,13 @@ def get_norm_layer(norm_type='group'):
 
 class Conv64F_Encoder(nn.Module):
     """
-    Base 4-layer CNN encoder with GroupNorm + LeakyReLU.
+    Base 4-layer CNN encoder with BatchNorm + LeakyReLU.
     Input: 3x64x64 -> Output: 64x16x16
     
-    Used by: CovaMNet, CosineNet (default)
+    Used by: CovaMNet (default), CosineNet
     """
     
-    def __init__(self, norm_layer=functools.partial(nn.GroupNorm, 8)):
+    def __init__(self, norm_layer=functools.partial(nn.BatchNorm2d, affine=True)):
         super(Conv64F_Encoder, self).__init__()
         # GroupNorm and BatchNorm use bias=False in conv, others use bias=True
         if type(norm_layer) == functools.partial:
