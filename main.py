@@ -31,7 +31,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='PD Scalogram Few-shot Learning')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='./scalogram_images/')
+    parser.add_argument('--dataset_path', type=str, default='./scalogram/')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')

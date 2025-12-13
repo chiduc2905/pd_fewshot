@@ -5,6 +5,7 @@ __pycache__/
 wandb/
 results/
 checkpoints/
+PD-data-24-6-2025/
 *.py[codz]
 *$py.class
 

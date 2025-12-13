@@ -11,7 +11,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 
-CLASS_MAP = {'surface': 0, 'corona': 1, 'no_pd': 2}
+CLASS_MAP = {'surface': 0, 'corona': 1, 'nopd': 2}
 
 
 class PDScalogram:
@@ -69,7 +69,8 @@ class PDScalogram:
             path = os.path.join(self.data_path, class_name)
             if os.path.exists(path):
                 files = [f for f in os.listdir(path) 
-                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                        and 'labeled' not in f.lower()]
                 class_sizes[class_name] = len(files)
             else:
                 class_sizes[class_name] = 0
@@ -94,7 +95,8 @@ class PDScalogram:
                 continue
                 
             files = sorted([f for f in os.listdir(path) 
-                           if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+                           if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                           and 'labeled' not in f.lower()])
             random.Random(42).shuffle(files)
             files = files[:min_size]  # Balance classes
             

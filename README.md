@@ -59,10 +59,10 @@ python main.py --model covamnet --shot_num 1 --mode test
 ## Dataset
 
 ```
-scalogram_images/
+scalogram/
 ├── surface/   # Class 0
 ├── corona/    # Class 1
-└── no_pd/     # Class 2
+└── nopd/      # Class 2
 ```
 
 - **Input**: 64×64 RGB

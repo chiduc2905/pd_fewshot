@@ -4,8 +4,8 @@
 # Actual training/testing is controlled via command line arguments in main.py.
 
 ## Dataset Configuration
-# DATASET_PATH = ./scalogram_images/
-# CLASSES = ['surface', 'corona', 'no_pd']
+# DATASET_PATH = ./scalogram/
+# CLASSES = ['surface', 'corona', 'nopd']
 # NUM_CLASSES = 3
 # SPLIT = 40/class for val + 40/class for test, rest for train
 

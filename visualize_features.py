@@ -7,7 +7,7 @@ from trained few-shot learning encoders.
 Usage Examples:
     # Visualize features from MatchingNet with resnet18 backbone
     python visualize_features.py --model matchingnet --backbone resnet18 \
-        --image scalogram_images/corona/sample.png
+        --image scalogram/corona/sample.png
 
     # Visualize all layers with heatmap overlay
     python visualize_features.py --model protonet --image image.png \
