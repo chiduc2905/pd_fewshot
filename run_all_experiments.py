@@ -5,8 +5,6 @@ import argparse
 def get_args():
     parser = argparse.ArgumentParser(description='Run all experiments')
     parser.add_argument('--project', type=str, default='prpd', help='WandB project name')
-    parser.add_argument('--matchingnet_sizes', nargs='+', type=int, default=[64, 84],
-                        help='Image sizes for MatchingNet only (default: [64, 84])')
     return parser.parse_args()
 
 # Configuration
@@ -25,8 +23,8 @@ args = get_args()
 # Calculate total experiments
 # Base models: always 64x64
 base_count = len(base_models) * len(shots) * len(samples_list)
-# MatchingNet variants: multiple image sizes
-matchingnet_count = len(matchingnet_variants) * len(shots) * len(samples_list) * len(args.matchingnet_sizes)
+# MatchingNet variants: 1 size each (conv64f: 64, resnet12/18: 84)
+matchingnet_count = len(matchingnet_variants) * len(shots) * len(samples_list)
 total_experiments = base_count + matchingnet_count
 current_experiment = 0
 
@@ -34,7 +32,7 @@ print(f"=" * 80)
 print(f"Configuration:")
 print(f"  Base Models (64x64 only): {base_models}")
 print(f"  MatchingNet variants: {matchingnet_variants}")
-print(f"  MatchingNet image sizes: {args.matchingnet_sizes}")
+print(f"  MatchingNet image sizes: conv64f=64, resnet12/18=84")
 print(f"  Shots: {shots}")
 print(f"  Samples: {samples_list}")
 print(f"  Total: {base_count} (base) + {matchingnet_count} (matchingnet) = {total_experiments}")
@@ -74,20 +72,23 @@ for model in base_models:
         for samples in samples_list:
             run_experiment(model, shot, samples, image_size=64)
 
-# Run MatchingNet variants (with multiple image sizes)
+# Run MatchingNet variants (with appropriate image sizes)
 print("\n" + "=" * 40)
-print(f"Running MatchingNet Variants ({args.matchingnet_sizes})")
+print("Running MatchingNet Variants (conv64f: 64x64, resnet: 84x84)")
 print("=" * 40)
-for image_size in args.matchingnet_sizes:
-    for variant in matchingnet_variants:
-        # Parse backbone from variant name
-        if variant == 'matchingnet_resnet12':
-            model, backbone = 'matchingnet', 'resnet12'
-        elif variant == 'matchingnet_resnet18':
-            model, backbone = 'matchingnet', 'resnet18'
-        else:
-            model, backbone = 'matchingnet', 'conv64f'
-        
+for variant in matchingnet_variants:
+    # Parse backbone from variant name
+    if variant == 'matchingnet_resnet12':
+        model, backbone = 'matchingnet', 'resnet12'
+        valid_sizes = [84]  # resnet12 uses 84x84 only
+    elif variant == 'matchingnet_resnet18':
+        model, backbone = 'matchingnet', 'resnet18'
+        valid_sizes = [84]  # resnet18 uses 84x84 only
+    else:
+        model, backbone = 'matchingnet', 'conv64f'
+        valid_sizes = [64]  # conv64f uses 64x64 only
+    
+    for image_size in valid_sizes:
         for shot in shots:
             for samples in samples_list:
                 run_experiment(model, shot, samples, image_size, backbone)

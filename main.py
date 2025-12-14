@@ -51,7 +51,7 @@ def get_args():
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=1, help='Queries per class per episode')
     parser.add_argument('--image_size', type=int, default=64, choices=[64, 84],
-                        help='Input image size: 64 (default) or 84 (standard benchmark)')
+                        help='Input image size: 64 (required for conv64f) or 84 (required for resnet12/18)')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
@@ -426,6 +426,16 @@ def test_final(net, loader, args):
 
 def main():
     args = get_args()
+    
+    # Validate: conv64f requires 64x64, resnet12/18 require 84x84
+    if args.backbone == 'conv64f' and args.image_size != 64:
+        print(f"Error: conv64f backbone requires 64x64 image size, got {args.image_size}")
+        print("Use --backbone resnet12 or --backbone resnet18 for 84x84.")
+        return
+    if args.backbone in ['resnet12', 'resnet18'] and args.image_size != 84:
+        print(f"Error: {args.backbone} backbone requires 84x84 image size, got {args.image_size}")
+        print("Use --backbone conv64f for 64x64.")
+        return
     
     # Set defaults based on shot_num
     if args.num_epochs is None:

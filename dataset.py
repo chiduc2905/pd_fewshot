@@ -70,7 +70,8 @@ class PDScalogram:
             if os.path.exists(path):
                 files = [f for f in os.listdir(path) 
                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                        and 'labeled' not in f.lower()]
+                        and 'labeled' not in f.lower()
+                        and 'labeled:' not in f]
                 class_sizes[class_name] = len(files)
             else:
                 class_sizes[class_name] = 0
@@ -96,7 +97,8 @@ class PDScalogram:
                 
             files = sorted([f for f in os.listdir(path) 
                            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                           and 'labeled' not in f.lower()])
+                           and 'labeled' not in f.lower()
+                           and 'labeled:' not in f])
             random.Random(42).shuffle(files)
             files = files[:min_size]  # Balance classes
             
