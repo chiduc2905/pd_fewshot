@@ -17,7 +17,7 @@ CLASS_MAP = {'surface': 0, 'corona': 1, 'nopd': 2}
 class PDScalogram:
     """Dataset loader with auto-computed normalization (from training set only)."""
     
-    def __init__(self, data_path, val_per_class=40, test_per_class=40, image_size=64):
+    def __init__(self, data_path, val_per_class=60, test_per_class=60, image_size=64):
         """
         Args:
             data_path: Path to dataset directory
