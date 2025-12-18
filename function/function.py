@@ -173,14 +173,25 @@ class TripletLoss(nn.Module):
         return loss
 
 
-def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None):
+def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_names=None):
     """
     Plot confusion matrix.
     
     For 150-episode test with 1-query/class: each row sums to 150.
+    
+    Args:
+        targets: Ground truth labels
+        preds: Predicted labels
+        num_classes: Number of classes
+        save_path: Path to save the figure
+        class_names: List of class names (default: ['surface', 'corona', 'nopd'])
     """
-    # Set font properties globally for this plot
-    plt.rcParams.update({'font.size': 14, 'font.family': 'serif'})
+    # Default class names
+    if class_names is None:
+        class_names = ['Surface', 'Corona', 'NoPD']
+    
+    # Set font properties globally for this plot (1.5x scale: 14->21, 16->24, 18->27)
+    plt.rcParams.update({'font.size': 21, 'font.family': 'serif'})
     
     cm = confusion_matrix(targets, preds)
     row_sums = cm.sum(axis=1, keepdims=True)
@@ -199,14 +210,15 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None):
     
     sns.heatmap(cm, annot=annot, fmt='', cmap='Greens',
                 linewidths=2, linecolor='white', ax=ax,
-                annot_kws={'size': 14, 'weight': 'bold'},
-                vmin=0, square=True)
+                annot_kws={'size': 21, 'weight': 'bold'},
+                vmin=0, square=True,
+                xticklabels=class_names, yticklabels=class_names)
     
-    ax.set_xlabel('Predicted', fontsize=16, fontweight='bold')
-    ax.set_ylabel('True', fontsize=16, fontweight='bold')
-    ax.set_title(f'Confusion Matrix ({samples_per_class} samples/class)', fontsize=18, fontweight='bold')
-    ax.set_xticklabels(range(num_classes), fontsize=14)
-    ax.set_yticklabels(range(num_classes), rotation=0, fontsize=14)
+    ax.set_xlabel('Predicted Labels', fontsize=24, fontweight='bold')
+    ax.set_ylabel('Actual Labels', fontsize=24, fontweight='bold')
+    ax.set_title('Confusion Matrix', fontsize=27, fontweight='bold')
+    ax.set_xticklabels(class_names, fontsize=21)
+    ax.set_yticklabels(class_names, rotation=0, fontsize=21)
     
     plt.tight_layout()
     if save_path:
@@ -271,3 +283,71 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         print(f'Saved: {save_path}')
     plt.close()
+
+
+def plot_model_comparison_bar(model_results, training_samples, save_path=None):
+    """
+    Plot horizontal bar chart comparing model performance for 1-shot and 5-shot.
+    
+    Args:
+        model_results: dict with model names as keys and dict {'1shot': acc, '5shot': acc} as values
+                      Example: {'CosineNet': {'1shot': 0.9667, '5shot': 0.9800}, ...}
+        training_samples: Number of training samples (for title)
+        save_path: Path to save the figure
+    
+    Returns:
+        fig: matplotlib figure object
+    """
+    # Set font properties
+    plt.rcParams.update({'font.size': 14, 'font.family': 'serif'})
+    
+    models = list(model_results.keys())
+    acc_1shot = [model_results[m]['1shot'] * 100 for m in models]
+    acc_5shot = [model_results[m]['5shot'] * 100 for m in models]
+    
+    # Sort by 5-shot accuracy (descending)
+    sorted_indices = np.argsort(acc_5shot)[::-1]
+    models = [models[i] for i in sorted_indices]
+    acc_1shot = [acc_1shot[i] for i in sorted_indices]
+    acc_5shot = [acc_5shot[i] for i in sorted_indices]
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, len(models) * 0.8 + 2))
+    
+    y = np.arange(len(models))
+    height = 0.35
+    
+    # Bars
+    bars_5shot = ax.barh(y - height/2, acc_5shot, height, label='5 Shot', color='#5DA5DA', edgecolor='white')
+    bars_1shot = ax.barh(y + height/2, acc_1shot, height, label='1 Shot', color='#FAA43A', edgecolor='white')
+    
+    # Add value labels on bars
+    for bar, val in zip(bars_5shot, acc_5shot):
+        ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2, 
+                f'{val:.2f}', va='center', ha='left', fontsize=11, color='#5DA5DA', fontweight='bold')
+    
+    for bar, val in zip(bars_1shot, acc_1shot):
+        ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2, 
+                f'{val:.2f}', va='center', ha='left', fontsize=11, color='#FAA43A', fontweight='bold')
+    
+    # Customize
+    ax.set_xlabel('Accuracy (%)', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Models', fontsize=16, fontweight='bold')
+    ax.set_title(f'Performance distribution table for the case of {training_samples} samples', 
+                 fontsize=18, fontweight='bold')
+    ax.set_yticks(y)
+    ax.set_yticklabels(models, fontsize=12)
+    ax.set_xlim(50, 100)
+    ax.legend(loc='lower right', fontsize=12)
+    
+    # Add grid
+    ax.xaxis.grid(True, linestyle='--', alpha=0.7)
+    ax.set_axisbelow(True)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f'Saved: {save_path}')
+    
+    return fig

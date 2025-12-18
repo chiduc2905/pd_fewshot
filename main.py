@@ -12,9 +12,9 @@ from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
 import wandb
 
-from dataset import PDScalogram
+from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
-from function.function import ContrastiveLoss, RelationLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne
+from function.function import ContrastiveLoss, RelationLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar
 from net.cosine import CosineNet
 from net.protonet import ProtoNet
 from net.covamnet import CovaMNet
@@ -236,7 +236,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
         scheduler.step()
         
         # Evaluate on training set (same episodes used for training)
-        train_acc = evaluate(net, train_loader, args)
+        train_acc, _ = evaluate(net, train_loader, args)
         
         # Validate - Create new validation dataset each epoch with seed+epoch
         # This ensures different episodes per epoch while maintaining reproducibility
@@ -244,18 +244,25 @@ def train_loop(net, train_loader, val_X, val_y, args):
                                 args.way_num, args.shot_num, 1, args.seed + epoch)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
-        val_acc = evaluate(net, val_loader, args)
+        val_acc, val_loss = evaluate(net, val_loader, args, criterion_main, criterion_center)
         avg_loss = total_loss / len(train_loader)
         
         # Calculate train-val gap (indicator of overfitting)
         train_val_gap = train_acc - val_acc
         
-        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f} (gap={train_val_gap:+.4f})')
+        print(f'Epoch {epoch}: Train Loss={avg_loss:.4f}, Val Loss={val_loss:.4f}, Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f} (gap={train_val_gap:+.4f})')
         
-        # Log to WandB
+        # Log to WandB with grouped metrics for combined charts
         wandb.log({
             "epoch": epoch,
+            # Grouped for combined charts
+            "loss/train": avg_loss,
+            "loss/val": val_loss,
+            "accuracy/train": train_acc,
+            "accuracy/val": val_acc,
+            # Individual metrics (for backward compatibility)
             "train_loss": avg_loss,
+            "val_loss": val_loss,
             "train_acc": train_acc,
             "val_acc": val_acc,
             "train_val_gap": train_val_gap,
@@ -274,10 +281,12 @@ def train_loop(net, train_loader, val_X, val_y, args):
     return best_acc
 
 
-def evaluate(net, loader, args):
-    """Compute accuracy on loader."""
+def evaluate(net, loader, args, criterion_main=None, criterion_center=None):
+    """Compute accuracy and optionally loss on loader."""
     net.eval()
     correct, total = 0, 0
+    total_loss = 0.0
+    num_batches = 0
     
     with torch.no_grad():
         for query, q_labels, support, s_labels in loader:
@@ -296,8 +305,47 @@ def evaluate(net, loader, args):
             
             correct += (preds == targets).sum().item()
             total += targets.size(0)
+            
+            # Calculate loss if criterion provided
+            if criterion_main is not None:
+                if args.loss == 'triplet':
+                    # Extract query features
+                    q_flat = query.view(-1, C, H, W)
+                    q_feats = net.encoder(q_flat)
+                    q_feats = q_feats.view(q_feats.size(0), -1)
+                    
+                    # Extract support features
+                    s_flat = support.view(-1, C, H, W)
+                    s_feats = net.encoder(s_flat)
+                    s_feats = s_feats.view(s_feats.size(0), -1)
+                    s_targets = s_labels.view(-1).to(args.device)
+                    
+                    all_feats = torch.cat([q_feats, s_feats], dim=0)
+                    all_targets = torch.cat([targets, s_targets], dim=0)
+                    all_feats = F.normalize(all_feats, p=2, dim=1)
+                    
+                    loss_main = criterion_main(all_feats, all_targets)
+                else:
+                    loss_main = criterion_main(scores, targets)
+                
+                # Center loss
+                if criterion_center is not None:
+                    q_flat = query.view(-1, C, H, W)
+                    features = net.encoder(q_flat)
+                    features = features.view(features.size(0), -1)
+                    features = F.normalize(features, p=2, dim=1)
+                    loss_center = criterion_center(features, targets)
+                    loss = loss_main + args.lambda_center * loss_center
+                else:
+                    loss = loss_main
+                
+                total_loss += loss.item()
+                num_batches += 1
     
-    return correct / total if total > 0 else 0
+    acc = correct / total if total > 0 else 0
+    avg_loss = total_loss / num_batches if num_batches > 0 else None
+    
+    return acc, avg_loss
 
 
 # =============================================================================
@@ -418,6 +466,78 @@ def test_final(net, loader, args):
         f.write(f"p-value  : {p_val:.2e}\n")
     
     print(f"Results saved to {txt_path}")
+    
+    # Generate model comparison bar chart
+    log_model_comparison_bar(args)
+
+
+def log_model_comparison_bar(args):
+    """
+    Read all results files and generate model comparison bar chart.
+    Log to wandb.
+    """
+    import re
+    
+    samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
+    results_dir = args.path_results
+    
+    # Model name mapping for display
+    model_display_names = {
+        'cosine': 'Cosine Classifier',
+        'protonet': 'ProtoNet',
+        'covamnet': 'CovaMNet',
+        'matchingnet': 'MatchingNet',
+        'relationnet': 'RelationNet'
+    }
+    
+    # Collect results
+    model_results = {}
+    models = ['cosine', 'protonet', 'covamnet', 'matchingnet', 'relationnet']
+    
+    for model in models:
+        display_name = model_display_names.get(model, model)
+        model_results[display_name] = {'1shot': None, '5shot': None}
+        
+        for shot in [1, 5]:
+            result_file = os.path.join(results_dir, 
+                f"results_{model}_{shot}shot_{args.loss}_lambda{args.lambda_center}_{samples_str}.txt")
+            
+            if os.path.exists(result_file):
+                with open(result_file, 'r') as f:
+                    content = f.read()
+                    # Parse accuracy
+                    match = re.search(r'Accuracy\s*:\s*([\d.]+)', content)
+                    if match:
+                        acc = float(match.group(1))
+                        model_results[display_name][f'{shot}shot'] = acc
+    
+    # Remove models with missing data
+    model_results = {k: v for k, v in model_results.items() 
+                     if v['1shot'] is not None and v['5shot'] is not None}
+    
+    if len(model_results) == 0:
+        print("No complete results found for model comparison chart.")
+        return
+    
+    # Generate chart
+    training_samples = args.training_samples if args.training_samples else 'All'
+    save_path = os.path.join(results_dir, f"model_comparison_{samples_str}.png")
+    
+    fig = plot_model_comparison_bar(model_results, training_samples, save_path)
+    
+    # Log to wandb
+    wandb.log({"model_comparison_bar": wandb.Image(save_path)})
+    
+    # Also log as wandb bar chart table
+    data = []
+    for model_name, accs in model_results.items():
+        data.append([model_name, "1 Shot", accs['1shot'] * 100])
+        data.append([model_name, "5 Shot", accs['5shot'] * 100])
+    
+    table = wandb.Table(data=data, columns=["Model", "Shot", "Accuracy (%)"])
+    wandb.log({"model_comparison_table": table})
+    
+    print(f"Model comparison chart saved to {save_path}")
 
 
 # =============================================================================
@@ -474,11 +594,38 @@ def main():
     wandb.init(project=args.project, config=vars(args), name=run_name, group=run_name, job_type=args.mode)
     
     seed_func(args.seed)
+    
+    # Log model parameters after model is created
+    def log_model_parameters(model, model_name):
+        """Log model parameters to wandb."""
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        non_trainable_params = total_params - trainable_params
+        
+        wandb.log({
+            "model/total_parameters": total_params,
+            "model/trainable_parameters": trainable_params,
+            "model/non_trainable_parameters": non_trainable_params,
+        })
+        
+        # Log parameters per layer
+        layer_params = {}
+        for name, param in model.named_parameters():
+            layer_params[f"model/layer_params/{name}"] = param.numel()
+        wandb.config.update({"layer_parameters": layer_params})
+        
+        print(f"\n{'='*50}")
+        print(f"Model: {model_name}")
+        print(f"{'='*50}")
+        print(f"Total Parameters: {total_params:,}")
+        print(f"Trainable Parameters: {trainable_params:,}")
+        print(f"Non-trainable Parameters: {non_trainable_params:,}")
+        print(f"{'='*50}\n")
     os.makedirs(args.path_weights, exist_ok=True)
     os.makedirs(args.path_results, exist_ok=True)
     
-    # Load dataset
-    dataset = PDScalogram(args.dataset_path, image_size=args.image_size)
+    # Load dataset (auto-detects pre-split or auto-split structure)
+    dataset = load_dataset(args.dataset_path, image_size=args.image_size)
     
     def to_tensor(X, y):
         X = torch.from_numpy(X.astype(np.float32))
@@ -518,12 +665,15 @@ def main():
     # This ensures different episodes per epoch but reproducibility across program runs
     
     # Test: Fixed seed ensures identical episodes across all runs
-    test_ds = FewshotDataset(test_X, test_y, 150,  # Fixed 150 episodes for test
+    test_ds = FewshotDataset(test_X, test_y, 100,  # Fixed 100 episodes for test
                              args.way_num, args.shot_num, 1, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
     # Initialize Model
     net = get_model(args)
+    
+    # Log model parameters to wandb
+    log_model_parameters(net, args.model)
     
     if args.mode == 'train':
         train_loop(net, train_loader, val_X, val_y, args)

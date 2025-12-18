@@ -2,12 +2,39 @@
 __pycache__/
 *.pyc
 .env
-wandb/
-results/
-checkpoints/
-PD-data-24-6-2025/
 *.py[codz]
 *$py.class
+
+# Data folders
+scalogram/
+prpd_images_for_cnn/
+PD-data-24-6-2025/
+data/
+dataset/
+datasets/
+
+# Results and outputs
+results/
+outputs/
+logs/
+*.log
+
+# Model checkpoints
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+
+# Weights & Biases
+wandb/
+
+# Visualization outputs
+visualization/
+
+# CSV exports
+*.csv
 
 # C extensions
 *.so
