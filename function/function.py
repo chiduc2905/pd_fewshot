@@ -285,6 +285,88 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     plt.close()
 
 
+def plot_tsne_comparison(original_features, encoded_features, labels, num_classes=3, save_path=None):
+    """
+    t-SNE visualization comparing original (raw pixels) vs encoded features side-by-side.
+    
+    Args:
+        original_features: Raw image features flattened (N, H*W*C)
+        encoded_features: Features after encoder (N, feat_dim)
+        labels: Class labels (N,)
+        num_classes: Number of classes
+        save_path: Path to save the figure
+    """
+    plt.rcParams.update({'font.size': 14, 'font.family': 'serif'})
+    
+    n = len(labels)
+    
+    # Process original features
+    scaler_orig = StandardScaler()
+    orig_scaled = scaler_orig.fit_transform(original_features)
+    n_comp_orig = min(50, n-1, original_features.shape[1])
+    pca_orig = PCA(n_components=n_comp_orig, random_state=42)
+    orig_pca = pca_orig.fit_transform(orig_scaled)
+    perp = min(30, max(5, n // 3))
+    tsne_orig = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
+    orig_embedded = tsne_orig.fit_transform(orig_pca)
+    
+    # Process encoded features
+    scaler_enc = StandardScaler()
+    enc_scaled = scaler_enc.fit_transform(encoded_features)
+    n_comp_enc = min(30, n-1, encoded_features.shape[1])
+    pca_enc = PCA(n_components=n_comp_enc, random_state=42)
+    enc_pca = pca_enc.fit_transform(enc_scaled)
+    tsne_enc = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
+    enc_embedded = tsne_enc.fit_transform(enc_pca)
+    
+    # Rescale both to [-45, 45]
+    for embedded in [orig_embedded, enc_embedded]:
+        max_val = np.abs(embedded).max()
+        if max_val > 0:
+            embedded[:] = embedded / max_val * 45
+    
+    # Create side-by-side plot
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+    sns.set_style('white')
+    
+    # Original (Raw) t-SNE
+    ax1 = axes[0]
+    sns.scatterplot(
+        x=orig_embedded[:, 0], y=orig_embedded[:, 1],
+        hue=labels, palette='bright',
+        s=80, alpha=0.8, legend=False, ax=ax1
+    )
+    ax1.set_title(f'Original Data (Raw Pixels)\n{n} samples', fontsize=18, fontweight='bold')
+    ax1.set_xlabel('Dim 1', fontsize=16, fontweight='bold')
+    ax1.set_ylabel('Dim 2', fontsize=16, fontweight='bold')
+    ax1.set_xlim(-50, 50)
+    ax1.set_ylim(-50, 50)
+    ax1.tick_params(axis='both', which='major', labelsize=14)
+    sns.despine(ax=ax1)
+    
+    # Encoded t-SNE
+    ax2 = axes[1]
+    scatter = sns.scatterplot(
+        x=enc_embedded[:, 0], y=enc_embedded[:, 1],
+        hue=labels, palette='bright',
+        s=80, alpha=0.8, legend='full', ax=ax2
+    )
+    ax2.set_title(f'After Encoder\n{n} samples', fontsize=18, fontweight='bold')
+    ax2.set_xlabel('Dim 1', fontsize=16, fontweight='bold')
+    ax2.set_ylabel('Dim 2', fontsize=16, fontweight='bold')
+    ax2.set_xlim(-50, 50)
+    ax2.set_ylim(-50, 50)
+    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax2.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=14, title_fontsize=16)
+    sns.despine(ax=ax2)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f'Saved: {save_path}')
+    plt.close()
+
+
 def plot_model_comparison_bar(model_results, training_samples, save_path=None):
     """
     Plot horizontal bar chart comparing model performance for 1-shot and 5-shot.
