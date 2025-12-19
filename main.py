@@ -608,12 +608,6 @@ def main():
             "model/non_trainable_parameters": non_trainable_params,
         })
         
-        # Log parameters per layer
-        layer_params = {}
-        for name, param in model.named_parameters():
-            layer_params[f"model/layer_params/{name}"] = param.numel()
-        wandb.config.update({"layer_parameters": layer_params})
-        
         print(f"\n{'='*50}")
         print(f"Model: {model_name}")
         print(f"{'='*50}")
