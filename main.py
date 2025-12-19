@@ -14,12 +14,18 @@ import wandb
 
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
-from function.function import ContrastiveLoss, RelationLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar
-from net.cosine import CosineNet
+from function.function import ContrastiveLoss, RelationLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar, plot_training_curves
+from net.cosine import CosineNet  # User's custom cosine similarity model
+from net.cosine_classifier import CosineClassifier  # Baseline++ (Chen et al. ICLR 2019)
 from net.protonet import ProtoNet
 from net.covamnet import CovaMNet
 from net.matchingnet import MatchingNet
 from net.relationnet import RelationNet
+# New models
+from net.siamesenet import SiameseNetFast as SiameseNet
+from net.dn4 import DN4Fast as DN4
+from net.feat import FEAT
+from net.deepemd import DeepEMDSimple as DeepEMD
 
 
 # =============================================================================
@@ -38,7 +44,8 @@ def get_args():
     
     # Model
     parser.add_argument('--model', type=str, default='covamnet', 
-                        choices=['cosine', 'protonet', 'covamnet', 'matchingnet', 'relationnet'])
+                        choices=['cosine', 'baseline', 'protonet', 'covamnet', 'matchingnet', 'relationnet',
+                                 'siamese', 'dn4', 'feat', 'deepemd'])
     parser.add_argument('--use_base_encoder', action='store_true',
                         help='Use Conv64F_Encoder (GroupNorm) for ProtoNet instead of paper-specific encoder')
     parser.add_argument('--backbone', type=str, default='conv64f',
@@ -107,7 +114,22 @@ def get_model(args):
     elif args.model == 'relationnet':
         # RelationNet: paper-specific encoder only (RelationBlock expects 4x4 features)
         model = RelationNet(device=device)
-    else:  # cosine
+    elif args.model == 'siamese':
+        # Siamese Network with learned distance
+        model = SiameseNet(device=device)
+    elif args.model == 'dn4':
+        # DN4: Local descriptors with k-NN
+        model = DN4(k_neighbors=3, device=device)
+    elif args.model == 'feat':
+        # FEAT: Transformer-based embedding adaptation
+        model = FEAT(temperature=0.2, device=device)
+    elif args.model == 'deepemd':
+        # DeepEMD: Earth Mover's Distance (simplified version)
+        model = DeepEMD(device=device)
+    elif args.model == 'baseline':
+        # Baseline++ (Chen et al. ICLR 2019) - Cosine with learnable temperature
+        model = CosineClassifier(temperature=10.0, learnable_temp=True, device=device)
+    else:  # cosine (user's original)
         model = CosineNet(device=device)
     
     return model.to(device)
@@ -126,6 +148,10 @@ def train_loop(net, train_loader, val_X, val_y, args):
         val_X: Validation images tensor
         val_y: Validation labels tensor
         args: Training arguments
+    
+    Returns:
+        best_acc: Best validation accuracy
+        history: Dict with training curves (train_acc, val_acc, train_loss, val_loss)
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -155,7 +181,13 @@ def train_loop(net, train_loader, val_X, val_y, args):
     
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
     
-
+    # Training history for plotting
+    history = {
+        'train_acc': [],
+        'val_acc': [],
+        'train_loss': [],
+        'val_loss': []
+    }
     
     best_acc = 0.0
     
@@ -247,6 +279,12 @@ def train_loop(net, train_loader, val_X, val_y, args):
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main, criterion_center)
         avg_loss = total_loss / len(train_loader)
         
+        # Track history for plotting
+        history['train_acc'].append(train_acc)
+        history['val_acc'].append(val_acc)
+        history['train_loss'].append(avg_loss)
+        history['val_loss'].append(val_loss if val_loss else 0.0)
+        
         # Calculate train-val gap (indicator of overfitting)
         train_val_gap = train_acc - val_acc
         
@@ -278,7 +316,17 @@ def train_loop(net, train_loader, val_X, val_y, args):
             # Log best model as artifact if needed, or just log the metric
             wandb.run.summary["best_val_acc"] = best_acc
     
-    return best_acc
+    # Plot training curves
+    samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
+    curves_path = os.path.join(args.path_results, 
+                               f"training_{args.model}_{args.shot_num}shot_{args.loss}{samples_str}")
+    plot_training_curves(history, curves_path)
+    
+    # Log to WandB
+    if os.path.exists(f"{curves_path}_curves.png"):
+        wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
+    
+    return best_acc, history
 
 
 def evaluate(net, loader, args, criterion_main=None, criterion_center=None):
@@ -670,7 +718,7 @@ def main():
     log_model_parameters(net, args.model)
     
     if args.mode == 'train':
-        train_loop(net, train_loader, val_X, val_y, args)
+        best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
         
         # Load best model for testing
         path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_best.pth')

@@ -441,3 +441,73 @@ def plot_model_comparison_bar(model_results, training_samples, save_path=None):
         print(f'Saved: {save_path}')
     
     return fig
+
+
+def plot_training_curves(history, save_path=None):
+    """
+    Plot combined train/val accuracy and loss curves on same figure.
+    
+    IEEE format: Times New Roman, appropriate figure size.
+    
+    Args:
+        history: dict with keys 'train_acc', 'val_acc', 'train_loss', 'val_loss'
+                 each containing list of values per epoch
+        save_path: Path to save the figure (without extension, will add .png)
+    
+    Returns:
+        fig: matplotlib figure object
+    """
+    # IEEE format fonts
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'mathtext.fontset': 'stix',
+        'font.size': 11
+    })
+    
+    epochs = range(1, len(history['train_acc']) + 1)
+    
+    # Create figure with 2 subplots side by side
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    
+    # Color scheme
+    train_color = '#2E86AB'  # Blue
+    val_color = '#E94F37'    # Red
+    
+    # ===== Accuracy Plot =====
+    ax1 = axes[0]
+    ax1.plot(epochs, history['train_acc'], color=train_color, 
+             linewidth=2, label='Train', marker='o', markersize=3)
+    ax1.plot(epochs, history['val_acc'], color=val_color, 
+             linewidth=2, linestyle='--', label='Validation', marker='s', markersize=3)
+    
+    ax1.set_xlabel('Epoch', fontsize=12)
+    ax1.set_ylabel('Accuracy', fontsize=12)
+    ax1.set_title('Training & Validation Accuracy', fontsize=13, fontweight='bold')
+    ax1.legend(loc='lower right', fontsize=10)
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.set_ylim(0, 1.05)
+    
+    # ===== Loss Plot =====
+    ax2 = axes[1]
+    ax2.plot(epochs, history['train_loss'], color=train_color, 
+             linewidth=2, label='Train', marker='o', markersize=3)
+    ax2.plot(epochs, history['val_loss'], color=val_color, 
+             linewidth=2, linestyle='--', label='Validation', marker='s', markersize=3)
+    
+    ax2.set_xlabel('Epoch', fontsize=12)
+    ax2.set_ylabel('Loss', fontsize=12)
+    ax2.set_title('Training & Validation Loss', fontsize=13, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=10)
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        # Save combined figure
+        full_path = f"{save_path}_curves.png" if not save_path.endswith('.png') else save_path
+        plt.savefig(full_path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f'Saved: {full_path}')
+    
+    plt.close()
+    return fig

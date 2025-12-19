@@ -9,7 +9,8 @@ def get_args():
 
 # Configuration
 # Models that ONLY use 64x64 (paper standard)
-base_models = ['covamnet', 'protonet', 'cosine', 'relationnet']
+base_models = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet', 
+               'siamese', 'dn4', 'feat', 'deepemd']  # Added baseline (Baseline++)
 
 # MatchingNet variants (support multiple image sizes)
 matchingnet_variants = ['matchingnet', 'matchingnet_resnet12', 'matchingnet_resnet18']
