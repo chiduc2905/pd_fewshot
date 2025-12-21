@@ -645,7 +645,26 @@ def main():
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
     run_name = f"{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_{samples_str}"
     
-    wandb.init(project=args.project, config=vars(args), name=run_name, group=run_name, job_type=args.mode)
+    # Model metric/distance types (what similarity measure each model uses)
+    MODEL_METRICS = {
+        'cosine': 'Cosine Similarity',
+        'baseline': 'Scaled Cosine Similarity (learnable temperature)',
+        'protonet': 'Squared Euclidean Distance',
+        'covamnet': 'Covariance Metric (distribution-based)',
+        'matchingnet': 'Cosine Similarity + Attention LSTM',
+        'relationnet': 'Learned Relation Score (CNN)',
+        'siamese': 'Learned Distance (MLP)',
+        'dn4': 'Local Descriptor k-NN (Cosine)',
+        'feat': 'Transformer-adapted Euclidean Distance',
+        'deepemd': 'Earth Mover\'s Distance (EMD)'
+    }
+    
+    # Add metric info to config
+    config = vars(args).copy()
+    config['distance_metric'] = MODEL_METRICS.get(args.model, 'unknown')
+    config['encoder_type'] = encoder_info
+    
+    wandb.init(project=args.project, config=config, name=run_name, group=run_name, job_type=args.mode)
     
     seed_func(args.seed)
     
