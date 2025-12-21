@@ -514,9 +514,6 @@ def test_final(net, loader, args):
         f.write(f"p-value  : {p_val:.2e}\n")
     
     print(f"Results saved to {txt_path}")
-    
-    # Generate model comparison bar chart
-    log_model_comparison_bar(args)
 
 
 def log_model_comparison_bar(args):

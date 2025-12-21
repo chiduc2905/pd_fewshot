@@ -96,3 +96,68 @@ for variant in matchingnet_variants:
 
 print("\nAll experiments completed.")
 
+# Generate model comparison bar charts after all experiments are done
+print("\n" + "=" * 40)
+print("Generating Model Comparison Bar Charts")
+print("=" * 40)
+
+import os
+import re
+from function.function import plot_model_comparison_bar
+
+results_dir = 'results/'
+
+# Model name mapping for display
+model_display_names = {
+    'cosine': 'Cosine Classifier',
+    'baseline': 'Baseline++',
+    'protonet': 'ProtoNet',
+    'covamnet': 'CovaMNet',
+    'matchingnet': 'MatchingNet',
+    'relationnet': 'RelationNet',
+    'siamese': 'SiameseNet',
+    'dn4': 'DN4',
+    'feat': 'FEAT',
+    'deepemd': 'DeepEMD'
+}
+
+all_models = ['cosine', 'baseline', 'protonet', 'covamnet', 'matchingnet', 'relationnet',
+              'siamese', 'dn4', 'feat', 'deepemd']
+
+for samples in samples_list:
+    samples_str = f"{samples}samples" if samples else "allsamples"
+    
+    # Collect results for this sample count
+    model_results = {}
+    
+    for model in all_models:
+        display_name = model_display_names.get(model, model)
+        model_results[display_name] = {'1shot': None, '5shot': None}
+        
+        for shot in [1, 5]:
+            result_file = os.path.join(results_dir, 
+                f"results_{model}_{shot}shot_contrastive_lambda{lambda_center}_{samples_str}.txt")
+            
+            if os.path.exists(result_file):
+                with open(result_file, 'r') as f:
+                    content = f.read()
+                    match = re.search(r'Accuracy\s*:\s*([\d.]+)', content)
+                    if match:
+                        acc = float(match.group(1))
+                        model_results[display_name][f'{shot}shot'] = acc
+    
+    # Remove models with missing data
+    model_results = {k: v for k, v in model_results.items() 
+                     if v['1shot'] is not None and v['5shot'] is not None}
+    
+    if len(model_results) > 0:
+        training_samples = samples if samples else 'All'
+        save_path = os.path.join(results_dir, f"model_comparison_{samples_str}.png")
+        plot_model_comparison_bar(model_results, training_samples, save_path)
+        print(f"  Bar chart saved: {save_path}")
+    else:
+        print(f"  No complete results found for {samples_str}")
+
+print("\n" + "=" * 40)
+print("All bar charts generated!")
+print("=" * 40)
