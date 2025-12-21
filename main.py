@@ -64,7 +64,7 @@ def get_args():
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
     parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=100)
+    parser.add_argument('--episode_num_val', type=int, default=200)
     parser.add_argument('--num_epochs', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -532,15 +532,21 @@ def log_model_comparison_bar(args):
     # Model name mapping for display
     model_display_names = {
         'cosine': 'Cosine Classifier',
+        'baseline': 'Baseline++',
         'protonet': 'ProtoNet',
         'covamnet': 'CovaMNet',
         'matchingnet': 'MatchingNet',
-        'relationnet': 'RelationNet'
+        'relationnet': 'RelationNet',
+        'siamese': 'SiameseNet',
+        'dn4': 'DN4',
+        'feat': 'FEAT',
+        'deepemd': 'DeepEMD'
     }
     
     # Collect results
     model_results = {}
-    models = ['cosine', 'protonet', 'covamnet', 'matchingnet', 'relationnet']
+    models = ['cosine', 'baseline', 'protonet', 'covamnet', 'matchingnet', 'relationnet',
+              'siamese', 'dn4', 'feat', 'deepemd']
     
     for model in models:
         display_name = model_display_names.get(model, model)
@@ -707,7 +713,7 @@ def main():
     # This ensures different episodes per epoch but reproducibility across program runs
     
     # Test: Fixed seed ensures identical episodes across all runs
-    test_ds = FewshotDataset(test_X, test_y, 100,  # Fixed 100 episodes for test
+    test_ds = FewshotDataset(test_X, test_y, 300,  # Fixed 300 episodes for test
                              args.way_num, args.shot_num, 1, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
