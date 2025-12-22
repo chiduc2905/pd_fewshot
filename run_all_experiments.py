@@ -135,8 +135,9 @@ for samples in samples_list:
         model_results[display_name] = {'1shot': None, '5shot': None}
         
         for shot in [1, 5]:
+            # Updated to new simplified naming format: model_samples_shot
             result_file = os.path.join(results_dir, 
-                f"results_{model}_{shot}shot_contrastive_lambda{lambda_center}_{samples_str}.txt")
+                f"results_{model}_{samples_str}_{shot}shot.txt")
             
             if os.path.exists(result_file):
                 with open(result_file, 'r') as f:

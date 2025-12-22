@@ -1,100 +1,31 @@
-\documentclass{article}
-\usepackage{booktabs}
-\usepackage{multirow}
-\usepackage{array}
+% IEEE Transaction format table - spans full page width
+% Use with \usepackage{booktabs}, \usepackage{multirow}, \usepackage{array}
 
-\begin{document}
-
-\begin{table*}[t]
+\begin{table*}[!t]
 \centering
-\caption{Performance comparison of few-shot learning methods}
-\label{tab:results}
-\small
-\begin{tabular}{@{}lcccccc@{}}
-\toprule
-\multicolumn{7}{c}{\textbf{(a) 18 training samples}} \\
-\midrule
-Method & \multicolumn{2}{c}{Accuracy$\uparrow$} & \multicolumn{2}{c}{Recall$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
-\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
- & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
-\midrule
-CovaM-Net & 73.78 & 82.89 & 73.78 & 82.89 & 73.51 & 82.70 \\
-ProtoNet & 66.89 & 74.89 & 66.89 & 74.89 & 66.22 & 73.69 \\
-Cosine & 90.67 & 92.67 & 90.67 & 92.67 & 90.75 & 92.63 \\
-MatchingNet & 85.11 & 94.67 & 85.11 & 94.67 & 85.11 & 94.67 \\
-RelationNet & 75.56 & 78.44 & 75.56 & 78.44 & 74.60 & 76.70 \\
-\midrule
-\multicolumn{7}{c}{\textbf{(b) 60 training samples}} \\
-\midrule
-Method & \multicolumn{2}{c}{Accuracy$\uparrow$} & \multicolumn{2}{c}{Recall$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
-\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
- & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
-\midrule
-CovaM-Net & 81.56 & 94.89 & 81.56 & 94.89 & 81.55 & 94.87 \\
-ProtoNet & 79.33 & 90.44 & 79.33 & 90.44 & 79.09 & 90.42 \\
-Cosine & 95.11 & 97.33 & 95.11 & 97.33 & 95.12 & 97.34 \\
-MatchingNet & 91.56 & 97.33 & 91.56 & 97.33 & 91.58 & 97.35 \\
-RelationNet & 93.33 & 95.78 & 93.33 & 95.78 & 93.32 & 95.79 \\
-\midrule
-\multicolumn{7}{c}{\textbf{(c) All training samples}} \\
-\midrule
-Method & \multicolumn{2}{c}{Accuracy$\uparrow$} & \multicolumn{2}{c}{Recall$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
-\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
- & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
-\midrule
-CovaM-Net & 81.33 & 93.33 & 81.33 & 93.33 & 81.28 & 93.36 \\
-ProtoNet & 76.44 & 89.78 & 76.44 & 89.78 & 76.19 & 89.67 \\
-Cosine & \textbf{96.22} & 97.33 & \textbf{96.22} & 97.33 & \textbf{96.22} & 97.34 \\
-MatchingNet & 94.22 & \textbf{97.78} & 94.22 & \textbf{97.78} & 94.21 & \textbf{97.77} \\
-RelationNet & 95.11 & 96.22 & 95.11 & 96.22 & 95.12 & 96.23 \\
-\bottomrule
+\caption{Performance Comparison of Few-Shot Learning Methods on PD Scalogram Classification (Conv64F Backbone)}
+\label{tab:fewshot_results}
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{3pt}
+\scriptsize
+\begin{tabular}{ll|cccccc|cccccc|cccccc}
+\hline
+\multirow{3}{*}{\textbf{Method}} & \multirow{3}{*}{\textbf{Metric}} & \multicolumn{6}{c|}{\textbf{18 samples}} & \multicolumn{6}{c|}{\textbf{60 samples}} & \multicolumn{6}{c}{\textbf{All samples}} \\
+\cline{3-20}
+ & & \multicolumn{2}{c}{Acc$\uparrow$} & \multicolumn{2}{c}{Rec$\uparrow$} & \multicolumn{2}{c|}{F1$\uparrow$} & \multicolumn{2}{c}{Acc$\uparrow$} & \multicolumn{2}{c}{Rec$\uparrow$} & \multicolumn{2}{c|}{F1$\uparrow$} & \multicolumn{2}{c}{Acc$\uparrow$} & \multicolumn{2}{c}{Rec$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
+\cline{3-20}
+ & & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
+\hline
+ProtoNet & Euclidean & 82.56 & 86.44 & 82.56 & 86.44 & 82.32 & 86.35 & 88.00 & 92.67 & 88.00 & 92.67 & 87.83 & 92.65 & 91.33 & 95.67 & 91.33 & 95.67 & 91.23 & 95.66 \\
+CovaMNet & Covariance & 79.44 & 89.89 & 79.44 & 89.89 & 79.49 & 89.82 & 88.44 & \textbf{97.33} & 88.44 & \textbf{97.33} & 88.45 & \textbf{97.34} & 86.22 & 96.78 & 86.22 & 96.78 & 86.42 & 96.78 \\
+DN4 & Local Desc. & 88.00 & 95.89 & 88.00 & 95.89 & 88.09 & 95.90 & 89.33 & 97.11 & 89.33 & 97.11 & 89.37 & 97.12 & 90.00 & 96.44 & 90.00 & 96.44 & 90.04 & 96.45 \\
+FEAT & Transformer & 94.89 & 91.22 & 94.89 & 91.22 & 94.89 & 91.15 & 93.78 & 94.11 & 93.78 & 94.11 & 93.80 & 94.15 & 95.89 & 95.44 & 95.89 & 95.44 & 95.90 & 95.44 \\
+DeepEMD & EMD & 94.67 & 92.00 & 94.67 & 92.00 & 94.67 & 92.01 & 95.33 & 95.00 & 95.33 & 95.00 & 95.34 & 94.97 & 94.78 & 95.67 & 94.78 & 95.67 & 94.78 & 95.67 \\
+SiameseNet & Euclidean & 91.67 & 96.11 & 91.67 & 96.11 & 91.63 & 96.12 & 94.00 & 96.44 & 94.00 & 96.44 & 94.00 & 96.45 & 93.00 & 96.56 & 93.00 & 96.56 & 93.05 & 96.56 \\
+MatchingNet & Cosine & 92.33 & 94.44 & 92.33 & 94.44 & 92.32 & 94.44 & \textbf{97.56} & 95.33 & \textbf{97.56} & 95.33 & \textbf{97.56} & 95.33 & 95.00 & 96.44 & 95.00 & 96.44 & 95.00 & 96.45 \\
+RelationNet & Learned & 91.56 & 93.89 & 91.56 & 93.89 & 91.44 & 93.87 & 97.00 & 97.00 & 97.00 & 97.00 & 97.00 & 97.00 & \textbf{98.67} & \textbf{98.11} & \textbf{98.67} & \textbf{98.11} & \textbf{98.67} & \textbf{98.11} \\
+Baseline++ & Cosine & 95.33 & \textbf{97.00} & 95.33 & \textbf{97.00} & 95.31 & \textbf{97.01} & 95.89 & \textbf{97.33} & 95.89 & \textbf{97.33} & 95.88 & \textbf{97.34} & 94.22 & 97.00 & 94.22 & 97.00 & 94.21 & 97.01 \\
+Cosine & Cosine & \textbf{95.89} & \textbf{97.00} & \textbf{95.89} & \textbf{97.00} & \textbf{95.87} & \textbf{97.01} & 96.89 & \textbf{97.33} & 96.89 & \textbf{97.33} & 96.90 & \textbf{97.34} & 94.22 & 97.00 & 94.22 & 97.00 & 94.22 & 97.01 \\
+\hline
 \end{tabular}
 \end{table*}
- 
-\begin{table*}[h]
-\centering
-\caption{Performance comparison of MatchingNet with different backbones and image sizes}
-\label{tab:matchingnet_full}
-\small
-\begin{tabular}{@{}lccccccc@{}}
-\toprule
-\multicolumn{8}{c}{\textbf{(a) 18 training samples}} \\
-\midrule
-Backbone & Size & \multicolumn{2}{c}{Accuracy$\uparrow$} & \multicolumn{2}{c}{Recall$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
-\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
- & & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
-\midrule
-conv64f & 64 & 85.11 & 94.67 & 85.11 & 94.67 & 85.11 & 94.67 \\
-resnet12 & 64 & 83.78 & 85.78 & 83.78 & 85.78 & 83.82 & 85.73 \\
-resnet12 & 84 & 82.89 & 91.56 & 82.89 & 91.56 & 82.93 & 91.48 \\
-resnet18 & 64 & 85.56 & 85.78 & 85.56 & 85.78 & 85.69 & 85.15 \\
-resnet18 & 84 & 78.22 & 84.89 & 78.22 & 84.89 & 78.12 & 84.43 \\
-\midrule
-\multicolumn{8}{c}{\textbf{(b) 60 training samples}} \\
-\midrule
-Backbone & Size & \multicolumn{2}{c}{Accuracy$\uparrow$} & \multicolumn{2}{c}{Recall$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
-\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
- & & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
-\midrule
-conv64f & 64 & 91.56 & 97.33 & 91.56 & 97.33 & 91.58 & 97.35 \\
-resnet12 & 64 & 95.78 & 96.00 & 95.78 & 96.00 & 95.78 & 96.02 \\
-resnet12 & 84 & 94.89 & 97.33 & 94.89 & 97.33 & 94.89 & 97.33 \\
-resnet18 & 64 & 91.11 & 95.11 & 91.11 & 95.11 & 91.13 & 95.13 \\
-resnet18 & 84 & 90.67 & 94.44 & 90.67 & 94.44 & 90.66 & 94.47 \\
-\midrule
-\multicolumn{8}{c}{\textbf{(c) All training samples}} \\
-\midrule
-Backbone & Size & \multicolumn{2}{c}{Accuracy$\uparrow$} & \multicolumn{2}{c}{Recall$\uparrow$} & \multicolumn{2}{c}{F1$\uparrow$} \\
-\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
- & & 1-shot & 5-shot & 1-shot & 5-shot & 1-shot & 5-shot \\
-\midrule
-conv64f & 64 & 94.22 & 97.78 & 94.22 & 97.78 & 94.21 & 97.77 \\
-resnet12 & 64 & 94.22 & 98.22 & 94.22 & 98.22 & 94.18 & 98.23 \\
-resnet12 & 84 & 95.33 & 98.89 & 95.33 & 98.89 & 95.31 & 98.89 \\
-resnet18 & 64 & 92.22 & 98.22 & 92.22 & 98.22 & 92.14 & 98.23 \\
-resnet18 & 84 & 93.56 & 98.22 & 93.56 & 98.22 & 93.48 & 98.22 \\
-\bottomrule
-\end{tabular}
-\end{table*}
- 
- \end{document}

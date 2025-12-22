@@ -310,16 +310,37 @@ def train_loop(net, train_loader, val_X, val_y, args):
         # Save best
         if val_acc > best_acc:
             best_acc = val_acc
-            path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_best.pth')
+            # Simplified naming: model_samples_shot (without contrastive/lambda)
+            samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+            model_filename = f'{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth'
+            path = os.path.join(args.path_weights, model_filename)
             torch.save(net.state_dict(), path)
             print(f'  → Best model saved ({val_acc:.4f})')
-            # Log best model as artifact if needed, or just log the metric
             wandb.run.summary["best_val_acc"] = best_acc
+            
+            # Save as WandB Artifact for version control
+            artifact_name = f'{args.model}_{samples_suffix}_{args.shot_num}shot'
+            artifact = wandb.Artifact(
+                name=artifact_name,
+                type='model',
+                description=f'{args.model} model trained on {samples_suffix} with {args.shot_num}-shot',
+                metadata={
+                    'model': args.model,
+                    'shot_num': args.shot_num,
+                    'training_samples': args.training_samples if args.training_samples else 'all',
+                    'backbone': args.backbone,
+                    'best_val_acc': best_acc,
+                    'epoch': epoch
+                }
+            )
+            artifact.add_file(path)
+            wandb.log_artifact(artifact)
+            print(f'  → Artifact uploaded: {artifact_name}')
     
     # Plot training curves
-    samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
+    samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
     curves_path = os.path.join(args.path_results, 
-                               f"training_{args.model}_{args.shot_num}shot_{args.loss}{samples_str}")
+                               f"training_{args.model}_{samples_str}_{args.shot_num}shot")
     plot_training_curves(history, curves_path)
     
     # Log to WandB
@@ -481,25 +502,27 @@ def test_final(net, loader, args):
     # Plots
     samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
     
-    # Confusion Matrix
-    cm_path = os.path.join(args.path_results, 
-                           f"confusion_matrix_{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}{samples_str}.png")
-    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_path)
-    wandb.log({"confusion_matrix": wandb.Image(cm_path)})
+    # Confusion Matrix (saves both PDF and PNG in 1col and 2col layouts)
+    cm_base = os.path.join(args.path_results, 
+                           f"confusion_matrix_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
+    # Log 2-column PNG to WandB (better visibility on dashboard)
+    wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
     
-    # t-SNE
+    # t-SNE (saves both PDF and PNG in 1col and 2col layouts)
     if all_features:
         features = np.vstack(all_features)
-        tsne_path = os.path.join(args.path_results, 
-                                 f"tsne_{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}{samples_str}.png")
-        plot_tsne(features, all_targets, args.way_num, tsne_path)
-        wandb.log({"tsne_plot": wandb.Image(tsne_path)})
+        tsne_base = os.path.join(args.path_results, 
+                                 f"tsne_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+        plot_tsne(features, all_targets, args.way_num, tsne_base)
+        # Log 2-column PNG to WandB
+        wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
     
     print(f"\nResults logged to WandB and plots saved to {args.path_results}")
     
     # Save results to text file
     txt_path = os.path.join(args.path_results, 
-                            f"results_{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}{samples_str}.txt")
+                            f"results_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot.txt")
     with open(txt_path, 'w') as f:
         f.write(f"Model: {args.model}\n")
         f.write(f"Shot: {args.shot_num}\n")
@@ -551,7 +574,7 @@ def log_model_comparison_bar(args):
         
         for shot in [1, 5]:
             result_file = os.path.join(results_dir, 
-                f"results_{model}_{shot}shot_{args.loss}_lambda{args.lambda_center}_{samples_str}.txt")
+                f"results_{model}_{samples_str}_{shot}shot.txt")
             
             if os.path.exists(result_file):
                 with open(result_file, 'r') as f:
@@ -640,7 +663,8 @@ def main():
     
     # Initialize WandB with a descriptive run name
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
-    run_name = f"{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_{samples_str}"
+    # Simplified run name: model_samples_shot (without contrastive/lambda)
+    run_name = f"{args.model}_{samples_str}_{args.shot_num}shot"
     
     # Model metric/distance types (what similarity measure each model uses)
     MODEL_METRICS = {
@@ -743,7 +767,8 @@ def main():
         best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
         
         # Load best model for testing
-        path = os.path.join(args.path_weights, f'{args.model}_{args.shot_num}shot_{args.loss}_lambda{args.lambda_center}_best.pth')
+        samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+        path = os.path.join(args.path_weights, f'{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
         

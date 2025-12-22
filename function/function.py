@@ -175,7 +175,7 @@ class TripletLoss(nn.Module):
 
 def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_names=None):
     """
-    Plot confusion matrix (IEEE format).
+    Plot confusion matrix (IEEE format) - saves as PDF vector.
     
     For 150-episode test with 1-query/class: each row sums to 150.
     
@@ -183,18 +183,19 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         targets: Ground truth labels
         preds: Predicted labels
         num_classes: Number of classes
-        save_path: Path to save the figure
+        save_path: Path to save the figure (without extension, will add .pdf)
         class_names: List of class names (default: ['surface', 'corona', 'nopd'])
     """
     # Default class names
     if class_names is None:
         class_names = ['Surface', 'Corona', 'NoPD']
     
-    # IEEE format: Times New Roman
+    # IEEE format: Times New Roman, 12pt font
     plt.rcParams.update({
         'font.family': 'serif',
         'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
-        'mathtext.fontset': 'stix'
+        'mathtext.fontset': 'stix',
+        'font.size': 12
     })
     
     cm = confusion_matrix(targets, preds)
@@ -202,47 +203,69 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     row_sums[row_sums == 0] = 1
     cm_pct = cm / row_sums * 100
     
-    # IEEE figure: 4.5×4 inches
-    fig, ax = plt.subplots(figsize=(4.5, 4))
+    # Save in both 1-column and 2-column IEEE layouts
+    layouts = [
+        ('1col', 3.5),   # 1-column: 3.5 inches
+        ('2col', 7.16),  # 2-column: 7.16 inches
+    ]
     
-    # Annotations: count and percentage (9pt normal weight)
-    annot = np.empty_like(cm, dtype=object)
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            annot[i, j] = f'{cm[i,j]}\n({cm_pct[i,j]:.1f}%)'
-    
-    sns.heatmap(cm, annot=annot, fmt='', cmap='Blues',
-                linewidths=0.5, linecolor='white', ax=ax,
-                annot_kws={'size': 9},
-                vmin=0, square=True,
-                xticklabels=class_names, yticklabels=class_names,
-                cbar_kws={'shrink': 0.8})
-    
-    # No title (IEEE format)
-    ax.set_xlabel('Predicted Label', fontsize=11)
-    ax.set_ylabel('True Label', fontsize=11)
-    ax.set_xticklabels(class_names, fontsize=11, rotation=45, ha='right')
-    ax.set_yticklabels(class_names, fontsize=11, rotation=0)
-    
-    # Adjust colorbar font size
-    cbar = ax.collections[0].colorbar
-    cbar.ax.tick_params(labelsize=9)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-        print(f'Saved: {save_path}')
-    plt.close()
+    for layout_name, width in layouts:
+        # Square figure
+        fig, ax = plt.subplots(figsize=(width, width))
+        
+        # Annotations: count and percentage (12pt)
+        annot = np.empty_like(cm, dtype=object)
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                annot[i, j] = f'{cm[i,j]}\n({cm_pct[i,j]:.1f}%)'
+        
+        # Green colormap (like pd_cnn)
+        sns.heatmap(cm, annot=annot, fmt='', cmap='Greens',
+                    linewidths=0.5, linecolor='white', ax=ax,
+                    annot_kws={'size': 12},
+                    vmin=0, square=True,
+                    xticklabels=class_names, yticklabels=class_names,
+                    cbar_kws={'shrink': 0.8})
+        
+        # No title (IEEE format)
+        ax.set_xlabel('Predicted Label', fontsize=12)
+        ax.set_ylabel('True Label', fontsize=12)
+        ax.set_xticklabels(class_names, fontsize=12, rotation=45, ha='right')
+        ax.set_yticklabels(class_names, fontsize=12, rotation=0)
+        
+        # Adjust colorbar font size
+        cbar = ax.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=10)
+        
+        plt.tight_layout()
+        if save_path:
+            # Remove extension if present
+            base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
+            # Save as PDF (vector for publication)
+            pdf_path = f"{base_path}_{layout_name}.pdf"
+            plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+            print(f'Saved: {pdf_path}')
+            # Save as PNG (for WandB logging)
+            png_path = f"{base_path}_{layout_name}.png"
+            plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
+            print(f'Saved: {png_path}')
+        plt.close()
 
 
 def plot_tsne(features, labels, num_classes=3, save_path=None):
     """
-    t-SNE visualization of query features.
+    t-SNE visualization of query features - saves as PDF vector.
     
     For 150-episode test: 450 points (150 per class).
+    Saves in two IEEE layouts: 1-column (3.5in) and 2-column (7.16in).
     """
-    # Set font properties globally for this plot
-    plt.rcParams.update({'font.size': 14, 'font.family': 'serif'})
+    # IEEE format: Times New Roman, 12pt font
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'mathtext.fontset': 'stix',
+        'font.size': 12
+    })
 
     n = len(features)
     unique_n = len(np.unique(features, axis=0))
@@ -268,29 +291,44 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     if max_val > 0:
         embedded = embedded / max_val * 45  # Scale to max 45 to leave margin
     
-    plt.figure(figsize=(12, 10))
-    sns.set_style('white')
+    # Save in both 1-column and 2-column IEEE layouts
+    layouts = [
+        ('1col', 3.5),   # 1-column: 3.5 inches
+        ('2col', 7.16),  # 2-column: 7.16 inches
+    ]
     
-    scatter = sns.scatterplot(
-        x=embedded[:, 0], y=embedded[:, 1],
-        hue=labels, palette='bright',
-        s=80, alpha=0.8, legend='full'
-    )
-    
-    sns.despine()
-    plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=14, title_fontsize=16)
-    plt.title(f't-SNE ({n} samples)', fontsize=20, fontweight='bold')
-    plt.xlabel('Dim 1', fontsize=16, fontweight='bold')
-    plt.ylabel('Dim 2', fontsize=16, fontweight='bold')
-    plt.xlim(-50, 50)
-    plt.ylim(-50, 50)
-    plt.tick_params(axis='both', which='major', labelsize=14)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-        print(f'Saved: {save_path}')
-    plt.close()
+    for layout_name, width in layouts:
+        plt.figure(figsize=(width, width))  # Square figure
+        sns.set_style('white')
+        
+        scatter = sns.scatterplot(
+            x=embedded[:, 0], y=embedded[:, 1],
+            hue=labels, palette='bright',
+            s=40 if layout_name == '1col' else 80, alpha=0.8, legend='full'
+        )
+        
+        sns.despine()
+        plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10, title_fontsize=11)
+        plt.title('t-SNE', fontsize=12, fontweight='bold')
+        plt.xlabel('Dim 1', fontsize=12)
+        plt.ylabel('Dim 2', fontsize=12)
+        plt.xlim(-50, 50)
+        plt.ylim(-50, 50)
+        plt.tick_params(axis='both', which='major', labelsize=10)
+        
+        plt.tight_layout()
+        if save_path:
+            # Remove extension if present
+            base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
+            # Save as PDF (vector for publication)
+            pdf_path = f"{base_path}_{layout_name}.pdf"
+            plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+            print(f'Saved: {pdf_path}')
+            # Save as PNG (for WandB logging)
+            png_path = f"{base_path}_{layout_name}.png"
+            plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
+            print(f'Saved: {png_path}')
+        plt.close()
 
 
 def plot_tsne_comparison(original_features, encoded_features, labels, num_classes=3, save_path=None):
