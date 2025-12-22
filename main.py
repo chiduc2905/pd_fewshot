@@ -12,6 +12,14 @@ from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
 import wandb
 
+# FLOPs calculation
+try:
+    from thop import profile, clever_format
+    THOP_AVAILABLE = True
+except ImportError:
+    THOP_AVAILABLE = False
+    print("Warning: thop not installed. Run 'pip install thop' for FLOPs calculation.")
+
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import ContrastiveLoss, RelationLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar, plot_training_curves
@@ -689,18 +697,80 @@ def main():
     
     seed_func(args.seed)
     
-    # Log model parameters after model is created
-    def log_model_parameters(model, model_name):
-        """Log model parameters to wandb."""
+    # Log model parameters and FLOPs after model is created
+    def calculate_flops(model, input_size=(3, 64, 64), device='cuda'):
+        """
+        Calculate FLOPs/MACs for the encoder part of the model.
+        
+        Args:
+            model: The few-shot model with encoder attribute
+            input_size: Input tensor size (C, H, W)
+            device: Device to run calculation on
+            
+        Returns:
+            tuple: (macs, params) or (None, None) if calculation fails
+        """
+        if not THOP_AVAILABLE:
+            return None, None
+            
+        try:
+            # Create dummy input
+            dummy_input = torch.randn(1, *input_size).to(device)
+            
+            # Calculate FLOPs for encoder only (feature extraction part)
+            if hasattr(model, 'encoder'):
+                encoder = model.encoder
+                macs, params = profile(encoder, inputs=(dummy_input,), verbose=False)
+                return macs, params
+            else:
+                # Fallback: try to profile entire model forward with dummy support
+                return None, None
+        except Exception as e:
+            print(f"Warning: Could not calculate FLOPs: {e}")
+            return None, None
+    
+    def log_model_parameters(model, model_name, device='cuda', image_size=64):
+        """Log model parameters and FLOPs to wandb."""
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         non_trainable_params = total_params - trainable_params
         
-        wandb.log({
+        # Calculate FLOPs
+        macs, flops_params = calculate_flops(model, input_size=(3, image_size, image_size), device=device)
+        
+        # Convert to readable format
+        if macs is not None:
+            macs_readable, params_readable = clever_format([macs, flops_params], "%.2f")
+            flops = macs * 2  # 1 MAC ≈ 2 FLOPs
+            flops_readable = clever_format([flops], "%.2f")[0]
+        else:
+            macs_readable = "N/A"
+            flops_readable = "N/A"
+            flops = None
+        
+        # Log to WandB
+        log_dict = {
             "model/total_parameters": total_params,
             "model/trainable_parameters": trainable_params,
             "model/non_trainable_parameters": non_trainable_params,
-        })
+        }
+        
+        if macs is not None:
+            log_dict["model/macs"] = macs
+            log_dict["model/flops"] = flops
+            log_dict["model/macs_readable"] = macs_readable
+            log_dict["model/flops_readable"] = flops_readable
+        
+        wandb.log(log_dict)
+        
+        # Also update run summary for easy access
+        wandb.run.summary["model_total_params"] = total_params
+        wandb.run.summary["model_trainable_params"] = trainable_params
+        if macs is not None:
+            wandb.run.summary["model_macs"] = macs
+            wandb.run.summary["model_flops"] = flops
+            wandb.run.summary["model_macs_readable"] = macs_readable
+            wandb.run.summary["model_flops_readable"] = flops_readable
         
         print(f"\n{'='*50}")
         print(f"Model: {model_name}")
@@ -708,6 +778,8 @@ def main():
         print(f"Total Parameters: {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
         print(f"Non-trainable Parameters: {non_trainable_params:,}")
+        print(f"MACs (encoder): {macs_readable}")
+        print(f"FLOPs (encoder): {flops_readable}")
         print(f"{'='*50}\n")
     os.makedirs(args.path_weights, exist_ok=True)
     os.makedirs(args.path_results, exist_ok=True)
@@ -761,7 +833,7 @@ def main():
     net = get_model(args)
     
     # Log model parameters to wandb
-    log_model_parameters(net, args.model)
+    log_model_parameters(net, args.model, device=args.device, image_size=args.image_size)
     
     if args.mode == 'train':
         best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
