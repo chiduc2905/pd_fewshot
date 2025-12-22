@@ -1,0 +1,15 @@
+# Labeled Scalogram to Source Pulse Mapping
+# Split: train, Class: nopd
+# Format: scalogram_file -> source_pulse_file
+# Generated at: pulse_dataset_augmented
+============================================================
+pulse_0001_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0001.mat
+pulse_0001_noisy1_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0001_noisy1.mat
+pulse_0001_noisy2_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0001_noisy2.mat
+pulse_0002_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0002.mat
+pulse_0002_noisy1_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0002_noisy1.mat
+pulse_0002_noisy2_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0002_noisy2.mat
+pulse_0003_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0003.mat
+pulse_0003_noisy1_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0003_noisy1.mat
+pulse_0003_noisy2_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0003_noisy2.mat
+pulse_0004_labeled.png -> /mnt/disk2/nhatnc/res/dataset/pulse_dataset_augmented/train/nopd/pulse_0004.mat
