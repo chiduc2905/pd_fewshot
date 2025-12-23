@@ -3,13 +3,13 @@ Test script using saved checkpoints.
 
 Usage:
     # Test a single checkpoint
-    python test_checkpoint.py --model covamnet --samples 18 --shot 1
+    python test_checkpoint.py --dataset original --model covamnet --samples 18 --shot 1
     
     # Test all checkpoints in a folder
     python test_checkpoint.py --all
     
     # Test with a specific checkpoint file
-    python test_checkpoint.py --checkpoint checkpoints/covamnet_18samples_1shot_best.pth --model covamnet --shot 1
+    python test_checkpoint.py --checkpoint checkpoints/original_covamnet_18samples_1shot_best.pth --model covamnet --shot 1
 """
 
 import os
@@ -44,6 +44,8 @@ def get_args():
     parser.add_argument('--samples', type=int, default=None,
                         help='Training samples (18, 60, or None for all)')
     parser.add_argument('--shot', type=int, default=1, choices=[1, 5])
+    parser.add_argument('--dataset', type=str, default='scalogram',
+                        help='Dataset name for new checkpoint format (e.g., original, augmented)')
     parser.add_argument('--backbone', type=str, default='conv64f',
                         choices=['conv64f', 'resnet12', 'resnet18'])
     
@@ -69,17 +71,37 @@ def get_args():
 
 def parse_checkpoint_name(filename):
     """
-    Parse checkpoint filename to extract model, samples, and shot.
+    Parse checkpoint filename to extract dataset, model, samples, and shot.
     
-    Expected format: {model}_{samples}_{shot}shot_best.pth
+    Expected format: {dataset}_{model}_{samples}_{shot}shot_best.pth
     Examples:
-        - covamnet_18samples_1shot_best.pth
-        - matchingnet_all_5shot_best.pth
+        - original_covamnet_18samples_1shot_best.pth
+        - augmented_matchingnet_all_5shot_best.pth
+    
+    Also supports legacy format: {model}_{samples}_{shot}shot_best.pth
     """
     basename = os.path.basename(filename)
-    # Pattern: model_samples_shotshot_best.pth
-    pattern = r'^(\w+)_(\d+samples|all)_(\d+)shot_best\.pth$'
-    match = re.match(pattern, basename)
+    
+    # New pattern: dataset_model_samples_shotshot_best.pth
+    pattern_new = r'^(\w+)_(\w+)_(\d+samples|all)_(\d+)shot_best\.pth$'
+    match = re.match(pattern_new, basename)
+    
+    if match:
+        dataset = match.group(1)
+        model = match.group(2)
+        samples_str = match.group(3)
+        shot = int(match.group(4))
+        
+        if samples_str == 'all':
+            samples = None
+        else:
+            samples = int(samples_str.replace('samples', ''))
+        
+        return {'dataset': dataset, 'model': model, 'samples': samples, 'shot': shot}
+    
+    # Legacy pattern: model_samples_shotshot_best.pth
+    pattern_legacy = r'^(\w+)_(\d+samples|all)_(\d+)shot_best\.pth$'
+    match = re.match(pattern_legacy, basename)
     
     if match:
         model = match.group(1)
@@ -91,7 +113,7 @@ def parse_checkpoint_name(filename):
         else:
             samples = int(samples_str.replace('samples', ''))
         
-        return {'model': model, 'samples': samples, 'shot': shot}
+        return {'dataset': None, 'model': model, 'samples': samples, 'shot': shot}
     
     return None
 
@@ -105,15 +127,17 @@ def test_single_checkpoint(checkpoint_path, args):
     # Parse checkpoint name or use args
     parsed = parse_checkpoint_name(checkpoint_path)
     if parsed:
+        dataset_name = parsed.get('dataset') or args.dataset
         model_name = parsed['model']
         samples = parsed['samples']
         shot_num = parsed['shot']
-        print(f"Parsed: model={model_name}, samples={samples}, shot={shot_num}")
+        print(f"Parsed: dataset={dataset_name}, model={model_name}, samples={samples}, shot={shot_num}")
     else:
         # Fall back to command line args
         if args.model is None:
             print(f"Error: Could not parse checkpoint name and --model not specified")
             return
+        dataset_name = args.dataset
         model_name = args.model
         samples = args.samples
         shot_num = args.shot
@@ -140,6 +164,7 @@ def test_single_checkpoint(checkpoint_path, args):
     model_args.training_samples = samples
     model_args.loss = 'contrastive'
     model_args.lambda_center = 0
+    model_args.dataset_name = dataset_name
     model_args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Initialize WandB
@@ -150,6 +175,7 @@ def test_single_checkpoint(checkpoint_path, args):
         project=args.project,
         name=run_name,
         config={
+            'dataset_name': dataset_name,
             'model': model_name,
             'shot_num': shot_num,
             'training_samples': samples,
@@ -224,18 +250,26 @@ def main():
         test_single_checkpoint(args.checkpoint, args)
     
     elif args.model:
-        # Build checkpoint path from model/samples/shot
+        # Build checkpoint path from model/samples/shot/dataset
         samples_str = f"{args.samples}samples" if args.samples else "all"
-        checkpoint_name = f"{args.model}_{samples_str}_{args.shot}shot_best.pth"
+        checkpoint_name = f"{args.dataset}_{args.model}_{samples_str}_{args.shot}shot_best.pth"
         checkpoint_path = os.path.join(args.checkpoints_dir, checkpoint_name)
         
         if not os.path.exists(checkpoint_path):
-            print(f"Checkpoint not found: {checkpoint_path}")
-            print(f"Available checkpoints in {args.checkpoints_dir}:")
-            for f in os.listdir(args.checkpoints_dir):
-                if f.endswith('.pth'):
-                    print(f"  - {f}")
-            return
+            # Try legacy format without dataset
+            checkpoint_name_legacy = f"{args.model}_{samples_str}_{args.shot}shot_best.pth"
+            checkpoint_path_legacy = os.path.join(args.checkpoints_dir, checkpoint_name_legacy)
+            if os.path.exists(checkpoint_path_legacy):
+                checkpoint_path = checkpoint_path_legacy
+                print(f"Using legacy checkpoint format: {checkpoint_name_legacy}")
+            else:
+                print(f"Checkpoint not found: {checkpoint_path}")
+                print(f"Also tried legacy: {checkpoint_path_legacy}")
+                print(f"Available checkpoints in {args.checkpoints_dir}:")
+                for f in os.listdir(args.checkpoints_dir):
+                    if f.endswith('.pth'):
+                        print(f"  - {f}")
+                return
         
         test_single_checkpoint(checkpoint_path, args)
     

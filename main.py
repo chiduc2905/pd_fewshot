@@ -49,6 +49,8 @@ def get_args():
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')
+    parser.add_argument('--dataset_name', type=str, default='scalogram',
+                        help='Dataset name for checkpoint naming (e.g., original, augmented)')
     
     # Model
     parser.add_argument('--model', type=str, default='covamnet', 
@@ -318,21 +320,22 @@ def train_loop(net, train_loader, val_X, val_y, args):
         # Save best
         if val_acc > best_acc:
             best_acc = val_acc
-            # Simplified naming: model_samples_shot (without contrastive/lambda)
+            # Naming with dataset: dataset_model_samples_shot
             samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-            model_filename = f'{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth'
+            model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth'
             path = os.path.join(args.path_weights, model_filename)
             torch.save(net.state_dict(), path)
             print(f'  → Best model saved ({val_acc:.4f})')
             wandb.run.summary["best_val_acc"] = best_acc
             
             # Save as WandB Artifact for version control
-            artifact_name = f'{args.model}_{samples_suffix}_{args.shot_num}shot'
+            artifact_name = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot'
             artifact = wandb.Artifact(
                 name=artifact_name,
                 type='model',
-                description=f'{args.model} model trained on {samples_suffix} with {args.shot_num}-shot',
+                description=f'{args.model} model trained on {args.dataset_name}/{samples_suffix} with {args.shot_num}-shot',
                 metadata={
+                    'dataset_name': args.dataset_name,
                     'model': args.model,
                     'shot_num': args.shot_num,
                     'training_samples': args.training_samples if args.training_samples else 'all',
@@ -348,7 +351,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
     # Plot training curves
     samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
     curves_path = os.path.join(args.path_results, 
-                               f"training_{args.model}_{samples_str}_{args.shot_num}shot")
+                               f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot")
     plot_training_curves(history, curves_path)
     
     # Log to WandB
@@ -440,21 +443,35 @@ def calculate_p_value(acc, baseline, n):
 
 def test_final(net, loader, args):
     """
-    Final evaluation: 150 episodes, K-shot (same as training), 1-query.
+    Final evaluation with detailed metrics.
     
-    Metrics: Accuracy, Precision, Recall, F1, p-value
-    Plots: Confusion Matrix (rows sum to 150), t-SNE
+    Metrics:
+    - Accuracy: mean ± std (worst-case, best-case)
+    - Precision, Recall, F1, p-value
+    - Inference time per episode
+    
+    Plots: Confusion Matrix, t-SNE
     """
-    print(f"\n{'='*50}")
-    print(f"Final Test: {args.model} | {args.shot_num}-shot")
-    print(f"150 episodes × {args.way_num} classes × 1 query = 450 predictions")
-    print('='*50)
+    import time
+    
+    num_episodes = len(loader)
+    print(f"\n{'='*60}")
+    print(f"Final Test: {args.dataset_name}/{args.model} | {args.shot_num}-shot")
+    print(f"{num_episodes} episodes × {args.way_num} classes × 1 query = {num_episodes * args.way_num} predictions")
+    print('='*60)
     
     net.eval()
     all_preds, all_targets, all_features = [], [], []
     
+    # Track per-episode metrics
+    episode_accuracies = []
+    episode_times = []
+    
     with torch.no_grad():
         for query, q_labels, support, s_labels in tqdm(loader, desc='Testing'):
+            # Start timing
+            start_time = time.perf_counter()
+            
             B, NQ, C, H, W = query.shape
             
             # Use same shot_num as training
@@ -464,6 +481,15 @@ def test_final(net, loader, args):
             
             scores = net(query, support)
             preds = scores.argmax(dim=1)
+            
+            # End timing (inference only, exclude data prep for consistency)
+            end_time = time.perf_counter()
+            episode_time_ms = (end_time - start_time) * 1000
+            episode_times.append(episode_time_ms)
+            
+            # Calculate per-episode accuracy
+            episode_correct = (preds == targets).float().mean().item()
+            episode_accuracies.append(episode_correct)
             
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
@@ -479,70 +505,135 @@ def test_final(net, loader, args):
                     pass  # Already flattened
                 all_features.append(feat.cpu().numpy())
     
-    # Metrics
+    # Convert to numpy arrays
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
+    episode_accuracies = np.array(episode_accuracies)
+    episode_times = np.array(episode_times)
     
-    acc = (all_preds == all_targets).mean()
+    # =========================================================================
+    # Accuracy Metrics: mean ± std (worst, best)
+    # =========================================================================
+    acc_mean = episode_accuracies.mean()
+    acc_std = episode_accuracies.std()
+    acc_worst = episode_accuracies.min()
+    acc_best = episode_accuracies.max()
+    
+    # =========================================================================
+    # Inference Time Metrics
+    # =========================================================================
+    time_mean = episode_times.mean()
+    time_std = episode_times.std()
+    time_min = episode_times.min()
+    time_max = episode_times.max()
+    
+    # =========================================================================
+    # Classification Metrics
+    # =========================================================================
     prec, rec, f1, _ = precision_recall_fscore_support(
         all_targets, all_preds, 
-        labels=list(range(args.way_num)),  # Ensure all classes are included
+        labels=list(range(args.way_num)),
         average='macro', 
         zero_division=0
     )
-    p_val = calculate_p_value(acc, 1.0/args.way_num, len(all_targets))
+    p_val = calculate_p_value(acc_mean, 1.0/args.way_num, len(all_targets))
     
-    print(f"\nAccuracy : {acc:.4f}")
-    print(f"Precision: {prec:.4f}")
-    print(f"Recall   : {rec:.4f}")
-    print(f"F1-Score : {f1:.4f}")
-    print(f"p-value  : {p_val:.2e}")
+    # =========================================================================
+    # Print Results
+    # =========================================================================
+    print(f"\n{'='*60}")
+    print("ACCURACY METRICS")
+    print('='*60)
+    print(f"  Mean Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
+    print(f"  Worst-case    : {acc_worst:.4f}")
+    print(f"  Best-case     : {acc_best:.4f}")
+    print(f"  Precision     : {prec:.4f}")
+    print(f"  Recall        : {rec:.4f}")
+    print(f"  F1-Score      : {f1:.4f}")
+    print(f"  p-value       : {p_val:.2e}")
     
-    # Log metrics to WandB
+    print(f"\n{'='*60}")
+    print("INFERENCE TIME (per episode)")
+    print('='*60)
+    print(f"  Mean Time     : {time_mean:.2f} ± {time_std:.2f} ms")
+    print(f"  Min Time      : {time_min:.2f} ms")
+    print(f"  Max Time      : {time_max:.2f} ms")
+    
+    # =========================================================================
+    # Log to WandB
+    # =========================================================================
     wandb.log({
-        "test_accuracy": acc,
+        # Accuracy metrics
+        "test_accuracy_mean": acc_mean,
+        "test_accuracy_std": acc_std,
+        "test_accuracy_worst": acc_worst,
+        "test_accuracy_best": acc_best,
+        # Legacy: keep for compatibility
+        "test_accuracy": acc_mean,
+        # Classification metrics
         "test_precision": prec,
         "test_recall": rec,
         "test_f1": f1,
-        "test_p_value": p_val
+        "test_p_value": p_val,
+        # Inference time metrics
+        "inference_time_mean_ms": time_mean,
+        "inference_time_std_ms": time_std,
+        "inference_time_min_ms": time_min,
+        "inference_time_max_ms": time_max,
     })
     
-    # Plots
+    # Update WandB summary for easy access
+    wandb.run.summary["test_accuracy_mean"] = acc_mean
+    wandb.run.summary["test_accuracy_std"] = acc_std
+    wandb.run.summary["test_accuracy_worst"] = acc_worst
+    wandb.run.summary["inference_time_mean_ms"] = time_mean
+    
+    # =========================================================================
+    # Plots (include dataset_name in filenames)
+    # =========================================================================
     samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
     
-    # Confusion Matrix (saves both PDF and PNG in 1col and 2col layouts)
+    # Confusion Matrix
     cm_base = os.path.join(args.path_results, 
-                           f"confusion_matrix_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+                           f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
     plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
-    # Log 2-column PNG to WandB (better visibility on dashboard)
     wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
     
-    # t-SNE (saves both PDF and PNG in 1col and 2col layouts)
+    # t-SNE
     if all_features:
         features = np.vstack(all_features)
         tsne_base = os.path.join(args.path_results, 
-                                 f"tsne_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+                                 f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
         plot_tsne(features, all_targets, args.way_num, tsne_base)
-        # Log 2-column PNG to WandB
         wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
     
     print(f"\nResults logged to WandB and plots saved to {args.path_results}")
     
-    # Save results to text file
+    # =========================================================================
+    # Save results to text file (include dataset_name)
+    # =========================================================================
     txt_path = os.path.join(args.path_results, 
-                            f"results_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot.txt")
+                            f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot.txt")
     with open(txt_path, 'w') as f:
+        f.write(f"Dataset: {args.dataset_name}\n")
         f.write(f"Model: {args.model}\n")
         f.write(f"Shot: {args.shot_num}\n")
         f.write(f"Loss: {args.loss}\n")
         f.write(f"Lambda Center: {args.lambda_center}\n")
         f.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"Accuracy : {acc:.4f}\n")
-        f.write(f"Precision: {prec:.4f}\n")
-        f.write(f"Recall   : {rec:.4f}\n")
-        f.write(f"F1-Score : {f1:.4f}\n")
-        f.write(f"p-value  : {p_val:.2e}\n")
+        f.write(f"Test Episodes: {num_episodes}\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Accuracy      : {acc_mean:.4f} ± {acc_std:.4f}\n")
+        f.write(f"Worst-case    : {acc_worst:.4f}\n")
+        f.write(f"Best-case     : {acc_best:.4f}\n")
+        f.write(f"Precision     : {prec:.4f}\n")
+        f.write(f"Recall        : {rec:.4f}\n")
+        f.write(f"F1-Score      : {f1:.4f}\n")
+        f.write(f"p-value       : {p_val:.2e}\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Inference Time: {time_mean:.2f} ± {time_std:.2f} ms/episode\n")
+        f.write(f"Min Time      : {time_min:.2f} ms\n")
+        f.write(f"Max Time      : {time_max:.2f} ms\n")
     
     print(f"Results saved to {txt_path}")
 
@@ -840,7 +931,7 @@ def main():
         
         # Load best model for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-        path = os.path.join(args.path_weights, f'{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
         

@@ -73,7 +73,8 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
            '--lambda_center', str(lambda_center),
            '--mode', 'train',
            '--project', args.project,
-           '--dataset_path', dataset_path]
+           '--dataset_path', dataset_path,
+           '--dataset_name', dataset_name]
     
     if backbone is not None:
         cmd.extend(['--backbone', backbone])
@@ -179,14 +180,15 @@ for dataset_name, config in DATASETS.items():
             model_results[display_name] = {'1shot': None, '5shot': None}
             
             for shot in [1, 5]:
-                # Updated to new simplified naming format: model_samples_shot
+                # New naming format: results_dataset_model_samples_shot.txt
                 result_file = os.path.join(results_dir, 
-                    f"results_{model}_{samples_str}_{shot}shot.txt")
+                    f"results_{dataset_name}_{model}_{samples_str}_{shot}shot.txt")
                 
                 if os.path.exists(result_file):
                     with open(result_file, 'r') as f:
                         content = f.read()
-                        match = re.search(r'Accuracy\s*:\s*([\d.]+)', content)
+                        # Updated regex to match new format: "Accuracy : 0.9700 ± 0.0234"
+                        match = re.search(r'Accuracy\s*:\s*([\d.]+)\s*±', content)
                         if match:
                             acc = float(match.group(1))
                             model_results[display_name][f'{shot}shot'] = acc
