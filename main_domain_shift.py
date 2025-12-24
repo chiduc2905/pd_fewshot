@@ -575,9 +575,15 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
     """
     Test on NEW domain with K-shot.
     
-    Args:
-        shot_num: K for K-shot (1, 5, or 10)
+    Metrics (matching main.py):
+    - Accuracy: mean ± std (worst-case, best-case)
+    - Precision, Recall, F1, p-value
+    - Inference time per episode
+    
+    Plots: Confusion Matrix, t-SNE (for each shot)
     """
+    import time
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Convert to tensor
@@ -589,17 +595,25 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
                              args.way_num, shot_num, args.test_query_num, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
+    total_predictions = args.test_episodes * args.way_num * args.test_query_num
+    
     print(f"\n{'='*60}")
     print(f"DOMAIN SHIFT TEST: {shot_num}-shot")
-    print(f"Episodes: {args.test_episodes}, Query/class: {args.test_query_num}")
+    print(f"{'='*60}")
+    print(f"Episodes: {args.test_episodes}")
+    print(f"Query/class: {args.test_query_num}")
+    print(f"Total predictions: {total_predictions}")
     print('='*60)
     
     net.eval()
     all_preds, all_targets, all_features = [], [], []
     episode_accuracies = []
+    episode_times = []
     
     with torch.no_grad():
         for query, q_labels, support, s_labels in tqdm(test_loader, desc=f'{shot_num}-shot test'):
+            start_time = time.perf_counter()
+            
             B, NQ, C, H, W = query.shape
             
             support = support.view(B, args.way_num, shot_num, C, H, W).to(device)
@@ -608,6 +622,9 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
             
             scores = net(query, support)
             preds = scores.argmax(dim=1)
+            
+            end_time = time.perf_counter()
+            episode_times.append((end_time - start_time) * 1000)
             
             episode_acc = (preds == targets).float().mean().item()
             episode_accuracies.append(episode_acc)
@@ -627,11 +644,17 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
     episode_accuracies = np.array(episode_accuracies)
+    episode_times = np.array(episode_times)
     
     acc_mean = episode_accuracies.mean()
     acc_std = episode_accuracies.std()
     acc_worst = episode_accuracies.min()
     acc_best = episode_accuracies.max()
+    
+    time_mean = episode_times.mean()
+    time_std = episode_times.std()
+    time_min = episode_times.min()
+    time_max = episode_times.max()
     
     prec, rec, f1, _ = precision_recall_fscore_support(
         all_targets, all_preds,
@@ -642,31 +665,78 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
     p_val = calculate_p_value(acc_mean, 1.0/args.way_num, len(all_targets))
     
     # Print results
-    print(f"\nAccuracy: {acc_mean:.4f} ± {acc_std:.4f}")
-    print(f"Worst: {acc_worst:.4f}, Best: {acc_best:.4f}")
-    print(f"Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
-    print(f"p-value: {p_val:.2e}")
+    print(f"\n{'='*60}")
+    print("ACCURACY METRICS")
+    print('='*60)
+    print(f"  Mean Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
+    print(f"  Worst-case    : {acc_worst:.4f}")
+    print(f"  Best-case     : {acc_best:.4f}")
+    print(f"  Precision     : {prec:.4f}")
+    print(f"  Recall        : {rec:.4f}")
+    print(f"  F1-Score      : {f1:.4f}")
+    print(f"  p-value       : {p_val:.2e}")
+    
+    print(f"\n{'='*60}")
+    print("INFERENCE TIME (per episode)")
+    print('='*60)
+    print(f"  Mean Time     : {time_mean:.2f} ± {time_std:.2f} ms")
+    print(f"  Min Time      : {time_min:.2f} ms")
+    print(f"  Max Time      : {time_max:.2f} ms")
     
     # Log to WandB
     wandb.log({
-        f"test_{shot_num}shot_accuracy": acc_mean,
-        f"test_{shot_num}shot_std": acc_std,
+        f"test_{shot_num}shot_accuracy_mean": acc_mean,
+        f"test_{shot_num}shot_accuracy_std": acc_std,
+        f"test_{shot_num}shot_accuracy_worst": acc_worst,
+        f"test_{shot_num}shot_accuracy_best": acc_best,
+        f"test_{shot_num}shot_precision": prec,
+        f"test_{shot_num}shot_recall": rec,
         f"test_{shot_num}shot_f1": f1,
+        f"test_{shot_num}shot_p_value": p_val,
+        f"test_{shot_num}shot_time_mean_ms": time_mean,
+        f"test_{shot_num}shot_time_std_ms": time_std,
     })
     
-    # Plots
-    if shot_num == 1:  # Only plot once
-        cm_base = os.path.join(args.path_results,
-                               f"confusion_matrix_{args.dataset_name}_{args.model}_{shot_num}shot")
-        plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
-        wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
-        
-        if all_features:
-            features = np.vstack(all_features)
-            tsne_base = os.path.join(args.path_results,
-                                     f"tsne_{args.dataset_name}_{args.model}_{shot_num}shot")
-            plot_tsne(features, all_targets, args.way_num, tsne_base)
-            wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
+    # Plots (for each shot)
+    cm_base = os.path.join(args.path_results,
+                           f"confusion_matrix_{args.dataset_name}_{args.model}_{shot_num}shot")
+    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
+    wandb.log({f"confusion_matrix_{shot_num}shot": wandb.Image(f"{cm_base}_2col.png")})
+    
+    if all_features:
+        features = np.vstack(all_features)
+        tsne_base = os.path.join(args.path_results,
+                                 f"tsne_{args.dataset_name}_{args.model}_{shot_num}shot")
+        plot_tsne(features, all_targets, args.way_num, tsne_base)
+        wandb.log({f"tsne_{shot_num}shot": wandb.Image(f"{tsne_base}_2col.png")})
+    
+    # Save to txt file
+    txt_path = os.path.join(args.path_results,
+                            f"results_{args.dataset_name}_{args.model}_{shot_num}shot.txt")
+    with open(txt_path, 'w') as f:
+        f.write(f"Domain Shift Experiment\n")
+        f.write(f"{'='*40}\n")
+        f.write(f"Source Domain: {args.dataset_path}\n")
+        f.write(f"Target Domain: {args.test_dataset_path}\n")
+        f.write(f"Model: {args.model}\n")
+        f.write(f"Shot: {shot_num}\n")
+        f.write(f"Test Episodes: {args.test_episodes}\n")
+        f.write(f"Query/class: {args.test_query_num}\n")
+        f.write(f"Total Predictions: {total_predictions}\n")
+        f.write(f"{'-'*40}\n")
+        f.write(f"Accuracy      : {acc_mean:.4f} ± {acc_std:.4f}\n")
+        f.write(f"Worst-case    : {acc_worst:.4f}\n")
+        f.write(f"Best-case     : {acc_best:.4f}\n")
+        f.write(f"Precision     : {prec:.4f}\n")
+        f.write(f"Recall        : {rec:.4f}\n")
+        f.write(f"F1-Score      : {f1:.4f}\n")
+        f.write(f"p-value       : {p_val:.2e}\n")
+        f.write(f"{'-'*40}\n")
+        f.write(f"Inference Time: {time_mean:.2f} ± {time_std:.2f} ms/episode\n")
+        f.write(f"Min Time      : {time_min:.2f} ms\n")
+        f.write(f"Max Time      : {time_max:.2f} ms\n")
+    
+    print(f"\nResults saved to {txt_path}")
     
     return acc_mean, acc_std
 
@@ -712,7 +782,7 @@ def main():
     
     if args.mode == 'train':
         # Test all shot configurations
-        for shot_num in [1, 5, 10]:
+        for shot_num in [1, 5]:
             args.shot_num = shot_num
             print(f"\n{'#'*60}")
             print(f"TRAINING {shot_num}-SHOT")
