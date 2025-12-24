@@ -509,7 +509,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         # Validate
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, 1, args.seed + epoch)
+                                args.way_num, args.shot_num, args.test_query_num, args.seed + epoch)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         val_acc = evaluate(net, val_loader, args)
         
@@ -541,6 +541,14 @@ def evaluate(net, loader, args):
     
     with torch.no_grad():
         for query, q_labels, support, s_labels in loader:
+            # Handle shape: FewshotDataset returns (way*query, C, H, W)
+            # DataLoader with batch_size=1 may or may not add batch dim
+            if query.dim() == 4:
+                # (way*query, C, H, W) -> add batch dim
+                query = query.unsqueeze(0)
+                support = support.unsqueeze(0)
+                q_labels = q_labels.unsqueeze(0)
+            
             B = query.shape[0]
             C, H, W = query.shape[2], query.shape[3], query.shape[4]
             
@@ -590,6 +598,11 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
     test_X_t = torch.from_numpy(test_X.astype(np.float32))
     test_y_t = torch.from_numpy(test_y).long()
     
+    # Debug: verify tensor shapes
+    print(f"\n[DEBUG] test_X shape: {test_X.shape}")
+    print(f"[DEBUG] test_X_t shape: {test_X_t.shape}")
+    print(f"[DEBUG] test_y_t shape: {test_y_t.shape}")
+    
     # Create test loader
     test_ds = FewshotDataset(test_X_t, test_y_t, args.test_episodes,
                              args.way_num, shot_num, args.test_query_num, args.seed)
@@ -614,7 +627,19 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
         for query, q_labels, support, s_labels in tqdm(test_loader, desc=f'{shot_num}-shot test'):
             start_time = time.perf_counter()
             
-            B, NQ, C, H, W = query.shape
+            # Handle shape: DataLoader with batch_size=1 adds batch dim
+            # Expected after DataLoader: (B, way*query, C, H, W) where B=1
+            # FewshotDataset returns: (way*query, C, H, W)
+            
+            # Ensure query has 5 dims: (B, way*query, C, H, W)
+            if query.dim() == 4:
+                # (way*query, C, H, W) -> add batch dim
+                query = query.unsqueeze(0)
+                support = support.unsqueeze(0)
+                q_labels = q_labels.unsqueeze(0)
+            
+            B = query.shape[0]
+            C, H, W = query.shape[2], query.shape[3], query.shape[4]
             
             support = support.view(B, args.way_num, shot_num, C, H, W).to(device)
             query = query.to(device)
@@ -782,7 +807,7 @@ def main():
     
     if args.mode == 'train':
         # Test all shot configurations
-        for shot_num in [1, 5]:
+        for shot_num in [1, 5, 10]:
             args.shot_num = shot_num
             print(f"\n{'#'*60}")
             print(f"TRAINING {shot_num}-SHOT")
