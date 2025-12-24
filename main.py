@@ -66,7 +66,7 @@ def get_args():
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=1, help='Queries per class per episode')
+    parser.add_argument('--query_num', type=int, default=5, help='Queries per class per episode')
     parser.add_argument('--image_size', type=int, default=64, choices=[64, 84],
                         help='Input image size: 64 (required for conv64f) or 84 (required for resnet12/18)')
     
@@ -74,7 +74,7 @@ def get_args():
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
     parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=200)
+    parser.add_argument('--episode_num_val', type=int, default=150)
     parser.add_argument('--num_epochs', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -457,7 +457,7 @@ def test_final(net, loader, args):
     num_episodes = len(loader)
     print(f"\n{'='*60}")
     print(f"Final Test: {args.dataset_name}/{args.model} | {args.shot_num}-shot")
-    print(f"{num_episodes} episodes × {args.way_num} classes × 1 query = {num_episodes * args.way_num} predictions")
+    print(f"{num_episodes} episodes × {args.way_num} classes × {args.query_num} query = {num_episodes * args.way_num * args.query_num} predictions")
     print('='*60)
     
     net.eval()
@@ -916,7 +916,7 @@ def main():
     # This ensures different episodes per epoch but reproducibility across program runs
     
     # Test: Fixed seed ensures identical episodes across all runs
-    test_ds = FewshotDataset(test_X, test_y, 300,  # Fixed 300 episodes for test
+    test_ds = FewshotDataset(test_X, test_y, 200,  # Fixed 200 episodes for test
                              args.way_num, args.shot_num, 1, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     

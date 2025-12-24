@@ -58,7 +58,7 @@ def get_args():
     parser.add_argument('--image_size', type=int, default=64, choices=[64, 84])
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--query_num', type=int, default=1)
-    parser.add_argument('--test_episodes', type=int, default=300)
+    parser.add_argument('--test_episodes', type=int, default=200)
     
     # Other
     parser.add_argument('--path_results', type=str, default='results/')

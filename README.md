@@ -43,14 +43,15 @@ python main.py --model covamnet --shot_num 1 --mode test
 ## Evaluation Protocol
 
 ### All Phases (Train/Val/Test)
-- **Query**: 1 per class per episode
+- **Query (Train)**: 5 per class per episode
+- **Query (Val/Test)**: 1 per class per episode
 - **Support**: K-shot per class
 
 | Phase | Episodes | Total Predictions |
 |-------|----------|-------------------|
-| Training | 100/epoch | 300 (100 × 3) |
-| Validation | 100 | 300 (100 × 3) |
-| Final Test | 150 | 450 (150 × 3) |
+| Training | 100/epoch | 1500 (100 × 3 × 5) |
+| Validation | 150 | 450 (150 × 3 × 1) |
+| Final Test | 200 | 600 (200 × 3 × 1) |
 
 ### Final Test Metrics
 - Accuracy, Precision, Recall, F1, p-value

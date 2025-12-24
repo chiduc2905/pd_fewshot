@@ -32,18 +32,18 @@
 
 ### Training
 ```
-Train Data → FewshotDataset → 100 episodes (K-shot, 1-query) → Model → Loss (Main + Center)
+Train Data → FewshotDataset → 100 episodes (K-shot, 5-query) → Model → Loss (Main + Center)
 ```
 *   **Logging**: Metrics (Loss, Acc) logged to **WandB**.
 
 ### Validation (Model Selection)
 ```
-Val Data → 75 episodes × K-shot × 1-query/class → Accuracy → Save Best
+Val Data → 150 episodes × K-shot × 1-query/class → Accuracy → Save Best
 ```
 
 ### Final Test
 ```
-Test Data → 150 episodes × 1-shot × 1-query → Metrics + Plots
+Test Data → 200 episodes × K-shot × 1-query → Metrics + Plots
 ```
 *   **Metrics**: Accuracy, Precision, Recall, F1, p-value (Logged to WandB).
 *   **Plots**: Confusion Matrix, t-SNE (Logged to WandB & saved locally).

@@ -177,7 +177,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     """
     Plot confusion matrix (IEEE format) - saves as PDF vector.
     
-    For 150-episode test with 1-query/class: each row sums to 150.
+    For 200-episode test with 1-query/class: each row sums to 200.
     
     Args:
         targets: Ground truth labels
@@ -256,7 +256,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     """
     t-SNE visualization of query features - saves as PDF vector.
     
-    For 150-episode test: 450 points (150 per class).
+    For 200-episode test: 600 points (200 per class with 1 query each).
     Saves in two IEEE layouts: 1-column (3.5in) and 2-column (7.16in).
     """
     # IEEE format: Times New Roman, 12pt font
