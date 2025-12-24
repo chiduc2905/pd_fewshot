@@ -374,9 +374,10 @@ class NewDomainDataset:
         X, y = [], []
         
         # Handle special directory structures
+        # Direct class folders: corona/, surface/, void/
         class_dirs = {
             'corona': ['corona'],
-            'surface': ['surface', 'surface/PD'],  # Try both
+            'surface': ['surface'],
             'void': ['void']
         }
         
@@ -624,22 +625,32 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
     episode_times = []
     
     with torch.no_grad():
-        for query, q_labels, support, s_labels in tqdm(test_loader, desc=f'{shot_num}-shot test'):
+        for idx, (query, q_labels, support, s_labels) in enumerate(tqdm(test_loader, desc=f'{shot_num}-shot test')):
             start_time = time.perf_counter()
             
-            # Handle shape: DataLoader with batch_size=1 adds batch dim
-            # Expected after DataLoader: (B, way*query, C, H, W) where B=1
-            # FewshotDataset returns: (way*query, C, H, W)
+            # Debug: print shape on first iteration
+            if idx == 0:
+                print(f"[DEBUG] Raw shapes from DataLoader:")
+                print(f"  query: {query.shape}, dim={query.dim()}")
+                print(f"  support: {support.shape}")
+                print(f"  q_labels: {q_labels.shape}")
             
-            # Ensure query has 5 dims: (B, way*query, C, H, W)
-            if query.dim() == 4:
-                # (way*query, C, H, W) -> add batch dim
+            # Handle different tensor dimensions
+            # FewshotDataset returns (way*query, C, H, W) = 4D
+            # DataLoader with batch_size=1 wraps it to 5D: (1, way*query, C, H, W)
+            if query.dim() == 5:
+                # Already has batch dim: (B, NQ, C, H, W)
+                B = query.shape[0]
+                C, H, W = query.shape[2], query.shape[3], query.shape[4]
+            elif query.dim() == 4:
+                # (NQ, C, H, W) -> add batch dim
                 query = query.unsqueeze(0)
                 support = support.unsqueeze(0)
                 q_labels = q_labels.unsqueeze(0)
-            
-            B = query.shape[0]
-            C, H, W = query.shape[2], query.shape[3], query.shape[4]
+                B = 1
+                C, H, W = query.shape[2], query.shape[3], query.shape[4]
+            else:
+                raise ValueError(f"Unexpected query dimension: {query.dim()}, shape: {query.shape}")
             
             support = support.view(B, args.way_num, shot_num, C, H, W).to(device)
             query = query.to(device)
