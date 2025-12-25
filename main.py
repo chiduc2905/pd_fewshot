@@ -22,7 +22,7 @@ except ImportError:
 
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
-from function.function import ContrastiveLoss, RelationLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar, plot_training_curves
+from function.function import ContrastiveLoss, RelationLoss, SiameseLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar, plot_training_curves
 from net.cosine import CosineNet  # User's custom cosine similarity model
 from net.cosine_classifier import CosineClassifier  # Baseline++ (Chen et al. ICLR 2019)
 from net.protonet import ProtoNet
@@ -169,6 +169,10 @@ def train_loop(net, train_loader, val_X, val_y, args):
     if args.model == 'relationnet':
         # RelationNet uses MSE loss (paper-specific)
         criterion_main = RelationLoss().to(device)
+    elif args.model == 'siamese':
+        # SiameseNet uses true contrastive loss with margin (Koch et al. 2015)
+        # Applied to embeddings from support+query pairs
+        criterion_main = SiameseLoss(margin=1.0).to(device)
     elif args.loss == 'triplet':
         criterion_main = TripletLoss(margin=args.margin).to(device)
     else:
@@ -220,39 +224,36 @@ def train_loop(net, train_loader, val_X, val_y, args):
             # Forward Main
             scores = net(query, support)
             
-            # 1. Main Loss (Contrastive or Triplet)
-            if args.loss == 'triplet':
-                # For metric learning losses, we need to combine support and query features
-                # to ensure we have enough positive pairs (at least 1 support + 1 query per class)
+            # 1. Main Loss
+            if args.loss == 'triplet' or args.model == 'siamese':
+                # For metric learning losses (Triplet, Siamese Contrastive),
+                # we need to combine support and query features for pair-wise training
                 
                 # Extract query features
                 q_flat = query.view(-1, C, H, W)
                 q_feats = net.encoder(q_flat)
+                if q_feats.dim() == 4:  # Feature maps
+                    q_feats = F.adaptive_avg_pool2d(q_feats, 1)
                 q_feats = q_feats.view(q_feats.size(0), -1)
                 q_targets = targets
                 
                 # Extract support features
-                # support shape: (B, Way, Shot, C, H, W) -> (B*Way*Shot, C, H, W)
                 s_flat = support.view(-1, C, H, W)
                 s_feats = net.encoder(s_flat)
+                if s_feats.dim() == 4:  # Feature maps
+                    s_feats = F.adaptive_avg_pool2d(s_feats, 1)
                 s_feats = s_feats.view(s_feats.size(0), -1)
-                
-                # Create support targets
-                # s_labels shape: (B, Way, Shot) -> (B*Way*Shot)
                 s_targets = s_labels.view(-1).to(args.device)
                 
-                # Concatenate
+                # Concatenate all embeddings and labels
                 all_feats = torch.cat([q_feats, s_feats], dim=0)
                 all_targets = torch.cat([q_targets, s_targets], dim=0)
                 
-                # Normalize features for stability
-                all_feats = F.normalize(all_feats, p=2, dim=1)
-                
-                # Triplet
+                # Apply contrastive/triplet loss on embeddings
                 loss_main = criterion_main(all_feats, all_targets)
                 
             else:
-                # Contrastive needs scores
+                # CE-based losses (ContrastiveLoss, RelationLoss) use scores
                 loss_main = criterion_main(scores, targets)
             
             # 2. Center Loss

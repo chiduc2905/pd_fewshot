@@ -173,6 +173,67 @@ class TripletLoss(nn.Module):
         return loss
 
 
+class SiameseContrastiveLoss(nn.Module):
+    """True Contrastive Loss with Margin for Siamese Networks.
+    
+    Reference:
+    Koch et al. "Siamese Neural Networks for One-shot Image Recognition" (ICML-W 2015)
+    
+    Original formulation:
+    L = y * D² + (1 - y) * max(0, margin - D)²
+    
+    Where:
+    - D = L1 distance between embeddings (or Euclidean)  
+    - y = 1 for same class (similar pairs)
+    - y = 0 for different class (dissimilar pairs)
+    - margin = minimum distance for dissimilar pairs
+    
+    For N-way classification, we generate all pairs from the episode data
+    (support + query) and compute contrastive loss on them.
+    """
+    
+    def __init__(self, margin=1.0):
+        super(SiameseContrastiveLoss, self).__init__()
+        self.margin = margin
+    
+    def forward(self, embeddings, labels):
+        """
+        Compute contrastive loss on all pairs within the batch.
+        
+        Args:
+            embeddings: (N, D) feature embeddings from encoder
+            labels: (N,) class labels
+        Returns:
+            Contrastive loss
+        """
+        N = embeddings.size(0)
+        
+        # Compute pairwise L1 distances
+        # Using L1 as in the original Siamese paper
+        # dist[i,j] = ||emb_i - emb_j||_1
+        dist_matrix = torch.cdist(embeddings, embeddings, p=1)  # (N, N)
+        
+        # Create label matrix: 1 if same class, 0 if different
+        labels = labels.view(-1, 1)
+        label_matrix = (labels == labels.T).float()  # (N, N)
+        
+        # Contrastive loss for all pairs
+        # L = y * D² + (1 - y) * max(0, margin - D)²
+        positive_loss = label_matrix * dist_matrix.pow(2)
+        negative_loss = (1 - label_matrix) * F.relu(self.margin - dist_matrix).pow(2)
+        
+        # Average over all pairs (excluding diagonal)
+        mask = 1 - torch.eye(N, device=embeddings.device)
+        loss = (positive_loss + negative_loss) * mask
+        loss = loss.sum() / mask.sum()
+        
+        return loss
+
+
+# Alias for backward compatibility (but SiameseContrastiveLoss is the correct one)
+SiameseLoss = SiameseContrastiveLoss
+
+
 def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_names=None):
     """
     Plot confusion matrix (IEEE format) - saves as PDF vector.

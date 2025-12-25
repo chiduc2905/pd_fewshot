@@ -34,7 +34,7 @@ except ImportError:
     THOP_AVAILABLE = False
 
 from dataloader.dataloader import FewshotDataset
-from function.function import (ContrastiveLoss, RelationLoss, CenterLoss, 
+from function.function import (ContrastiveLoss, RelationLoss, SiameseLoss, CenterLoss, 
                                seed_func, plot_confusion_matrix, plot_tsne)
 from net.cosine import CosineNet
 from net.cosine_classifier import CosineClassifier
@@ -455,6 +455,9 @@ def train_loop(net, train_loader, val_X, val_y, args):
     # Loss function
     if args.model == 'relationnet':
         criterion_main = RelationLoss().to(device)
+    elif args.model == 'siamese':
+        # SiameseNet uses true contrastive loss with margin (Koch et al. 2015)
+        criterion_main = SiameseLoss(margin=1.0).to(device)
     else:
         criterion_main = ContrastiveLoss().to(device)
     
@@ -492,7 +495,29 @@ def train_loop(net, train_loader, val_X, val_y, args):
             targets = q_labels.view(-1).to(device)
             
             scores = net(query, support)
-            loss = criterion_main(scores, targets)
+            
+            # Loss computation - SiameseNet uses paired contrastive loss
+            if args.model == 'siamese':
+                # Extract embeddings from support + query for contrastive loss
+                q_flat = query.view(-1, C, H, W)
+                q_feats = net.encoder(q_flat)
+                if q_feats.dim() == 4:
+                    q_feats = F.adaptive_avg_pool2d(q_feats, 1)
+                q_feats = q_feats.view(q_feats.size(0), -1)
+                
+                s_flat = support.view(-1, C, H, W)
+                s_feats = net.encoder(s_flat)
+                if s_feats.dim() == 4:
+                    s_feats = F.adaptive_avg_pool2d(s_feats, 1)
+                s_feats = s_feats.view(s_feats.size(0), -1)
+                s_targets = s_labels.view(-1).to(device)
+                
+                all_feats = torch.cat([q_feats, s_feats], dim=0)
+                all_targets = torch.cat([targets, s_targets], dim=0)
+                
+                loss = criterion_main(all_feats, all_targets)
+            else:
+                loss = criterion_main(scores, targets)
             
             if args.lambda_center > 0:
                 q_flat = query.view(-1, C, H, W)
