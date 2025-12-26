@@ -251,12 +251,12 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     if class_names is None:
         class_names = ['Corona', 'HF_NoPD', 'Surface', 'Void']
     
-    # IEEE format: Times New Roman, 12pt font
+    # IEEE format: Times New Roman, 14pt font
     plt.rcParams.update({
         'font.family': 'serif',
         'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
         'mathtext.fontset': 'stix',
-        'font.size': 12
+        'font.size': 14
     })
     
     cm = confusion_matrix(targets, preds)
@@ -264,13 +264,10 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     row_sums[row_sums == 0] = 1
     cm_pct = cm / row_sums * 100
     
-    # Save in both 1-column and 2-column IEEE layouts
-    layouts = [
-        ('1col', 3.5),   # 1-column: 3.5 inches
-        ('2col', 7.16),  # 2-column: 7.16 inches
-    ]
-    
-    for layout_name, width in layouts:
+    # Save in 2-column IEEE layout only
+    width = 7.16  # 2-column: 7.16 inches
+    layout_name = '2col'
+    if True:  # Keep indentation structure
         # Square figure
         fig, ax = plt.subplots(figsize=(width, width))
         
@@ -283,20 +280,20 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         # Green colormap (like pd_cnn)
         sns.heatmap(cm, annot=annot, fmt='', cmap='Greens',
                     linewidths=0.5, linecolor='white', ax=ax,
-                    annot_kws={'size': 12},
+                    annot_kws={'size': 14},
                     vmin=0, square=True,
                     xticklabels=class_names, yticklabels=class_names,
                     cbar_kws={'shrink': 0.8})
         
         # No title (IEEE format)
-        ax.set_xlabel('Predicted Label', fontsize=12)
-        ax.set_ylabel('True Label', fontsize=12)
-        ax.set_xticklabels(class_names, fontsize=12, rotation=45, ha='right')
-        ax.set_yticklabels(class_names, fontsize=12, rotation=0)
+        ax.set_xlabel('Predicted Label', fontsize=14)
+        ax.set_ylabel('True Label', fontsize=14)
+        ax.set_xticklabels(class_names, fontsize=14, rotation=45, ha='right')
+        ax.set_yticklabels(class_names, fontsize=14, rotation=0)
         
         # Adjust colorbar font size
         cbar = ax.collections[0].colorbar
-        cbar.ax.tick_params(labelsize=10)
+        cbar.ax.tick_params(labelsize=12)
         
         plt.tight_layout()
         if save_path:
@@ -320,12 +317,12 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     For 200-episode test: 600 points (200 per class with 1 query each).
     Saves in two IEEE layouts: 1-column (3.5in) and 2-column (7.16in).
     """
-    # IEEE format: Times New Roman, 12pt font
+    # IEEE format: Times New Roman, 14pt font
     plt.rcParams.update({
         'font.family': 'serif',
         'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
         'mathtext.fontset': 'stix',
-        'font.size': 12
+        'font.size': 14
     })
 
     n = len(features)
@@ -352,30 +349,27 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     if max_val > 0:
         embedded = embedded / max_val * 45  # Scale to max 45 to leave margin
     
-    # Save in both 1-column and 2-column IEEE layouts
-    layouts = [
-        ('1col', 3.5),   # 1-column: 3.5 inches
-        ('2col', 7.16),  # 2-column: 7.16 inches
-    ]
-    
-    for layout_name, width in layouts:
+    # Save in 2-column IEEE layout only
+    width = 7.16  # 2-column: 7.16 inches
+    layout_name = '2col'
+    if True:  # Keep indentation structure
         plt.figure(figsize=(width, width))  # Square figure
         sns.set_style('white')
         
         scatter = sns.scatterplot(
             x=embedded[:, 0], y=embedded[:, 1],
             hue=labels, palette='bright',
-            s=40 if layout_name == '1col' else 80, alpha=0.8, legend='full'
+            s=80, alpha=0.8, legend='full'
         )
         
         sns.despine()
-        plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10, title_fontsize=11)
-        plt.title('t-SNE', fontsize=12, fontweight='bold')
-        plt.xlabel('Dim 1', fontsize=12)
-        plt.ylabel('Dim 2', fontsize=12)
+        plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12, title_fontsize=13)
+        plt.title('t-SNE', fontsize=14, fontweight='bold')
+        plt.xlabel('Dim 1', fontsize=14)
+        plt.ylabel('Dim 2', fontsize=14)
         plt.xlim(-50, 50)
         plt.ylim(-50, 50)
-        plt.tick_params(axis='both', which='major', labelsize=10)
+        plt.tick_params(axis='both', which='major', labelsize=12)
         
         plt.tight_layout()
         if save_path:

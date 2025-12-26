@@ -331,25 +331,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
             print(f'  → Best model saved ({val_acc:.4f})')
             wandb.run.summary["best_val_acc"] = best_acc
             
-            # Save as WandB Artifact for version control
-            artifact_name = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot'
-            artifact = wandb.Artifact(
-                name=artifact_name,
-                type='model',
-                description=f'{args.model} model trained on {args.dataset_name}/{samples_suffix} with {args.shot_num}-shot',
-                metadata={
-                    'dataset_name': args.dataset_name,
-                    'model': args.model,
-                    'shot_num': args.shot_num,
-                    'training_samples': args.training_samples if args.training_samples else 'all',
-                    'backbone': args.backbone,
-                    'best_val_acc': best_acc,
-                    'epoch': epoch
-                }
-            )
-            artifact.add_file(path)
-            wandb.log_artifact(artifact)
-            print(f'  → Artifact uploaded: {artifact_name}')
+
     
     # Plot training curves
     samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
