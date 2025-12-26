@@ -249,7 +249,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     """
     # Default class names
     if class_names is None:
-        class_names = ['Surface', 'Corona', 'NoPD']
+        class_names = ['Corona', 'HF_NoPD', 'Surface', 'Void']
     
     # IEEE format: Times New Roman, 12pt font
     plt.rcParams.update({

@@ -64,9 +64,10 @@ def get_args():
 
     
     # Few-shot settings
-    parser.add_argument('--way_num', type=int, default=3)
+    parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=5, help='Queries per class per episode')
+    parser.add_argument('--query_num', type=int, default=5, help='Queries per class per episode (training)')
+    parser.add_argument('--query_num_eval', type=int, default=10, help='Queries per class for validation/test')
     parser.add_argument('--image_size', type=int, default=64, choices=[64, 84],
                         help='Input image size: 64 (required for conv64f) or 84 (required for resnet12/18)')
     
@@ -74,8 +75,9 @@ def get_args():
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
     parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=150)
-    parser.add_argument('--num_epochs', type=int, default=None)
+    parser.add_argument('--episode_num_val', type=int, default=200)
+    parser.add_argument('--episode_num_test', type=int, default=300)
+    parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--step_size', type=int, default=10)
@@ -284,7 +286,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
         # Validate - Create new validation dataset each epoch with seed+epoch
         # This ensures different episodes per epoch while maintaining reproducibility
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, 1, args.seed + epoch)
+                                args.way_num, args.shot_num, args.query_num_eval, args.seed + epoch)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main, criterion_center)
@@ -917,8 +919,8 @@ def main():
     # This ensures different episodes per epoch but reproducibility across program runs
     
     # Test: Fixed seed ensures identical episodes across all runs
-    test_ds = FewshotDataset(test_X, test_y, 200,  # Fixed 200 episodes for test
-                             args.way_num, args.shot_num, 1, args.seed)
+    test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
+                             args.way_num, args.shot_num, args.query_num_eval, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
     # Initialize Model

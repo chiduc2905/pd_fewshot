@@ -15,7 +15,7 @@ base_models = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet',
 # MatchingNet variants (support multiple image sizes)
 matchingnet_variants = ['matchingnet', 'matchingnet_resnet12', 'matchingnet_resnet18']
 
-shots = [1, 5]
+shots = [1, 5, 10]
 lambda_center = 0
 
 args = get_args()
@@ -23,15 +23,11 @@ args = get_args()
 # =============================================================================
 # Dataset configuration
 # =============================================================================
-# Server paths for two datasets
+# New 4-class scalogram_minh dataset
 DATASETS = {
-    'original': {
-        'path': '/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_original',
-        'samples_list': [18, 30],  # Original: only 18 and 30 samples
-    },
-    'augmented': {
-        'path': '/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_augmented',
-        'samples_list': [18, 60, None],  # Augmented: 18, 60, and all samples
+    'minh': {
+        'path': '/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_minh',
+        'samples_list': [60, 1000, 3200, 6000],  # min for 10-shot+5query, medium, large, all
     }
 }
 
@@ -177,9 +173,9 @@ for dataset_name, config in DATASETS.items():
         
         for model in all_models:
             display_name = model_display_names.get(model, model)
-            model_results[display_name] = {'1shot': None, '5shot': None}
+            model_results[display_name] = {'1shot': None, '5shot': None, '10shot': None}
             
-            for shot in [1, 5]:
+            for shot in [1, 5, 10]:
                 # New naming format: results_dataset_model_samples_shot.txt
                 result_file = os.path.join(results_dir, 
                     f"results_{dataset_name}_{model}_{samples_str}_{shot}shot.txt")
@@ -195,7 +191,7 @@ for dataset_name, config in DATASETS.items():
         
         # Remove models with missing data
         model_results = {k: v for k, v in model_results.items() 
-                         if v['1shot'] is not None and v['5shot'] is not None}
+                         if v['1shot'] is not None and v['5shot'] is not None and v['10shot'] is not None}
         
         if len(model_results) > 0:
             training_samples = samples if samples else 'All'
