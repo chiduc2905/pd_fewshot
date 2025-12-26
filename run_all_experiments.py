@@ -27,7 +27,7 @@ args = get_args()
 DATASETS = {
     'minh': {
         'path': '/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_minh',
-        'samples_list': [60, 1000, 3200, 6000],  # min for 10-shot+5query, medium, large, all
+        'samples_list': [80, 800, 1600, 6000],  # min for 10-shot+5query, medium, large, all
     }
 }
 
