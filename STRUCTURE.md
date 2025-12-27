@@ -1,56 +1,84 @@
-| ProtoNet | AvgPool | Negative Euclidean |
-| CovaMNet | CovaBlock | Covariance-based |
+# Project Structure
 
-### Loss Functions
+## Architecture Overview
+
+```
+pd_fewshot/
+├── main.py                     # Main training & evaluation script
+├── main_domain_shift.py        # Domain shift experiments
+├── run_all_experiments.py      # Automated batch experiment runner
+├── dataset.py                  # Dataset loader with auto-normalization
+├── split_dataset.py            # Dataset splitting utilities
+│
+├── net/                        # Model implementations
+│   ├── protonet.py             # Prototypical Networks
+│   ├── matchingnet.py          # Matching Networks
+│   ├── relationnet.py          # Relation Networks
+│   ├── covamnet.py             # Covariance Metric Networks
+│   ├── dn4.py                  # Dense Nearest-Neighbor (DN4)
+│   ├── feat.py                 # FEAT (Transformer-based)
+│   ├── deepemd.py              # DeepEMD (Earth Mover's Distance)
+│   ├── siamesenet.py           # Siamese Networks
+│   ├── cosine.py               # Cosine Classifier
+│   ├── cosine_classifier.py    # Baseline++ (learnable temperature)
+│   └── encoders/               # CNN backbone implementations
+│       ├── base_encoder.py     # Conv64F encoder
+│       ├── resnet12_encoder.py # ResNet12 encoder
+│       └── resnet18_encoder.py # ResNet18 encoder
+│
+├── dataloader/                 # Few-shot episode generation
+│   └── dataloader.py           # FewshotDataset class
+│
+├── function/                   # Loss functions & utilities
+│   └── function.py             # ContrastiveLoss, TripletLoss, CenterLoss, etc.
+│
+├── visualization/              # Feature visualization tools
+│   └── feature_visualizer.py   # t-SNE, feature maps, heatmaps
+│
+└── visualize_features.py       # CLI for feature map visualization
+```
+
+## Models
+
+| Model | Pooling | Distance Metric |
+|-------|---------|-----------------|
+| **ProtoNet** | AvgPool | Negative Euclidean Distance |
+| **MatchingNet** | LSTM Attention | Cosine Similarity |
+| **RelationNet** | Concat | Learned Relation Score (CNN) |
+| **CovaMNet** | CovaBlock | Covariance Metric |
+| **DN4** | None | Local Descriptor k-NN |
+| **FEAT** | Transformer | Adapted Euclidean Distance |
+| **DeepEMD** | Set Matching | Earth Mover's Distance |
+| **SiameseNet** | Concat | Learned Distance (MLP) |
+| **Baseline++** | AvgPool | Scaled Cosine Similarity |
+
+## Loss Functions
 
 | Loss | Description |
 |------|-------------|
 | **Contrastive** | Standard Softmax Cross-Entropy on similarity scores (Default) |
-| **SupCon** | Supervised Contrastive Loss on features (Support + Query) |
-| **Triplet** | Triplet Loss with Batch Hard Mining on features (Support + Query) |
-| **Center Loss** | Auxiliary loss to minimize intra-class variance (Combined with above) |
-
-## Files
-
-```
-├── main.py              # Training & evaluation (WandB integrated)
-├── dataset.py           # Data loading (64×64, auto-norm)
-├── dataloader/
-│   └── dataloader.py    # Episode generator
-├── net/
-│   ├── encoder.py       # Conv64F backbone
-│   ├── cosine.py        
-│   ├── protonet.py      
-│   └── covamnet.py      
-├── function/
-│   └── function.py      # Loss functions (Contrastive, SupCon, Triplet, Center) & visualization
-├── checkpoints/         # Model weights
-└── results/             # Local plots (Confusion Matrix, t-SNE)
-```
+| **Triplet** | Triplet Loss with margin on feature embeddings |
+| **Center Loss** | Auxiliary loss to minimize intra-class variance |
 
 ## Data Flow
 
 ### Training
 ```
-Train Data → FewshotDataset → 100 episodes (K-shot, 5-query) → Model → Loss (Main + Center)
+Train Data → FewshotDataset → 100 episodes/epoch × K-shot × 5-query → Model → Loss
 ```
-*   **Logging**: Metrics (Loss, Acc) logged to **WandB**.
 
 ### Validation (Model Selection)
 ```
-Val Data → 150 episodes × K-shot × 1-query/class → Accuracy → Save Best
+Val Data → 150 episodes × K-shot × 1-query/class → Accuracy → Save Best Model
 ```
 
 ### Final Test
 ```
-Test Data → 200 episodes × K-shot × 1-query → Metrics + Plots
+Test Data → 200 episodes × K-shot × 1-query → Metrics + Visualization
 ```
-*   **Metrics**: Accuracy, Precision, Recall, F1, p-value (Logged to WandB).
-*   **Plots**: Confusion Matrix, t-SNE (Logged to WandB & saved locally).
 
-## Commands
-
-```bash
-# Example: CovaMNet 1-shot with SupCon + Center Loss
-python main.py --model covamnet --shot_num 1 --loss supcon --lambda_center 0.001
-```
+**Outputs:**
+- Accuracy (mean ± std, worst-case, best-case)
+- Precision, Recall, F1-score
+- Confusion Matrix, t-SNE plots
+- All metrics logged to WandB

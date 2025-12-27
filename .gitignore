@@ -1,15 +1,15 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.pyc
-.env
-*.py[codz]
-*$py.class
+# =============================================================================
+# Project-specific ignores
+# =============================================================================
 
-# Data folders
+# Documentation (LaTeX/temp files)
+docs/
+
+# Data folders (scalogram images)
 scalogram/
-scalogram_minh/
+scalogram_*/
 prpd_images_for_cnn/
-PD-data-24-6-2025/
+PD-data-*/
 data/
 dataset/
 datasets/
@@ -19,9 +19,15 @@ results/
 outputs/
 logs/
 *.log
+*.txt
+!requirements.txt
+!README.md
+!STRUCTURE.md
+!TRAIN_TEST.md
 
-# Model checkpoints
+# Model checkpoints and weights
 checkpoints/
+weights/
 *.pth
 *.pt
 *.ckpt
@@ -31,11 +37,22 @@ checkpoints/
 # Weights & Biases
 wandb/
 
-# Visualization outputs
-visualization/
-
-# CSV exports
+# CSV/Excel exports
 *.csv
+*.xlsx
+
+# Conda environment
+.conda/
+
+# =============================================================================
+# Python standard ignores
+# =============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.py[codz]
+*$py.class
 
 # C extensions
 *.so

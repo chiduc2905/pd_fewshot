@@ -1,63 +1,112 @@
 # Training & Testing Guide
 
-## Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--dataset_path` | `./scalogram/` | Dataset path |
-| `--path_weights` | `checkpoints/` | Checkpoint directory |
-| `--path_results` | `results/` | Results directory |
-| `--weights` | None | Custom weights for testing |
-| `--model` | `covamnet` | Model: cosine, protonet, covamnet |
-| `--way_num` | 2 | N-way (classes per episode) |
-| `--shot_num` | 1 | K-shot (support samples) |
-| `--query_num` | 19/15 | Query samples (auto by shot) |
-| `--training_samples` | None | Limit total training samples |
-| `--episode_num_train` | 100 | Training episodes per epoch |
-| `--episode_num_test` | 75 | Test episodes |
-| `--num_epochs` | 100/50 | Epochs (auto by shot) |
-| `--batch_size` | 1 | Episodes per batch |
-| `--lr` | 1e-4 | Learning rate |
-| `--step_size` | 10 | LR scheduler step |
-| `--gamma` | 0.1 | LR decay factor |
-| `--seed` | 42 | Random seed |
-| `--device` | cuda | Device (cuda/cpu) |
-| `--mode` | train | Mode: train or test |
-| `--loss` | contrastive | Loss: contrastive, supcon, triplet |
-| `--temp` | 0.1 | Temperature for SupCon |
-| `--margin` | 0.5 | Margin for Triplet |
-| `--lambda_center` | 0.001 | Weight for Center Loss |
-
-## Training
+## Quick Start
 
 ```bash
-# Default (CovaMNet 2-way 1-shot, Contrastive + Center Loss)
-python main.py --mode train
+# Train 1-shot RelationNet
+python main.py --model relationnet --shot_num 1 --mode train
 
-# ProtoNet 5-shot
-python main.py --model protonet --shot_num 5 --mode train
+# Train 5-shot ProtoNet with limited samples
+python main.py --model protonet --shot_num 5 --training_samples 60 --mode train
 
-# Limited samples (40 total = 20/class)
-python main.py --model cosine --training_samples 40 --mode train
-
-# Triplet Loss + Center Loss
-python main.py --mode train --loss triplet --margin 0.5 --lambda_center 0.1
+# Test a trained model
+python main.py --model relationnet --shot_num 1 --mode test
 ```
 
-## Testing
+## Command Line Arguments
+
+### Model & Training
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | `covamnet` | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, siamese, baseline, cosine |
+| `--backbone` | `conv64f` | Encoder: conv64f, resnet12, resnet18 |
+| `--shot_num` | `1` | K-shot (support samples per class) |
+| `--way_num` | `3` | N-way (classes per episode) |
+| `--query_num` | `1` | Query samples per class |
+| `--training_samples` | `None` | Limit total training samples |
+| `--num_epochs` | `100/70` | Training epochs (auto: 100 for 1-shot, 70 for 5-shot) |
+| `--mode` | `train` | Mode: train or test |
+
+### Paths
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dataset_path` | `./scalogram/` | Dataset directory |
+| `--dataset_name` | `prpd` | Dataset name for logging |
+| `--path_weights` | `checkpoints/` | Checkpoint save directory |
+| `--path_results` | `results/` | Results output directory |
+| `--weights` | `None` | Custom checkpoint for testing |
+
+### Loss & Optimization
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--loss` | `contrastive` | Loss: contrastive, triplet |
+| `--lambda_center` | `0.0` | Center Loss weight |
+| `--margin` | `0.1` | Triplet Loss margin |
+| `--lr` | `1e-4` | Learning rate |
+| `--step_size` | `10` | LR scheduler step |
+| `--gamma` | `0.1` | LR decay factor |
+
+### Experiment Settings
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--image_size` | `64` | Input size (64 for conv64f, 84 for resnet) |
+| `--episode_num_train` | `100` | Training episodes per epoch |
+| `--episode_num_val` | `150` | Validation episodes |
+| `--episode_num_test` | `200` | Test episodes |
+| `--seed` | `42` | Random seed |
+| `--project` | `prpd` | WandB project name |
+
+## Training Examples
 
 ```bash
-# Auto-load best checkpoint
-python main.py --model covamnet --shot_num 1 --mode test
+# Default: CovaMNet 3-way 1-shot
+python main.py --mode train
 
-# Custom weights
-python main.py --model covamnet --weights checkpoints/my_model.pth --mode test
+# RelationNet 5-shot
+python main.py --model relationnet --shot_num 5 --mode train
+
+# MatchingNet with ResNet12 backbone (requires 84x84 images)
+python main.py --model matchingnet --backbone resnet12 --image_size 84 --mode train
+
+# Limited training samples (60 total = 20/class for 3-way)
+python main.py --model cosine --training_samples 60 --mode train
+
+# Triplet Loss + Center Loss
+python main.py --model protonet --loss triplet --lambda_center 0.01 --mode train
+```
+
+## Testing Examples
+
+```bash
+# Auto-load best checkpoint (based on model/shot/samples config)
+python main.py --model relationnet --shot_num 1 --mode test
+
+# Test with custom weights
+python main.py --model covamnet --weights checkpoints/custom_model.pth --mode test
 ```
 
 ## Batch Experiments
 
+Run all model × shot × sample combinations:
+
 ```bash
-# Run all combinations
-python run_all.py --models cosine protonet covamnet --shots 1 5
+python run_all_experiments.py --project my_wandb_project
 ```
 
+This will train and evaluate all configured models with 1-shot, 5-shot, and 10-shot settings.
+
+## Output Files
+
+After training and testing, results are saved to:
+
+```
+checkpoints/
+└── {dataset}_{model}_{samples}_{shot}shot_best.pth
+
+results/
+├── results_{dataset}_{model}_{samples}_{shot}shot.txt
+├── confusion_matrix_{dataset}_{model}_{samples}_{shot}shot.png
+└── tsne_{dataset}_{model}_{samples}_{shot}shot.png
+```
+
+All metrics are also logged to WandB for visualization.
