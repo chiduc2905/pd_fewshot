@@ -59,7 +59,7 @@ pd_fewshot/
 ### Installation
 
 ```bash
-git clone https://github.com/yourusername/pd_fewshot.git
+git clone https://github.com/chiduc2905/pd_fewshot.git
 cd pd_fewshot
 pip install -r requirements.txt
 ```
@@ -165,11 +165,11 @@ If you use this code in your research, please cite:
 
 ```bibtex
 @misc{pd_fewshot2024,
-  author = {Your Name},
+  author = {Chi Duc Nguyen},
   title = {Few-Shot Learning for Partial Discharge Classification},
   year = {2024},
   publisher = {GitHub},
-  url = {https://github.com/yourusername/pd_fewshot}
+  url = {https://github.com/chiduc2905/pd_fewshot}
 }
 ```
 
