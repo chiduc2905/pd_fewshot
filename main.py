@@ -66,8 +66,7 @@ def get_args():
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=5, help='Queries per class per episode (training)')
-    parser.add_argument('--query_num_eval', type=int, default=10, help='Queries per class for validation/test')
+    parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
     parser.add_argument('--image_size', type=int, default=64, choices=[64, 84],
                         help='Input image size: 64 (required for conv64f) or 84 (required for resnet12/18)')
     
@@ -75,13 +74,14 @@ def get_args():
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
     parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=200)
-    parser.add_argument('--episode_num_test', type=int, default=300)
+    parser.add_argument('--episode_num_val', type=int, default=150)
+    parser.add_argument('--episode_num_test', type=int, default=150)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--step_size', type=int, default=10)
-    parser.add_argument('--gamma', type=float, default=0.1)
+    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
+    parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for CosineAnnealingLR')
+    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping max norm')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizer')
     parser.add_argument('--seed', type=int, default=42)
     # Device
     # parser.add_argument('--device', type=str, 
@@ -102,6 +102,8 @@ def get_args():
     
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
+    parser.add_argument('--use_last_checkpoint', action='store_true', default=True,
+                        help='Use final epoch checkpoint for test (proper protocol)')
     
     # WandB
     parser.add_argument('--project', type=str, default='prpd',
@@ -189,13 +191,18 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    # Optimizer (optimize both model and center loss parameters)
+    # Optimizer with weight decay
     optimizer = optim.Adam([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
-    ], lr=args.lr)
+    ], lr=args.lr, weight_decay=args.weight_decay)
     
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    # CosineAnnealingLR Scheduler
+    scheduler = lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=args.num_epochs,
+        eta_min=args.eta_min
+    )
     
     # Training history for plotting
     history = {
@@ -273,10 +280,16 @@ def train_loop(net, train_loader, val_X, val_y, args):
             loss = loss_main + args.lambda_center * loss_center
             
             loss.backward()
+            
+            # Gradient clipping
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
+            
             optimizer.step()
             
             total_loss += loss.item()
-            pbar.set_postfix(loss=f'{loss.item():.4f}')
+            current_lr = optimizer.param_groups[0]['lr']
+            pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{current_lr:.2e}')
         
         scheduler.step()
         
@@ -286,7 +299,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
         # Validate - Create new validation dataset each epoch with seed+epoch
         # This ensures different episodes per epoch while maintaining reproducibility
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num_eval, args.seed + epoch)
+                                args.way_num, args.shot_num, args.query_num, args.seed + epoch)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main, criterion_center)
@@ -342,6 +355,13 @@ def train_loop(net, train_loader, val_X, val_y, args):
     # Log to WandB
     if os.path.exists(f"{curves_path}_curves.png"):
         wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
+    
+    # Save final epoch model (for proper protocol)
+    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+    final_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth'
+    final_path = os.path.join(args.path_weights, final_model_filename)
+    torch.save(net.state_dict(), final_path)
+    print(f'Final model saved: {final_path}')
     
     return best_acc, history
 
@@ -902,7 +922,7 @@ def main():
     
     # Test: Fixed seed ensures identical episodes across all runs
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
-                             args.way_num, args.shot_num, args.query_num_eval, args.seed)
+                             args.way_num, args.shot_num, args.query_num, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
     # Initialize Model
@@ -914,9 +934,18 @@ def main():
     if args.mode == 'train':
         best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
         
-        # Load best model for testing
+        # Load model for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+        
+        if args.use_last_checkpoint:
+            # Proper protocol: use final epoch checkpoint
+            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
+            print(f'Testing with FINAL checkpoint (epoch {args.num_epochs}): {path}')
+        else:
+            # Legacy: use best validation checkpoint
+            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+            print(f'Testing with BEST val checkpoint: {path}')
+        
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
         
