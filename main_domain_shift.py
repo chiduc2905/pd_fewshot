@@ -448,8 +448,8 @@ def get_model(args):
 # Training
 # =============================================================================
 
-def train_loop(net, train_loader, val_X, val_y, args):
-    """Train with validation-based model selection."""
+def train_loop(net, train_loader, args):
+    """Train only (no validation), save final checkpoint."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Loss function
@@ -475,8 +475,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
     ], lr=args.lr)
     
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
-    
-    best_acc = 0.0
     
     for epoch in range(1, args.num_epochs + 1):
         net.train()
@@ -533,30 +531,21 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         scheduler.step()
         
-        # Validate
-        val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.test_query_num, args.seed + epoch)
-        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
-        val_acc = evaluate(net, val_loader, args)
-        
         avg_loss = total_loss / len(train_loader)
-        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Val Acc={val_acc:.4f}')
+        print(f'Epoch {epoch}: Loss={avg_loss:.4f}')
         
         wandb.log({
             "epoch": epoch,
             "train_loss": avg_loss,
-            "val_acc": val_acc,
         })
-        
-        # Save best
-        if val_acc > best_acc:
-            best_acc = val_acc
-            path = os.path.join(args.path_weights, 
-                               f'{args.dataset_name}_{args.model}_{args.shot_num}shot_best.pth')
-            torch.save(net.state_dict(), path)
-            print(f'  → Best model saved ({val_acc:.4f})')
     
-    return best_acc
+    # Save final checkpoint (epoch 100)
+    final_path = os.path.join(args.path_weights, 
+                              f'{args.dataset_name}_{args.model}_{args.shot_num}shot_final.pth')
+    torch.save(net.state_dict(), final_path)
+    print(f'  → Final model saved (epoch {args.num_epochs})')
+    
+    return final_path
 
 
 def evaluate(net, loader, args):
@@ -826,11 +815,9 @@ def main():
         print("\n[Stats mode] Dataset statistics printed above.")
         return
     
-    # Convert to tensors
+    # Convert to tensors (train only, no validation)
     train_X = torch.from_numpy(old_dataset.X_train.astype(np.float32))
     train_y = torch.from_numpy(old_dataset.y_train).long()
-    val_X = torch.from_numpy(old_dataset.X_val.astype(np.float32))
-    val_y = torch.from_numpy(old_dataset.y_val).long()
     
     # Initialize WandB
     run_name = f"domain_shift_{args.model}"
@@ -857,14 +844,12 @@ def main():
                                       args.way_num, shot_num, 1, args.seed)
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
             
-            # Train
-            best_acc = train_loop(net, train_loader, val_X, val_y, args)
-            print(f"\n{shot_num}-shot training complete. Best val acc: {best_acc:.4f}")
+            # Train (no validation)
+            final_checkpoint_path = train_loop(net, train_loader, args)
+            print(f"\n{shot_num}-shot training complete.")
             
-            # Load best model
-            path = os.path.join(args.path_weights,
-                               f'{args.dataset_name}_{args.model}_{shot_num}shot_best.pth')
-            net.load_state_dict(torch.load(path))
+            # Load final checkpoint for testing
+            net.load_state_dict(torch.load(final_checkpoint_path))
             
             # Load NEW domain dataset (target domain)
             new_dataset = NewDomainDataset(
