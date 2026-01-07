@@ -356,10 +356,15 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
         plt.figure(figsize=(width, width))  # Square figure
         sns.set_style('white')
         
+        # Class names mapping
+        class_names = ['Corona', 'HF_NoPD', 'Surface', 'Void']
+        # Map numeric labels to class names
+        label_names = [class_names[int(l)] if int(l) < len(class_names) else str(l) for l in labels]
+        
         scatter = sns.scatterplot(
             x=embedded[:, 0], y=embedded[:, 1],
-            hue=labels, palette='bright',
-            s=80, alpha=0.8, legend='full'
+            hue=label_names, palette='bright',
+            s=80, alpha=0.8, legend='full', edgecolor='none'
         )
         
         sns.despine()

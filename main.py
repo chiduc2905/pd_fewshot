@@ -102,8 +102,8 @@ def get_args():
     
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
-    parser.add_argument('--use_last_checkpoint', action='store_true', default=True,
-                        help='Use final epoch checkpoint for test (proper protocol)')
+    parser.add_argument('--use_last_checkpoint', action='store_true', default=False,
+                        help='Use final epoch checkpoint for test (default: use best val)')
     
     # WandB
     parser.add_argument('--project', type=str, default='prpd',
@@ -191,8 +191,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    # Optimizer with weight decay
-    optimizer = optim.Adam([
+    # Optimizer with weight decay (AdamW for proper decoupled weight decay)
+    optimizer = optim.AdamW([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
     ], lr=args.lr, weight_decay=args.weight_decay)
