@@ -249,7 +249,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     """
     # Default class names
     if class_names is None:
-        class_names = ['Corona', 'HF_NoPD', 'Surface', 'Void']
+        class_names = ['Corona', 'NotPD', 'Surface', 'Void']
     
     # IEEE format: Times New Roman, 14pt font
     plt.rcParams.update({
@@ -352,43 +352,64 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     # Save in 2-column IEEE layout only
     width = 7.16  # 2-column: 7.16 inches
     layout_name = '2col'
-    if True:  # Keep indentation structure
-        plt.figure(figsize=(width, width))  # Square figure
-        sns.set_style('white')
+    
+    fig, ax = plt.subplots(figsize=(width, width))  # Square figure
+    sns.set_style('white')
+    
+    # Class names mapping (updated)
+    class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+    unique_labels = sorted(set(labels))
+    
+    # Custom distinct colors for 4 classes
+    # Corona (orange), Void (purple) - distinct from each other
+    custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']  # orange, green, blue, purple
+    
+    # Plot each class with CIRCLE MARKERS
+    for i, label in enumerate(unique_labels):
+        mask = np.array(labels) == label
+        class_name = class_names[int(label)] if int(label) < len(class_names) else str(label)
+        color = custom_colors[int(label)] if int(label) < len(custom_colors) else '#333333'
         
-        # Class names mapping
-        class_names = ['Corona', 'HF_NoPD', 'Surface', 'Void']
-        # Map numeric labels to class names
-        label_names = [class_names[int(l)] if int(l) < len(class_names) else str(l) for l in labels]
-        
-        scatter = sns.scatterplot(
-            x=embedded[:, 0], y=embedded[:, 1],
-            hue=label_names, palette='bright',
-            s=80, alpha=0.8, legend='full', edgecolor='none'
+        # Scatter plot with circle markers and WHITE EDGE
+        ax.scatter(
+            embedded[mask, 0], embedded[mask, 1],
+            c=[color], s=40, alpha=0.85,
+            marker='o',  # Circle marker
+            edgecolors='white', linewidths=0.5,
+            label=class_name
         )
-        
-        sns.despine()
-        plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12, title_fontsize=13)
-        plt.title('t-SNE', fontsize=14, fontweight='bold')
-        plt.xlabel('Dim 1', fontsize=14)
-        plt.ylabel('Dim 2', fontsize=14)
-        plt.xlim(-50, 50)
-        plt.ylim(-50, 50)
-        plt.tick_params(axis='both', which='major', labelsize=12)
-        
-        plt.tight_layout()
-        if save_path:
-            # Remove extension if present
-            base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
-            # Save as PDF (vector for publication)
-            pdf_path = f"{base_path}_{layout_name}.pdf"
-            plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-            print(f'Saved: {pdf_path}')
-            # Save as PNG (for WandB logging)
-            png_path = f"{base_path}_{layout_name}.png"
-            plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
-            print(f'Saved: {png_path}')
-        plt.close()
+    
+    # Auto-scale axes based on data
+    x_min, x_max = embedded[:, 0].min(), embedded[:, 0].max()
+    y_min, y_max = embedded[:, 1].min(), embedded[:, 1].max()
+    padding = max(x_max - x_min, y_max - y_min) * 0.1
+    ax.set_xlim(x_min - padding, x_max + padding)
+    ax.set_ylim(y_min - padding, y_max + padding)
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.tick_params(axis='both', which='major', labelsize=10)
+    ax.set_aspect('equal')
+    
+    # Light grid
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax.set_axisbelow(True)
+    
+    # Legend
+    ax.legend(loc='upper right', fontsize=9)
+    
+    plt.tight_layout()
+    if save_path:
+        # Remove extension if present
+        base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
+        # Save as PDF (vector for publication)
+        pdf_path = f"{base_path}_{layout_name}.pdf"
+        plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+        print(f'Saved: {pdf_path}')
+        # Save as PNG (for WandB logging)
+        png_path = f"{base_path}_{layout_name}.png"
+        plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
+        print(f'Saved: {png_path}')
+    plt.close()
 
 
 def plot_tsne_comparison(original_features, encoded_features, labels, num_classes=3, save_path=None):
