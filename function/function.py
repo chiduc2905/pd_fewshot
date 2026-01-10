@@ -18,6 +18,7 @@ def seed_func(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # Multi-GPU reproducibility
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -249,7 +250,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
     """
     # Default class names
     if class_names is None:
-        class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+        class_names = ['Corona', 'NotPD', 'Surface']
     
     # IEEE format: Times New Roman, 14pt font
     plt.rcParams.update({
@@ -310,7 +311,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         plt.close()
 
 
-def plot_tsne(features, labels, num_classes=3, save_path=None):
+def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None):
     """
     t-SNE visualization of query features - saves as PDF vector.
     
@@ -356,18 +357,21 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     fig, ax = plt.subplots(figsize=(width, width))  # Square figure
     sns.set_style('white')
     
-    # Class names mapping (updated)
-    class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+    # Class names mapping (use provided names or default)
+    default_class_names = ['Corona', 'NotPD', 'Surface']
+    if class_names is None:
+        class_names = default_class_names
     unique_labels = sorted(set(labels))
     
-    # Custom distinct colors for 4 classes
-    # Corona (orange), Void (purple) - distinct from each other
-    custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']  # orange, green, blue, purple
+    # Custom distinct colors for 3 classes
+    # Corona (orange), NotPD (green), Surface (blue)
+    custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4']  # orange, green, blue
     
     # Plot each class with CIRCLE MARKERS
     for i, label in enumerate(unique_labels):
         mask = np.array(labels) == label
-        class_name = class_names[int(label)] if int(label) < len(class_names) else str(label)
+        # Use index i to lookup class_names (works with remapped labels)
+        class_name = class_names[i] if i < len(class_names) else str(label)
         color = custom_colors[int(label)] if int(label) < len(custom_colors) else '#333333'
         
         # Scatter plot with circle markers and WHITE EDGE
@@ -379,12 +383,9 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
             label=class_name
         )
     
-    # Auto-scale axes based on data
-    x_min, x_max = embedded[:, 0].min(), embedded[:, 0].max()
-    y_min, y_max = embedded[:, 1].min(), embedded[:, 1].max()
-    padding = max(x_max - x_min, y_max - y_min) * 0.1
-    ax.set_xlim(x_min - padding, x_max + padding)
-    ax.set_ylim(y_min - padding, y_max + padding)
+    # Fixed axes from -50 to 50 (like reference image)
+    ax.set_xlim(-50, 50)
+    ax.set_ylim(-50, 50)
     ax.set_xlabel('')
     ax.set_ylabel('')
     ax.tick_params(axis='both', which='major', labelsize=10)

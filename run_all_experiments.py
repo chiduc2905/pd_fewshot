@@ -17,10 +17,10 @@ def get_args():
 # Configuration
 SHOTS = [1, 5]
 
-# Training samples: [min, small, medium, large]
-SAMPLES_LIST = [80, 200, 600, 6000]
+# Training samples: [min, small, medium, all] - matches mamba_glscnet
+SAMPLES_LIST = [30, 60, 150, None]
 
-# Query samples (same for train/val/test)
+# Query samples (same for train/val/test) - matches mamba_glscnet
 QUERY_NUM = 5
 
 # Base models (64x64)
@@ -41,7 +41,7 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
         sys.executable, 'main.py',
         '--model', model,
         '--shot_num', str(shot),
-        '--way_num', '4',
+        '--way_num', '3',
         '--query_num', str(QUERY_NUM),
         '--image_size', str(image_size),
         '--mode', 'train',
