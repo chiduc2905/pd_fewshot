@@ -8,7 +8,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run all benchmark experiments')
     parser.add_argument('--project', type=str, default='prpd', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_v2_split',
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_official',
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
     return parser.parse_args()

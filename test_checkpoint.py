@@ -54,7 +54,7 @@ def get_args():
                         help='Test all checkpoints in the directory')
     
     # Dataset
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_v2_split')
+    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_official')
     parser.add_argument('--image_size', type=int, default=64, choices=[64, 84])
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--query_num', type=int, default=1)
