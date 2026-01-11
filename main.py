@@ -67,7 +67,7 @@ def get_args():
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
-    parser.add_argument('--image_size', type=int, default=64, choices=[64, 84],
+    parser.add_argument('--image_size', type=int, default=128, choices=[64, 84, 128],
                         help='Input image size: 64 (required for conv64f) or 84 (required for resnet12/18)')
     
     # Training

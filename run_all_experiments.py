@@ -28,7 +28,8 @@ BASE_MODELS = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet',
                'siamese', 'dn4', 'feat', 'deepemd']
 
 # MatchingNet variants
-MATCHINGNET_VARIANTS = ['matchingnet', 'matchingnet_resnet12', 'matchingnet_resnet18']
+# NOTE: matchingnet_resnet18 temporarily disabled
+MATCHINGNET_VARIANTS = ['matchingnet', 'matchingnet_resnet12']
 
 
 def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name, project, backbone=None):
@@ -118,7 +119,7 @@ def main():
                     model=model,
                     shot=shot,
                     samples=samples,
-                    image_size=64,
+                    image_size=128,
                     dataset_path=args.dataset_path,
                     dataset_name=args.dataset_name,
                     project=args.project
@@ -135,11 +136,11 @@ def main():
     print("="*40)
     for variant in MATCHINGNET_VARIANTS:
         if variant == 'matchingnet_resnet12':
-            model, backbone, img_size = 'matchingnet', 'resnet12', 84
-        elif variant == 'matchingnet_resnet18':
-            model, backbone, img_size = 'matchingnet', 'resnet18', 84
+            model, backbone, img_size = 'matchingnet', 'resnet12', 128
+        # elif variant == 'matchingnet_resnet18':
+        #     model, backbone, img_size = 'matchingnet', 'resnet18', 128
         else:
-            model, backbone, img_size = 'matchingnet', 'conv64f', 64
+            model, backbone, img_size = 'matchingnet', 'conv64f', 128
         
         for shot in SHOTS:
             for samples in SAMPLES_LIST:
