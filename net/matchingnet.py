@@ -66,15 +66,14 @@ class MatchingNet(nn.Module):
     4. Cosine similarity-based attention kernel
     5. Weighted prediction over support labels
     
-    This implementation follows the original gitabcworld implementation.
+    This implementation uses adaptive pooling for consistent 1024 features.
     """
     
-    def __init__(self, backbone='conv64f', device='cuda', image_size=128):
+    def __init__(self, backbone='conv64f', device='cuda'):
         """
         Args:
-            backbone: 'conv64f' (original, dynamic dim) or 'resnet12' (512->4096 projection)
+            backbone: 'conv64f' (1024 dim) or 'resnet12' (512 dim)
             device: Device to use
-            image_size: Input image size (default: 128)
         """
         super(MatchingNet, self).__init__()
         
@@ -84,22 +83,14 @@ class MatchingNet(nn.Module):
         if backbone == 'resnet12':
             from net.encoders.resnet12_encoder import ResNet12Encoder
             self.encoder = ResNet12Encoder()
-            encoder_dim = 512  # ResNet12 uses GAP -> fixed 512 dim
-            # Project to same dimension as conv64f for fair comparison
-            spatial_size = image_size // 16
-            feat_dim = 64 * spatial_size * spatial_size  # 4096 for 128x128
-            self.projection = nn.Linear(encoder_dim, feat_dim)
-        else:  # conv64f - original implementation
+            feat_dim = 512  # ResNet12 uses GAP -> 512 dim
+        else:  # conv64f
             self.encoder = MatchingNetEncoder()
-            self.projection = None
-            # Original: flatten directly, feat_dim = 64 * (H/16)^2
-            spatial_size = image_size // 16
-            feat_dim = 64 * spatial_size * spatial_size
-            # 28x28 -> 64, 84x84 -> 1600, 128x128 -> 4096
+            feat_dim = 1024  # Encoder uses AdaptivePool(4,4) -> 64*4*4 = 1024
         
         self.feat_dim = feat_dim
         
-        # Full contextual embeddings (dynamic dimensions based on backbone)
+        # Full contextual embeddings
         self.support_lstm = nn.LSTM(feat_dim, feat_dim // 2, batch_first=True, bidirectional=True)
         self.query_attention_lstm = AttentionLSTM(input_size=feat_dim, hidden_size=feat_dim)
         
@@ -123,13 +114,8 @@ class MatchingNet(nn.Module):
         query_flat = query.view(-1, C, H, W)
         support_flat = support.view(-1, C, H, W)
         
-        q_encoded = self.encoder(query_flat)  # (B*NQ, encoder_dim)
-        s_encoded = self.encoder(support_flat)  # (B*Way*Shot, encoder_dim)
-        
-        # Apply projection for resnet12 (to match conv64f dimension)
-        if self.projection is not None:
-            q_encoded = self.projection(q_encoded)  # (B*NQ, feat_dim)
-            s_encoded = self.projection(s_encoded)  # (B*Way*Shot, feat_dim)
+        q_encoded = self.encoder(query_flat)  # (B*NQ, feat_dim)
+        s_encoded = self.encoder(support_flat)  # (B*Way*Shot, feat_dim)
         
         # Reshape
         q_encoded = q_encoded.view(B, NQ, -1)  # (B, NQ, feat_dim)

@@ -123,8 +123,8 @@ def get_model(args):
     elif args.model == 'covamnet':
         model = CovaMNet(device=device)
     elif args.model == 'matchingnet':
-        # MatchingNet: supports conv64f (original) or resnet12 backbone
-        model = MatchingNet(backbone=args.backbone, device=device, image_size=args.image_size)
+        # MatchingNet: conv64f (1024 dim) or resnet12 (512 dim)
+        model = MatchingNet(backbone=args.backbone, device=device)
     elif args.model == 'relationnet':
         # RelationNet: paper-specific encoder only (RelationBlock expects 4x4 features)
         model = RelationNet(device=device)
@@ -743,12 +743,10 @@ def main():
     elif args.model == 'covamnet' or args.model == 'cosine':
         encoder_info = "Conv64F_Encoder (GroupNorm)"
     elif args.model == 'matchingnet':
-        spatial = args.image_size // 16
-        feat_dim = 64 * spatial * spatial
         if args.backbone == 'resnet12':
-            encoder_info = f"ResNet12Encoder (512->projection->{feat_dim} dim) [--backbone resnet12]"
+            encoder_info = "ResNet12Encoder (512 dim) [--backbone resnet12]"
         else:
-            encoder_info = f"MatchingNetEncoder (flatten, {feat_dim} dim for {args.image_size}x{args.image_size}) [default]"
+            encoder_info = "MatchingNetEncoder (1024 dim) [default]"
     elif args.model == 'relationnet':
         encoder_info = "RelationNetEncoder (BatchNorm, paper-only)"
     else:
