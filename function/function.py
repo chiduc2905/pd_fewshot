@@ -311,19 +311,37 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         plt.close()
 
 
-def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None):
+def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None, title=None):
     """
-    t-SNE visualization of query features - saves as PDF vector.
+    t-SNE visualization - Q1 Publication Quality (IEEE/Nature style).
     
-    For 200-episode test: 600 points (200 per class with 1 query each).
-    Saves in two IEEE layouts: 1-column (3.5in) and 2-column (7.16in).
+    t-SNE (t-Distributed Stochastic Neighbor Embedding):
+    - Focuses on preserving LOCAL structure (nearby points stay nearby)
+    - Cluster distances are NOT meaningful
+    - Good for visualizing tight clusters
+    
+    Args:
+        features: (N, D) feature matrix
+        labels: (N,) class labels (0, 1, 2, ...)
+        num_classes: Number of classes
+        save_path: Path to save the figure
+        class_names: List of class names (if None, uses default)
+        title: Optional title for the plot
     """
-    # IEEE format: Times New Roman, 14pt font
+    # ================================================================
+    # Q1 Publication Style (Nature/Science/IEEE)
+    # ================================================================
     plt.rcParams.update({
         'font.family': 'serif',
         'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
         'mathtext.fontset': 'stix',
-        'font.size': 14
+        'font.size': 12,
+        'axes.linewidth': 1.2,
+        'axes.labelweight': 'bold',
+        'xtick.major.width': 1.0,
+        'ytick.major.width': 1.0,
+        'xtick.major.size': 4,
+        'ytick.major.size': 4,
     })
 
     n = len(features)
@@ -334,75 +352,130 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
     
-    # 2. PCA (reduce to 30 dims or less)
+    # 2. PCA pre-processing (reduces noise, speeds up t-SNE)
     n_components = min(30, n, features.shape[1])
     pca = PCA(n_components=n_components, random_state=42)
     features_pca = pca.fit_transform(features_scaled)
     print(f"  PCA reduced to {n_components} dimensions")
     
-    perp = min(30, max(5, n // 3))
-    
-    tsne = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
+    # 3. t-SNE with optimized parameters
+    perp = 20  # Fixed perplexity (optimal for 45-150 points in few-shot)
+    tsne = TSNE(
+        n_components=2, 
+        perplexity=perp, 
+        random_state=42, 
+        init='pca',
+        learning_rate='auto',
+        max_iter=1000
+    )
     embedded = tsne.fit_transform(features_pca)
     
-    # Save in 2-column IEEE layout only
-    width = 7.16  # 2-column: 7.16 inches
-    layout_name = '2col'
+    # Rescale to [-55, 55] to fit in [-60, 60] with margin
+    max_val = np.abs(embedded).max()
+    if max_val > 0:
+        embedded = embedded / max_val * 55
     
-    fig, ax = plt.subplots(figsize=(width, width))  # Square figure
-    sns.set_style('white')
+    # ================================================================
+    # Figure Setup - Q1 Quality
+    # ================================================================
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=150)  # 5x5 inches, high DPI
     
-    # Class names mapping (use provided names or default)
+    # Class names
     default_class_names = ['Corona', 'NotPD', 'Surface']
     if class_names is None:
         class_names = default_class_names
     unique_labels = sorted(set(labels))
     
-    # Custom distinct colors for 3 classes
-    # Corona (orange), NotPD (green), Surface (blue)
-    custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4']  # orange, green, blue
+    # Nature/Science color palette (colorblind-friendly)
+    # Based on: https://www.nature.com/documents/NRJs-style-guide.pdf
+    nature_colors = [
+        '#E64B35',  # Vermillion (red-orange)
+        '#4DBBD5',  # Sky Blue
+        '#00A087',  # Teal/Green
+        '#8E55AA',  # Purple
+        '#F39B7F',  # Coral
+        '#3C5488',  # Blue
+    ]
     
-    # Plot each class with CIRCLE MARKERS
+    # Plot each class
     for i, label in enumerate(unique_labels):
         mask = np.array(labels) == label
-        # Use index i to lookup class_names (works with remapped labels)
         class_name = class_names[i] if i < len(class_names) else str(label)
-        color = custom_colors[int(label)] if int(label) < len(custom_colors) else '#333333'
+        color = nature_colors[i % len(nature_colors)]
         
-        # Scatter plot with circle markers and WHITE EDGE
         ax.scatter(
             embedded[mask, 0], embedded[mask, 1],
-            c=[color], s=40, alpha=0.85,
-            marker='o',  # Circle marker
-            edgecolors='white', linewidths=0.5,
-            label=class_name
+            c=[color], 
+            s=50,  # Marker size
+            alpha=0.8,
+            marker='o',  # Circle marker only
+            edgecolors='white', 
+            linewidths=0.6,
+            label=class_name,
+            zorder=3
         )
     
-    # Auto-scale axes (no fixed limits)
+    # ================================================================
+    # Axes and Grid - Clean Q1 Style
+    # ================================================================
+    ax.set_xlim(-60, 60)
+    ax.set_ylim(-60, 60)
     ax.set_xlabel('')
     ax.set_ylabel('')
     ax.tick_params(axis='both', which='major', labelsize=10)
     ax.set_aspect('equal')
     
-    # Light grid
-    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    # Subtle grid
+    ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.5, zorder=0)
     ax.set_axisbelow(True)
     
-    # Legend
-    ax.legend(loc='upper right', fontsize=9)
+    # Clean spines
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+    
+    # Legend - outside plot for clarity
+    legend = ax.legend(
+        loc='upper right',
+        fontsize=10,
+        frameon=True,
+        framealpha=0.95,
+        edgecolor='gray',
+        fancybox=False,
+        borderpad=0.4,
+        handletextpad=0.3
+    )
+    legend.get_frame().set_linewidth(0.8)
+    
+    # Optional title
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=10)
     
     plt.tight_layout()
+    
+    # ================================================================
+    # Save in Multiple Formats
+    # ================================================================
     if save_path:
-        # Remove extension if present
         base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
-        # Save as PDF (vector for publication)
-        pdf_path = f"{base_path}_{layout_name}.pdf"
-        plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+        
+        # PDF for publication (vector graphics)
+        pdf_path = f"{base_path}_tsne.pdf"
+        plt.savefig(pdf_path, format='pdf', bbox_inches='tight', 
+                    facecolor='white', edgecolor='none', dpi=300)
         print(f'Saved: {pdf_path}')
-        # Save as PNG (for WandB logging)
-        png_path = f"{base_path}_{layout_name}.png"
-        plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
+        
+        # PNG for presentations/web (high-res raster)
+        png_path = f"{base_path}_tsne.png"
+        plt.savefig(png_path, format='png', bbox_inches='tight', 
+                    facecolor='white', edgecolor='none', dpi=300)
         print(f'Saved: {png_path}')
+        
+        # EPS for LaTeX (some journals prefer this)
+        eps_path = f"{base_path}_tsne.eps"
+        plt.savefig(eps_path, format='eps', bbox_inches='tight', 
+                    facecolor='white', edgecolor='none', dpi=300)
+        print(f'Saved: {eps_path}')
+    
     plt.close()
 
 
@@ -521,8 +594,8 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None,
     # ================================================================
     ax.set_xlim(-60, 60)
     ax.set_ylim(-60, 60)
-    ax.set_xlabel('UMAP Dimension 1', fontsize=12, fontweight='bold')
-    ax.set_ylabel('UMAP Dimension 2', fontsize=12, fontweight='bold')
+    ax.set_xlabel('')
+    ax.set_ylabel('')
     ax.tick_params(axis='both', which='major', labelsize=10)
     ax.set_aspect('equal')
     
