@@ -22,7 +22,7 @@ except ImportError:
 
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
-from function.function import ContrastiveLoss, RelationLoss, SiameseLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_model_comparison_bar, plot_training_curves
+from function.function import ContrastiveLoss, RelationLoss, SiameseLoss, CenterLoss, TripletLoss, seed_func, plot_confusion_matrix, plot_tsne, plot_umap, plot_model_comparison_bar, plot_training_curves
 from net.cosine import CosineNet  # User's custom cosine similarity model
 from net.cosine_classifier import CosineClassifier  # Baseline++ (Chen et al. ICLR 2019)
 from net.protonet import ProtoNet
@@ -610,7 +610,15 @@ def test_final(net, loader, args):
         tsne_base = os.path.join(args.path_results, 
                                  f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
         plot_tsne(features, all_targets, args.way_num, tsne_base)
-        wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
+        if os.path.exists(f"{tsne_base}_tsne.png"):
+            wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_tsne.png")})
+        
+        # UMAP
+        umap_base = os.path.join(args.path_results, 
+                                 f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+        plot_umap(features, all_targets, args.way_num, umap_base)
+        if os.path.exists(f"{umap_base}_umap.png"):
+            wandb.log({"umap_plot": wandb.Image(f"{umap_base}_umap.png")})
     
     print(f"\nResults logged to WandB and plots saved to {args.path_results}")
     
