@@ -59,16 +59,16 @@ def get_args():
     parser.add_argument('--use_base_encoder', action='store_true',
                         help='Use Conv64F_Encoder (GroupNorm) for ProtoNet instead of paper-specific encoder')
     parser.add_argument('--backbone', type=str, default='conv64f',
-                        choices=['conv64f', 'resnet12', 'resnet18'],
-                        help='Backbone for MatchingNet: conv64f (paper, 1024 dim), resnet12 (512 dim), or resnet18 (512 dim)')
+                        choices=['conv64f', 'resnet12'],
+                        help='Backbone for MatchingNet: conv64f (paper, 1024 dim) or resnet12 (512 dim)')
 
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
-    parser.add_argument('--image_size', type=int, default=128, choices=[64, 84, 128],
-                        help='Input image size: 64 (required for conv64f) or 84 (required for resnet12/18)')
+    parser.add_argument('--image_size', type=int, default=128,
+                        help='Input image size (default: 128)')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
@@ -123,8 +123,8 @@ def get_model(args):
     elif args.model == 'covamnet':
         model = CovaMNet(device=device)
     elif args.model == 'matchingnet':
-        # MatchingNet: supports conv64f (paper) or resnet12 backbone
-        model = MatchingNet(backbone=args.backbone, device=device)
+        # MatchingNet: supports conv64f (original) or resnet12 backbone
+        model = MatchingNet(backbone=args.backbone, device=device, image_size=args.image_size)
     elif args.model == 'relationnet':
         # RelationNet: paper-specific encoder only (RelationBlock expects 4x4 features)
         model = RelationNet(device=device)
@@ -725,15 +725,7 @@ def log_model_comparison_bar(args):
 def main():
     args = get_args()
     
-    # Validate: conv64f requires 64x64, resnet12/18 require 84x84
-    if args.backbone == 'conv64f' and args.image_size != 64:
-        print(f"Error: conv64f backbone requires 64x64 image size, got {args.image_size}")
-        print("Use --backbone resnet12 or --backbone resnet18 for 84x84.")
-        return
-    if args.backbone in ['resnet12', 'resnet18'] and args.image_size != 84:
-        print(f"Error: {args.backbone} backbone requires 84x84 image size, got {args.image_size}")
-        print("Use --backbone conv64f for 64x64.")
-        return
+    # Note: All backbones now support 128x128 images
     
     # Set defaults based on shot_num
     if args.num_epochs is None:
@@ -751,12 +743,12 @@ def main():
     elif args.model == 'covamnet' or args.model == 'cosine':
         encoder_info = "Conv64F_Encoder (GroupNorm)"
     elif args.model == 'matchingnet':
+        spatial = args.image_size // 16
+        feat_dim = 64 * spatial * spatial
         if args.backbone == 'resnet12':
-            encoder_info = "ResNet12Encoder (BatchNorm, 512 dim) [--backbone resnet12]"
-        elif args.backbone == 'resnet18':
-            encoder_info = "ResNet18Encoder (BatchNorm, 512 dim) [--backbone resnet18]"
+            encoder_info = f"ResNet12Encoder (512->projection->{feat_dim} dim) [--backbone resnet12]"
         else:
-            encoder_info = "MatchingNetEncoder (BatchNorm, 1024 dim) [default]"
+            encoder_info = f"MatchingNetEncoder (flatten, {feat_dim} dim for {args.image_size}x{args.image_size}) [default]"
     elif args.model == 'relationnet':
         encoder_info = "RelationNetEncoder (BatchNorm, paper-only)"
     else:

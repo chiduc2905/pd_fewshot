@@ -11,7 +11,7 @@ A comprehensive framework for **Few-Shot Learning** applied to Partial Discharge
 - **10+ Few-Shot Learning algorithms**: ProtoNet, MatchingNet, RelationNet, CovaMNet, DN4, FEAT, DeepEMD, SiameseNet, Baseline++
 - **98.67% accuracy** with only 1-shot learning (1 sample per class)
 - **Episodic meta-learning** framework with N-way K-shot configuration
-- **Multiple CNN encoders**: Conv64F, ResNet12, ResNet18
+- **Multiple CNN encoders**: Conv64F, ResNet12
 - **Signal-to-image pipeline**: CWT scalogram transformation
 - **Comprehensive experiment automation** with WandB integration
 
@@ -92,8 +92,8 @@ python main.py --model relationnet --shot_num 1 --mode test --weights checkpoint
 | `--way_num` | 3 | Number of classes per episode |
 | `--shot_num` | 1 | Support samples per class |
 | `--query_num` | 1 | Query samples per class |
-| `--backbone` | conv64f | Encoder: conv64f, resnet12, resnet18 |
-| `--image_size` | 64 | Input image size (64 for conv64f, 84 for resnet) |
+| `--backbone` | conv64f | Encoder: conv64f, resnet12 |
+| `--image_size` | 128 | Input image size (default: 128) |
 | `--training_samples` | all | Limit training samples |
 | `--loss` | contrastive | Loss: contrastive, triplet |
 | `--num_epochs` | 100/70 | Training epochs (1-shot/5-shot) |
@@ -114,7 +114,7 @@ scalogram/
     └── ...
 ```
 
-Input images should be RGB (64×64 or 84×84 depending on encoder).
+Input images should be RGB (default: 128×128).
 
 ## 🔬 Implemented Algorithms
 

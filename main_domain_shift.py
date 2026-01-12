@@ -79,12 +79,12 @@ def get_args():
                         choices=['cosine', 'baseline', 'protonet', 'covamnet', 'matchingnet', 
                                  'relationnet', 'siamese', 'dn4', 'feat', 'deepemd'])
     parser.add_argument('--backbone', type=str, default='conv64f',
-                        choices=['conv64f', 'resnet12', 'resnet18'])
+                        choices=['conv64f', 'resnet12'])
     parser.add_argument('--use_base_encoder', action='store_true')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
-    parser.add_argument('--image_size', type=int, default=64)
+    parser.add_argument('--image_size', type=int, default=128)
     
     # Training
     parser.add_argument('--val_per_class', type=int, default=50,

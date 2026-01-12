@@ -22,7 +22,7 @@ def get_norm_layer(norm_type='group'):
 class Conv64F_Encoder(nn.Module):
     """
     Base 4-layer CNN encoder with BatchNorm + LeakyReLU.
-    Input: 3x64x64 -> Output: 64x16x16
+    Input: 3xHxW -> Output: 64x16x16 (with adaptive pooling for consistent output)
     
     Used by: CovaMNet (default), CosineNet
     """
@@ -52,5 +52,11 @@ class Conv64F_Encoder(nn.Module):
             nn.LeakyReLU(0.2, True),
         )
         
+        # Adaptive pooling for consistent 16x16 output regardless of input size
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((16, 16))
+        
     def forward(self, x):
-        return self.features(x)
+        feat = self.features(x)
+        feat = self.adaptive_pool(feat)  # Always output 64x16x16
+        return feat
+

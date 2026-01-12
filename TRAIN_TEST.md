@@ -19,7 +19,7 @@ python main.py --model relationnet --shot_num 1 --mode test
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model` | `covamnet` | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, siamese, baseline, cosine |
-| `--backbone` | `conv64f` | Encoder: conv64f, resnet12, resnet18 |
+| `--backbone` | `conv64f` | Encoder: conv64f, resnet12 |
 | `--shot_num` | `1` | K-shot (support samples per class) |
 | `--way_num` | `3` | N-way (classes per episode) |
 | `--query_num` | `1` | Query samples per class |
@@ -49,7 +49,7 @@ python main.py --model relationnet --shot_num 1 --mode test
 ### Experiment Settings
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--image_size` | `64` | Input size (64 for conv64f, 84 for resnet) |
+| `--image_size` | `128` | Input size (default: 128) |
 | `--episode_num_train` | `100` | Training episodes per epoch |
 | `--episode_num_val` | `150` | Validation episodes |
 | `--episode_num_test` | `200` | Test episodes |
@@ -65,8 +65,8 @@ python main.py --mode train
 # RelationNet 5-shot
 python main.py --model relationnet --shot_num 5 --mode train
 
-# MatchingNet with ResNet12 backbone (requires 84x84 images)
-python main.py --model matchingnet --backbone resnet12 --image_size 84 --mode train
+# MatchingNet with ResNet12 backbone (128x128)
+python main.py --model matchingnet --backbone resnet12 --image_size 128 --mode train
 
 # Limited training samples (60 total = 20/class for 3-way)
 python main.py --model cosine --training_samples 60 --mode train

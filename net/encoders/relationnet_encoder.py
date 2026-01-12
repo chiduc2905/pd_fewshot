@@ -8,6 +8,7 @@ class RelationNetEncoder(nn.Module):
     
     Architecture from: Sung et al. "Learning to Compare: Relation Network for Few-Shot Learning" (CVPR 2018)
     - 4 conv blocks: Conv(3->64) + BatchNorm + ReLU + MaxPool(2x2)
+    - AdaptiveAvgPool2d(4) at the end for consistent 4x4 spatial output
     - Output: (B, 64, 4, 4) feature maps (NOT flattened, for concatenation)
     
     Used by: RelationNet
@@ -26,17 +27,23 @@ class RelationNetEncoder(nn.Module):
             )
         
         self.features = nn.Sequential(
-            conv_block(3, 64),      # 64x64 -> 32x32
-            conv_block(64, 64),     # 32x32 -> 16x16
-            conv_block(64, 64),     # 16x16 -> 8x8
-            conv_block(64, 64),     # 8x8 -> 4x4
+            conv_block(3, 64),      # H/2
+            conv_block(64, 64),     # H/4
+            conv_block(64, 64),     # H/8
+            conv_block(64, 64),     # H/16
         )
+        
+        # Adaptive pooling for consistent 4x4 spatial output
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
         
     def forward(self, x):
         """
         Args:
-            x: (B, 3, 64, 64) input images
+            x: (B, 3, H, W) input images (supports 64x64, 84x84, 128x128, etc.)
         Returns:
             (B, 64, 4, 4) feature maps (NOT flattened for RelationNet)
         """
-        return self.features(x)  # Keep as 4D for concatenation
+        feat = self.features(x)  # (B, 64, H/16, W/16)
+        feat = self.adaptive_pool(feat)  # (B, 64, 4, 4)
+        return feat
+

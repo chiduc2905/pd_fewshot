@@ -47,7 +47,7 @@ def get_args():
     parser.add_argument('--dataset', type=str, default='scalogram',
                         help='Dataset name for new checkpoint format (e.g., original, augmented)')
     parser.add_argument('--backbone', type=str, default='conv64f',
-                        choices=['conv64f', 'resnet12', 'resnet18'])
+                        choices=['conv64f', 'resnet12'])
     
     # Test all checkpoints
     parser.add_argument('--all', action='store_true',
@@ -55,7 +55,7 @@ def get_args():
     
     # Dataset
     parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_official')
-    parser.add_argument('--image_size', type=int, default=64, choices=[64, 84])
+    parser.add_argument('--image_size', type=int, default=128)
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--query_num', type=int, default=1)
     parser.add_argument('--test_episodes', type=int, default=200)
@@ -142,11 +142,8 @@ def test_single_checkpoint(checkpoint_path, args):
         samples = args.samples
         shot_num = args.shot
     
-    # Determine image size based on backbone
-    if args.backbone in ['resnet12', 'resnet18']:
-        image_size = 84
-    else:
-        image_size = 64
+    # All backbones now support 128x128
+    image_size = args.image_size if hasattr(args, 'image_size') and args.image_size else 128
     
     # Create args for model
     class ModelArgs:

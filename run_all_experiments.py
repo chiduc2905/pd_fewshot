@@ -28,7 +28,8 @@ BASE_MODELS = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet',
                'siamese', 'dn4', 'feat', 'deepemd']
 
 # MatchingNet variants
-# NOTE: matchingnet_resnet18 temporarily disabled
+# conv64f now supports any input size (paper-style flatten: 4096 features for 128x128)
+# matchingnet_resnet18 disabled
 MATCHINGNET_VARIANTS = ['matchingnet', 'matchingnet_resnet12']
 
 
@@ -105,32 +106,7 @@ def main():
     success_count = 0
     failed_experiments = []
     
-    # Run base models (64x64 only)
-    print("\n" + "="*40)
-    print("Running Base Models (64x64)")
-    print("="*40)
-    for model in BASE_MODELS:
-        for shot in SHOTS:
-            for samples in SAMPLES_LIST:
-                current += 1
-                print(f"\n[{current}/{total_experiments}]", end=" ")
-                
-                success = run_experiment(
-                    model=model,
-                    shot=shot,
-                    samples=samples,
-                    image_size=128,
-                    dataset_path=args.dataset_path,
-                    dataset_name=args.dataset_name,
-                    project=args.project
-                )
-                
-                if success:
-                    success_count += 1
-                else:
-                    failed_experiments.append(f"{model}_{shot}shot_{samples}samples")
-    
-    # Run MatchingNet variants
+    # Run MatchingNet variants FIRST
     print("\n" + "="*40)
     print("Running MatchingNet Variants")
     print("="*40)
@@ -162,6 +138,31 @@ def main():
                     success_count += 1
                 else:
                     failed_experiments.append(f"{variant}_{shot}shot_{samples}samples")
+    
+    # Run base models
+    print("\n" + "="*40)
+    print("Running Base Models")
+    print("="*40)
+    for model in BASE_MODELS:
+        for shot in SHOTS:
+            for samples in SAMPLES_LIST:
+                current += 1
+                print(f"\n[{current}/{total_experiments}]", end=" ")
+                
+                success = run_experiment(
+                    model=model,
+                    shot=shot,
+                    samples=samples,
+                    image_size=128,
+                    dataset_path=args.dataset_path,
+                    dataset_name=args.dataset_name,
+                    project=args.project
+                )
+                
+                if success:
+                    success_count += 1
+                else:
+                    failed_experiments.append(f"{model}_{shot}shot_{samples}samples")
     
     # Summary
     print("\n" + "="*60)

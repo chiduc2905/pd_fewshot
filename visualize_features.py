@@ -42,7 +42,7 @@ def get_args():
                        choices=['matchingnet', 'protonet', 'relationnet', 'covamnet', 'cosine'],
                        help='Model type (default: matchingnet)')
     parser.add_argument('--backbone', type=str, default='conv64f',
-                       choices=['conv64f', 'resnet12', 'resnet18'],
+                       choices=['conv64f', 'resnet12'],
                        help='Backbone for MatchingNet (default: conv64f)')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Path to model checkpoint (optional)')

@@ -8,9 +8,10 @@ class Conv64F_Paper_Encoder(nn.Module):
     
     Architecture from: Snell et al. "Prototypical Networks for Few-shot Learning" (NeurIPS 2017)
     - 4 conv blocks: Conv(3->64) + BatchNorm + ReLU + MaxPool(2x2)
-    - Input: (B, 3, 64, 64) -> Output: (B, 1024) flattened features
+    - Global Average Pooling at the end for consistent output dimension
+    - Input: (B, 3, H, W) -> Output: (B, 64) features (supports any input size)
     
-    This matches the official implementation:
+    This matches the official implementation with GAP for flexible input sizes:
     https://github.com/jakesnell/prototypical-networks
     
     Used by: ProtoNet (with --encoder_type='paper')
@@ -29,18 +30,26 @@ class Conv64F_Paper_Encoder(nn.Module):
             )
         
         self.features = nn.Sequential(
-            conv_block(3, 64),      # 64x64 -> 32x32
-            conv_block(64, 64),     # 32x32 -> 16x16
-            conv_block(64, 64),     #16x16 -> 8x8
-            conv_block(64, 64),     # 8x8 -> 4x4
+            conv_block(3, 64),      # H/2
+            conv_block(64, 64),     # H/4
+            conv_block(64, 64),     # H/8
+            conv_block(64, 64),     # H/16
         )
+        
+        # Global Average Pooling for consistent output size
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        
+        # Feature dimension after GAP
+        self.out_dim = 64
         
     def forward(self, x):
         """
         Args:
-            x: (B, 3, 64, 64) input images
+            x: (B, 3, H, W) input images (supports 64x64, 84x84, 128x128, etc.)
         Returns:
-            (B, 1024) flattened features (64 * 4 * 4)
+            (B, 64) features after global average pooling
         """
-        feat = self.features(x)  # (B, 64, 4, 4)
-        return feat.view(feat.size(0), -1)  # (B, 1024)
+        feat = self.features(x)  # (B, 64, H/16, W/16)
+        feat = self.gap(feat)    # (B, 64, 1, 1)
+        return feat.view(feat.size(0), -1)  # (B, 64)
+

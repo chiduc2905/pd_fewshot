@@ -10,7 +10,7 @@ from net.utils import init_weights
 class CovarianceNet(nn.Module):
     """Few-shot classifier using covariance-based similarity."""
     
-    def __init__(self, norm_layer=functools.partial(nn.BatchNorm2d, affine=True), num_classes=5, device='cuda', input_size=64):
+    def __init__(self, norm_layer=functools.partial(nn.BatchNorm2d, affine=True), num_classes=5, device='cuda', input_size=128):
         super(CovarianceNet, self).__init__()
 
         if type(norm_layer) == str:
@@ -28,10 +28,10 @@ class CovarianceNet(nn.Module):
         self.encoder = self.features  # Alias for t-SNE feature extraction
         self.covariance = CovaBlock()
 
-        # Feature map size: input_size / 4 (2 max-pool layers)
-        self.feature_h = input_size // 4
-        self.feature_w = input_size // 4
-        kernel_size = self.feature_h * self.feature_w
+        # Feature map size: fixed at 16x16 due to AdaptiveAvgPool2d in encoder
+        self.feature_h = 16
+        self.feature_w = 16
+        kernel_size = self.feature_h * self.feature_w  # 256
 
         # Learnable classifier
         self.classifier = nn.Sequential(
