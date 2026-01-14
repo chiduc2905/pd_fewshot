@@ -11,6 +11,7 @@ def get_args():
                         default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_official',
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     return parser.parse_args()
 
 
@@ -33,7 +34,7 @@ BASE_MODELS = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet',
 MATCHINGNET_VARIANTS = ['matchingnet', 'matchingnet_resnet12']
 
 
-def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name, project, backbone=None):
+def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name, project, seed, backbone=None):
     """Run a single benchmark experiment."""
     print(f"\n{'='*60}")
     print(f"Model={model}, Shot={shot}, Samples={samples if samples else 'All'}, ImageSize={image_size}")
@@ -57,6 +58,7 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
         '--episode_num_train', '100',
         '--episode_num_val', '150',
         '--episode_num_test', '150',
+        '--seed', str(seed),  # Fixed seed for reproducibility
     ]
     
     if backbone is not None:
@@ -131,6 +133,7 @@ def main():
                     dataset_path=args.dataset_path,
                     dataset_name=args.dataset_name,
                     project=args.project,
+                    seed=args.seed,
                     backbone=backbone
                 )
                 
@@ -156,7 +159,8 @@ def main():
                     image_size=128,
                     dataset_path=args.dataset_path,
                     dataset_name=args.dataset_name,
-                    project=args.project
+                    project=args.project,
+                    seed=args.seed
                 )
                 
                 if success:

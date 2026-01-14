@@ -153,12 +153,17 @@ def get_model(args):
 # Training
 # =============================================================================
 
-def train_loop(net, train_loader, val_X, val_y, args):
+def train_loop(net, train_X, train_y, val_X, val_y, args):
     """Train with validation-based model selection.
+    
+    Training episodes are DIFFERENT each epoch (seed = base_seed + epoch),
+    but reproducible across experiments with the same seed.
+    Validation uses FIXED seed for consistent evaluation.
     
     Args:
         net: Model to train
-        train_loader: Training data loader
+        train_X: Training images tensor
+        train_y: Training labels tensor
         val_X: Validation images tensor
         val_y: Validation labels tensor
         args: Training arguments
@@ -215,6 +220,16 @@ def train_loop(net, train_loader, val_X, val_y, args):
     best_acc = 0.0
     
     for epoch in range(1, args.num_epochs + 1):
+        # Create NEW training dataset each epoch with epoch-dependent seed
+        # This ensures: (1) different episodes each epoch, (2) reproducible across experiments
+        train_seed = args.seed + epoch  # Epoch 1 uses seed+1, Epoch 2 uses seed+2, etc.
+        train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
+                                  args.way_num, args.shot_num, args.query_num, train_seed)
+        train_gen = torch.Generator()
+        train_gen.manual_seed(train_seed)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                                  generator=train_gen)
+        
         # Train
         net.train()
         total_loss = 0.0
@@ -293,13 +308,12 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         scheduler.step()
         
-        # Evaluate on training set (same episodes used for training)
+        # Evaluate on training set (same episodes used for this epoch)
         train_acc, _ = evaluate(net, train_loader, args)
         
-        # Validate - Create new validation dataset each epoch with seed+epoch
-        # This ensures different episodes per epoch while maintaining reproducibility
+        # Validate - use fixed seed (not epoch-dependent) for reproducibility
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num, args.seed + epoch)
+                                args.way_num, args.shot_num, args.query_num, args.seed)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main, criterion_center)
@@ -789,7 +803,10 @@ def main():
     
     wandb.init(project=args.project, config=config, name=run_name, group=run_name, job_type=args.mode)
     
+    # Set seed BEFORE anything else for full reproducibility
     seed_func(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     # Log model parameters and FLOPs after model is created
     def calculate_flops(model, input_size=(3, 64, 64), device='cuda'):
@@ -909,16 +926,10 @@ def main():
         train_y = torch.cat(y_list)
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
-    # Create data loaders
-    # Training: Fixed seed, shuffled loader for varied batch order
-    train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                              args.way_num, args.shot_num, 1, args.seed)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    # Note: Training dataset is created INSIDE train_loop with epoch-dependent seed
+    # This ensures different episodes each epoch but reproducible across experiments
     
-    # Validation: Will be recreated each epoch with seed+epoch in train_loop
-    # This ensures different episodes per epoch but reproducibility across program runs
-    
-    # Test: Fixed seed ensures identical episodes across all runs
+    # Test: Fixed seed ensures identical episodes across all runs  
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
                              args.way_num, args.shot_num, args.query_num, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
@@ -930,7 +941,7 @@ def main():
     log_model_parameters(net, args.model, device=args.device, image_size=args.image_size)
     
     if args.mode == 'train':
-        best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
+        best_acc, history = train_loop(net, train_X, train_y, val_X, val_y, args)
         
         # Load model for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
