@@ -86,11 +86,12 @@ class MatchingNet(nn.Module):
             feat_dim = 512  # ResNet12 uses GAP -> 512 dim
         else:  # conv64f
             self.encoder = MatchingNetEncoder()
-            feat_dim = 1024  # Encoder uses AdaptivePool(4,4) -> 64*4*4 = 1024
+            feat_dim = 64  # Paper-compliant: GAP -> 64 dim (not 1024!)
         
         self.feat_dim = feat_dim
         
-        # Full contextual embeddings
+        # Full contextual embeddings (paper-compliant dimensions)
+        # BiLSTM: input 64 -> hidden 32 bidirectional -> output 64
         self.support_lstm = nn.LSTM(feat_dim, feat_dim // 2, batch_first=True, bidirectional=True)
         self.query_attention_lstm = AttentionLSTM(input_size=feat_dim, hidden_size=feat_dim)
         
