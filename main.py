@@ -73,9 +73,9 @@ def get_args():
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
-    parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=150)
-    parser.add_argument('--episode_num_test', type=int, default=150)
+    parser.add_argument('--episode_num_train', type=int, default=200)
+    parser.add_argument('--episode_num_val', type=int, default=300)
+    parser.add_argument('--episode_num_test', type=int, default=300)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
@@ -546,6 +546,10 @@ def test_final(net, loader, args):
     time_min = episode_times.min()
     time_max = episode_times.max()
     
+    # 95% Confidence Interval: Mean ± 1.96 * (std / sqrt(n))
+    n_episodes = len(episode_accuracies)
+    acc_ci95 = 1.96 * acc_std / np.sqrt(n_episodes)
+    
     # =========================================================================
     # Classification Metrics
     # =========================================================================
@@ -563,9 +567,10 @@ def test_final(net, loader, args):
     print(f"\n{'='*60}")
     print("ACCURACY METRICS")
     print('='*60)
-    print(f"  Mean Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
-    print(f"  Worst-case    : {acc_worst:.4f}")
-    print(f"  Best-case     : {acc_best:.4f}")
+    print(f"  Mean Accuracy : {acc_mean*100:.2f} ± {acc_ci95*100:.2f}% (95% CI)")
+    print(f"  Std Deviation : {acc_std*100:.2f}%")
+    print(f"  Worst-case    : {acc_worst*100:.2f}%")
+    print(f"  Best-case     : {acc_best*100:.2f}%")
     print(f"  Precision     : {prec:.4f}")
     print(f"  Recall        : {rec:.4f}")
     print(f"  F1-Score      : {f1:.4f}")
@@ -585,6 +590,7 @@ def test_final(net, loader, args):
         # Accuracy metrics
         "test_accuracy_mean": acc_mean,
         "test_accuracy_std": acc_std,
+        "test_accuracy_ci95": acc_ci95,
         "test_accuracy_worst": acc_worst,
         "test_accuracy_best": acc_best,
         # Legacy: keep for compatibility
@@ -603,7 +609,7 @@ def test_final(net, loader, args):
     
     # Update WandB summary for easy access
     wandb.run.summary["test_accuracy_mean"] = acc_mean
-    wandb.run.summary["test_accuracy_std"] = acc_std
+    wandb.run.summary["test_accuracy_ci95"] = acc_ci95
     wandb.run.summary["test_accuracy_worst"] = acc_worst
     wandb.run.summary["inference_time_mean_ms"] = time_mean
     
