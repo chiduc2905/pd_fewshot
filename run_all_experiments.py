@@ -54,7 +54,7 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
         '--num_epochs', '100',
         '--lr', '1e-3',
         '--eta_min', '1e-5',
-        '--weight_decay', '1e-4',
+        '--weight_decay', '5e-4',  # Matched with mamba_glscnet
         '--episode_num_train', '200',
         '--episode_num_val', '300',
         '--episode_num_test', '300',
