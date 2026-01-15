@@ -77,8 +77,7 @@ def get_args():
     parser.add_argument('--episode_num_val', type=int, default=300)
     parser.add_argument('--episode_num_test', type=int, default=300)
     parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--moving_avg_window', type=int, default=5,
-                        help='Window size for moving average checkpoint selection (default: 5)')
+
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
     parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for CosineAnnealingLR')
@@ -153,54 +152,7 @@ def get_model(args):
 # Training
 # =============================================================================
 
-def find_plateau_epoch(val_accs, window_size=5):
-    """Find the epoch at the most stable plateau using moving average.
-    
-    Algorithm:
-    1. Compute moving average of val_acc for each window
-    2. Compute moving std to measure stability
-    3. Score = mean - alpha * std (higher mean, lower variance is better)
-    4. Return center epoch of the best window
-    
-    Args:
-        val_accs: List of validation accuracies (index 0 = epoch 1)
-        window_size: Number of epochs for moving average
-    
-    Returns:
-        best_epoch: 1-indexed epoch number at the center of best plateau
-        best_mean: Moving average at that epoch
-        best_std: Standard deviation at that epoch
-    """
-    n = len(val_accs)
-    if n < window_size:
-        # Not enough epochs, return last epoch
-        return n, val_accs[-1] if val_accs else 0, 0
-    
-    val_arr = np.array(val_accs)
-    
-    best_score = -np.inf
-    best_epoch = n  # Default to last
-    best_mean = 0
-    best_std = 0
-    
-    # Slide window across epochs
-    for i in range(n - window_size + 1):
-        window = val_arr[i:i + window_size]
-        mean = window.mean()
-        std = window.std()
-        
-        # Score: prioritize high mean, penalize high variance
-        # alpha=0.5 balances between accuracy and stability
-        score = mean - 0.5 * std
-        
-        if score > best_score:
-            best_score = score
-            # Center of window (1-indexed epoch)
-            best_epoch = i + window_size // 2 + 1
-            best_mean = mean
-            best_std = std
-    
-    return best_epoch, best_mean, best_std
+
 
 
 def train_loop(net, train_X, train_y, val_X, val_y, args):
@@ -402,49 +354,19 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
             "lr": optimizer.param_groups[0]['lr']
         })
         
-        # Track best val for monitoring only (NOT for checkpoint selection)
+        # Track best val and save checkpoint
         if val_acc > best_acc:
             best_acc = val_acc
             print(f'  → New best val: {val_acc:.4f}')
             wandb.run.summary["best_val_acc"] = best_acc
-        
-        # Save checkpoint during second half of training for plateau selection
-        # Only save checkpoints after warmup to avoid wasting disk space
-        if epoch > args.num_epochs // 2:
+            
+            # Save BEST model
             samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-            epoch_ckpt_path = os.path.join(
-                args.path_weights, 
-                f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_epoch{epoch}.pth'
-            )
-            torch.save(net.state_dict(), epoch_ckpt_path)
-    
-    # ================================================================
-    # Plateau Selection: Find most stable epoch using moving average
-    # ================================================================
-    print(f"\n{'='*60}")
-    print("PLATEAU SELECTION (Moving Average)")
-    print('='*60)
-    
-    plateau_epoch, plateau_mean, plateau_std = find_plateau_epoch(
-        history['val_acc'], 
-        window_size=args.moving_avg_window
-    )
-    
-    print(f"  Window size: {args.moving_avg_window} epochs")
-    print(f"  Selected plateau epoch: {plateau_epoch}")
-    print(f"  Plateau val_acc (moving avg): {plateau_mean:.4f} ± {plateau_std:.4f}")
-    print(f"  Final epoch val_acc: {history['val_acc'][-1]:.4f}")
-    
-    # Log plateau info to WandB
-    wandb.log({
-        "plateau/epoch": plateau_epoch,
-        "plateau/val_acc_mean": plateau_mean,
-        "plateau/val_acc_std": plateau_std,
-        "plateau/window_size": args.moving_avg_window
-    })
-    wandb.run.summary["plateau_epoch"] = plateau_epoch
-    wandb.run.summary["plateau_val_acc"] = plateau_mean
-    
+            final_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth'
+            final_path = os.path.join(args.path_weights, final_model_filename)
+            torch.save(net.state_dict(), final_path)
+            print(f"  Saved best model to {final_path}")
+
     # Plot training curves
     samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
     curves_path = os.path.join(args.path_results, 
@@ -455,44 +377,8 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
     if os.path.exists(f"{curves_path}_curves.png"):
         wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
     
-    # ================================================================
-    # Save PLATEAU checkpoint as final (instead of last epoch)
-    # ================================================================
-    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-    final_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth'
-    final_path = os.path.join(args.path_weights, final_model_filename)
-    
-    # Check if plateau epoch checkpoint exists (it should if epoch > num_epochs/2)
-    if plateau_epoch > args.num_epochs // 2:
-        plateau_ckpt_path = os.path.join(
-            args.path_weights,
-            f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_epoch{plateau_epoch}.pth'
-        )
-        if os.path.exists(plateau_ckpt_path):
-            import shutil
-            shutil.copy(plateau_ckpt_path, final_path)
-            print(f'Plateau checkpoint (epoch {plateau_epoch}) saved as: {final_path}')
-        else:
-            # Fallback: save current model (last epoch)
-            torch.save(net.state_dict(), final_path)
-            print(f'Plateau epoch {plateau_epoch} not found, saving last epoch: {final_path}')
-    else:
-        # Plateau is in first half, save current model (last epoch) 
-        torch.save(net.state_dict(), final_path)
-        print(f'Plateau epoch {plateau_epoch} is early, saving last epoch as final: {final_path}')
-    
-    wandb.run.summary["final_epoch"] = plateau_epoch
-    
-    # Clean up epoch checkpoints to save disk space
-    for epoch in range(args.num_epochs // 2 + 1, args.num_epochs + 1):
-        epoch_ckpt_path = os.path.join(
-            args.path_weights,
-            f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_epoch{epoch}.pth'
-        )
-        if os.path.exists(epoch_ckpt_path) and epoch != plateau_epoch:
-            os.remove(epoch_ckpt_path)
-    
-    return best_acc, history, plateau_epoch
+    print(f"Best Validation Accuracy: {best_acc:.4f}")
+    return best_acc, history
 
 
 def evaluate(net, loader, args, criterion_main=None, criterion_center=None):
@@ -628,7 +514,7 @@ def test_final(net, loader, args):
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
             
-            # Extract features for t-SNE
+            # Extract features for t-SNE (Fixed embedding space: Encoder -> GAP -> Normalize)
             q_flat = query.view(-1, C, H, W)
             if hasattr(net, 'encoder'):
                 feat = net.encoder(q_flat)
@@ -637,6 +523,9 @@ def test_final(net, loader, args):
                     feat = nn.functional.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
                 elif feat.dim() == 2:  # (B, feat_dim) - paper encoder, already flattened
                     pass  # Already flattened
+                
+                # IMPORTANT: Normalize features for tighter clustering (cosine distance)
+                feat = F.normalize(feat, p=2, dim=1)
                 all_features.append(feat.cpu().numpy())
     
     # Convert to numpy arrays
@@ -1062,12 +951,12 @@ def main():
     log_model_parameters(net, args.model, device=args.device, image_size=args.image_size)
     
     if args.mode == 'train':
-        best_acc, history, plateau_epoch = train_loop(net, train_X, train_y, val_X, val_y, args)
+        best_acc, history = train_loop(net, train_X, train_y, val_X, val_y, args)
         
-        # Load PLATEAU checkpoint for testing (moving average selection)
+        # Load BEST checkpoint for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
         path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
-        print(f'Testing with PLATEAU checkpoint (epoch {plateau_epoch}): {path}')
+        print(f'Testing with BEST checkpoint: {path}')
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
         
