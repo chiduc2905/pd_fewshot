@@ -2,71 +2,186 @@
 
 Paper: "Siamese Neural Networks for One-shot Image Recognition" (Koch et al., ICML-W 2015)
 
-Architecture:
-- Twin networks with shared weights (encoder)
+Original Architecture (for Omniglot 105x105):
+- Conv1: 64 filters, 10x10, ReLU → MaxPool 2x2
+- Conv2: 128 filters, 7x7, ReLU → MaxPool 2x2
+- Conv3: 128 filters, 4x4, ReLU → MaxPool 2x2
+- Conv4: 256 filters, 4x4, ReLU (no pooling)
+- Flatten → FC 4096 with sigmoid
 - L1 distance between embeddings
-- FC layers to predict similarity score
+- Weighted L1 → Sigmoid → binary similarity score
+
+Adapted for 128x128 RGB images while preserving paper architecture ratios.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from net.encoders.base_encoder import Conv64F_Encoder
 
 
-class SiameseNet(nn.Module):
-    """Few-shot classifier using learned pairwise similarity.
+class SiameseEncoder(nn.Module):
+    """Koch et al. 2015 paper-accurate Siamese encoder.
     
-    For each query, computes similarity to each support sample,
-    then averages per class to get class scores.
+    Architecture follows Figure 3 of the original paper:
+    - 4 convolutional layers with increasing channels (64→128→128→256)
+    - ReLU activations (paper uses ReLU for conv layers)
+    - MaxPool after first 3 conv layers
+    - Flatten → FC → 4096 features with sigmoid
+    
+    Adapted for 128x128 RGB inputs (vs original 105x105 grayscale).
     """
     
-    def __init__(self, device='cuda'):
-        """Initialize Siamese Network.
+    def __init__(self, in_channels=3, feat_dim=4096):
+        super(SiameseEncoder, self).__init__()
         
-        Args:
-            device: Device to use
-        """
-        super(SiameseNet, self).__init__()
+        self.feat_dim = feat_dim
         
-        # Shared encoder: 3x64x64 -> 64x16x16 (feature maps)
-        self.encoder = Conv64F_Encoder()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # Paper architecture (adapted kernel sizes for 128x128 input):
+        # Original uses 10x10, 7x7, 4x4, 4x4 for 105x105
+        # We use 10x10, 7x7, 4x4, 4x4 which works for 128x128 too
         
-        # Similarity network: takes L1 distance of embeddings
-        # Input: 64-dim (absolute difference)
-        # Output: 1 (similarity score)
-        self.relation_net = nn.Sequential(
-            nn.Linear(64, 64),
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=10, stride=1, padding=0),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(64, 32),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        # 128 -> (128-10+1)=119 -> 119/2=59
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=7, stride=1, padding=0),
             nn.ReLU(inplace=True),
-            nn.Linear(32, 1),
-            nn.Sigmoid()  # Output in [0, 1]
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        # 59 -> (59-7+1)=53 -> 53/2=26
+        
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=4, stride=1, padding=0),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        # 26 -> (26-4+1)=23 -> 23/2=11
+        
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=4, stride=1, padding=0),
+            nn.ReLU(inplace=True)
+            # No pooling after last conv (as per paper)
+        )
+        # 11 -> (11-4+1)=8
+        
+        # Adaptive pooling to handle varying spatial sizes
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
+        # Output: 256 * 4 * 4 = 4096
+        
+        # FC layer with sigmoid (as per paper)
+        self.fc = nn.Sequential(
+            nn.Linear(256 * 4 * 4, feat_dim),
+            nn.Sigmoid()  # Paper uses sigmoid in FC layer
         )
         
-        self.to(device)
+        # Initialize weights (paper uses normal init with specific std)
+        self._init_weights()
     
-    def encode(self, x):
+    def _init_weights(self):
+        """Initialize weights as per paper recommendations."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                # Paper: normal init with mean=0, std specific to layer
+                nn.init.normal_(m.weight, mean=0, std=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0, std=0.2)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
         """Extract feature embedding.
         
         Args:
             x: (N, C, H, W) images
         Returns:
-            (N, 64) embeddings
+            (N, feat_dim) embeddings
         """
-        feat = self.encoder(x)  # (N, 64, H, W)
-        feat = self.avg_pool(feat)  # (N, 64, 1, 1)
-        feat = feat.view(feat.size(0), -1)  # (N, 64)
-        return feat
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        x = self.adaptive_pool(x)  # Ensure consistent 4x4 output
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc(x)
+        return x
+
+
+class SiameseNet(nn.Module):
+    """Koch et al. 2015 paper-accurate Siamese Network.
+    
+    For few-shot episodic training:
+    - For each query, computes pairwise similarity to each support sample
+    - Average similarities per class to get class scores
+    - Use CrossEntropyLoss on scores (adapted from binary verification)
+    
+    Key differences from incorrect previous implementation:
+    - Proper encoder with 64→128→128→256 channels (not 4x64)
+    - Feature dimension 4096 (not 64)
+    - Sigmoid activations in FC (not ReLU everywhere)
+    - L1 distance + weighted FC for similarity (paper-accurate)
+    """
+    
+    def __init__(self, feat_dim=4096, device='cuda'):
+        """Initialize Siamese Network.
+        
+        Args:
+            feat_dim: Feature dimension after encoder (paper uses 4096)
+            device: Device to use
+        """
+        super(SiameseNet, self).__init__()
+        
+        self.feat_dim = feat_dim
+        
+        # Paper-accurate encoder
+        self.encoder = SiameseEncoder(in_channels=3, feat_dim=feat_dim)
+        
+        # Similarity network: weighted L1 distance + sigmoid
+        # Paper: learns weights α for |h1 - h2| * α, then sigmoid
+        # We use a learnable linear layer which achieves the same
+        self.similarity = nn.Sequential(
+            nn.Linear(feat_dim, 1),  # Weighted sum of L1 distances
+            nn.Sigmoid()  # Output similarity in [0, 1]
+        )
+        
+        # Initialize similarity layer
+        nn.init.normal_(self.similarity[0].weight, mean=0, std=0.2)
+        nn.init.constant_(self.similarity[0].bias, 0)
+        
+        self.to(device)
+    
+    def encode(self, x):
+        """Extract feature embedding from encoder."""
+        return self.encoder(x)
+    
+    def compute_similarity(self, emb1, emb2):
+        """Compute similarity between two embeddings.
+        
+        Paper uses: σ(Σ_j α_j |h1_j - h2_j|)
+        
+        Args:
+            emb1: (N, D) first embeddings
+            emb2: (N, D) second embeddings
+        Returns:
+            (N, 1) similarity scores in [0, 1]
+        """
+        # L1 distance (element-wise absolute difference)
+        l1_dist = torch.abs(emb1 - emb2)  # (N, D)
+        # Weighted sum + sigmoid
+        sim = self.similarity(l1_dist)  # (N, 1)
+        return sim
     
     def forward(self, query, support):
-        """Compute similarity scores for classification.
+        """Compute similarity scores for few-shot classification.
         
         For N-way K-shot:
-        1. Encode all images
-        2. For each query, compute similarity to each support sample
-        3. Average similarities per class
+        1. Encode all images with shared encoder
+        2. For each query, compute pairwise similarity to each support sample
+        3. Average similarities per class to get class scores
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -81,81 +196,74 @@ class SiameseNet(nn.Module):
         query_flat = query.view(-1, C, H, W)  # (B*NQ, C, H, W)
         support_flat = support.view(-1, C, H, W)  # (B*Way*Shot, C, H, W)
         
-        q_emb = self.encode(query_flat)  # (B*NQ, 64)
-        s_emb = self.encode(support_flat)  # (B*Way*Shot, 64)
+        q_emb = self.encode(query_flat)  # (B*NQ, D)
+        s_emb = self.encode(support_flat)  # (B*Way*Shot, D)
         
         # Reshape for batch processing
-        q_emb = q_emb.view(B, NQ, -1)  # (B, NQ, 64)
-        s_emb = s_emb.view(B, Way, Shot, -1)  # (B, Way, Shot, 64)
+        q_emb = q_emb.view(B, NQ, -1)  # (B, NQ, D)
+        s_emb = s_emb.view(B, Way, Shot, -1)  # (B, Way, Shot, D)
         
-        # Compute similarity for each query-support pair
-        # Output: (B, NQ, Way)
-        scores = []
+        D = q_emb.size(-1)
         
-        for b in range(B):
-            batch_scores = []
-            for q in range(NQ):
-                q_feat = q_emb[b, q]  # (64,)
-                class_sims = []
-                
-                for w in range(Way):
-                    # Compute similarity to all shots of this class
-                    shot_sims = []
-                    for s in range(Shot):
-                        s_feat = s_emb[b, w, s]  # (64,)
-                        
-                        # L1 distance as input to relation network
-                        diff = torch.abs(q_feat - s_feat)  # (64,)
-                        sim = self.relation_net(diff)  # (1,)
-                        shot_sims.append(sim)
-                    
-                    # Average similarity across shots for this class
-                    class_sim = torch.stack(shot_sims).mean()
-                    class_sims.append(class_sim)
-                
-                batch_scores.append(torch.stack(class_sims))  # (Way,)
-            
-            scores.append(torch.stack(batch_scores))  # (NQ, Way)
+        # Compute pairwise similarities and average per class
+        # Shape transformations for vectorized computation:
+        # q_emb: (B, NQ, 1, 1, D)
+        # s_emb: (B, 1, Way, Shot, D)
+        q_exp = q_emb.unsqueeze(2).unsqueeze(3)  # (B, NQ, 1, 1, D)
+        s_exp = s_emb.unsqueeze(1)  # (B, 1, Way, Shot, D)
         
-        scores = torch.stack(scores)  # (B, NQ, Way)
-        scores = scores.view(-1, Way)  # (B*NQ, Way)
+        # Broadcast to (B, NQ, Way, Shot, D)
+        q_exp = q_exp.expand(B, NQ, Way, Shot, D)
+        s_exp = s_exp.expand(B, NQ, Way, Shot, D)
+        
+        # L1 distance for all pairs
+        l1_dist = torch.abs(q_exp - s_exp)  # (B, NQ, Way, Shot, D)
+        
+        # Flatten for similarity computation
+        l1_dist_flat = l1_dist.view(-1, D)  # (B*NQ*Way*Shot, D)
+        
+        # Compute pairwise similarities
+        pair_sims = self.similarity(l1_dist_flat)  # (B*NQ*Way*Shot, 1)
+        pair_sims = pair_sims.view(B, NQ, Way, Shot)  # (B, NQ, Way, Shot)
+        
+        # Average across shots to get class scores (paper compares to each support sample)
+        class_scores = pair_sims.mean(dim=3)  # (B, NQ, Way)
+        
+        # Flatten for loss
+        scores = class_scores.view(-1, Way)  # (B*NQ, Way)
         
         return scores
 
 
 class SiameseNetFast(nn.Module):
-    """Optimized Siamese Network using vectorized operations.
+    """Optimized Siamese Network with paper-accurate architecture.
     
-    This version avoids nested loops for better GPU utilization.
+    Uses prototype-based comparison for efficiency while maintaining
+    the paper's encoder architecture.
     """
     
-    def __init__(self, device='cuda'):
+    def __init__(self, feat_dim=4096, device='cuda'):
         super(SiameseNetFast, self).__init__()
         
-        self.encoder = Conv64F_Encoder()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.feat_dim = feat_dim
+        self.encoder = SiameseEncoder(in_channels=3, feat_dim=feat_dim)
         
-        # Relation network (same as above)
-        self.relation_net = nn.Sequential(
-            nn.Linear(64, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(64, 32),
-            nn.ReLU(inplace=True),
-            nn.Linear(32, 1),
+        # Similarity network
+        self.similarity = nn.Sequential(
+            nn.Linear(feat_dim, 1),
             nn.Sigmoid()
         )
+        
+        nn.init.normal_(self.similarity[0].weight, mean=0, std=0.2)
+        nn.init.constant_(self.similarity[0].bias, 0)
         
         self.to(device)
     
     def encode(self, x):
-        feat = self.encoder(x)
-        feat = self.avg_pool(feat)
-        feat = feat.view(feat.size(0), -1)
-        return feat
+        return self.encoder(x)
     
     def forward(self, query, support):
-        """Vectorized forward pass.
+        """Vectorized forward pass using prototypes.
         
         Args:
             query: (B, NQ, C, H, W)
@@ -175,22 +283,19 @@ class SiameseNetFast(nn.Module):
         
         D = q_emb.size(-1)
         
-        # Compute prototypes (average support embeddings per class) for efficiency
-        # This gives us a proxy for class representation
+        # Compute prototypes (average support embeddings per class)
         prototypes = s_emb.mean(dim=2)  # (B, Way, D)
         
         # Expand for pairwise comparison
-        # q_emb: (B, NQ, D) -> (B, NQ, Way, D)
-        # prototypes: (B, Way, D) -> (B, NQ, Way, D)
-        q_exp = q_emb.unsqueeze(2).expand(-1, -1, Way, -1)
-        p_exp = prototypes.unsqueeze(1).expand(-1, NQ, -1, -1)
+        q_exp = q_emb.unsqueeze(2).expand(-1, -1, Way, -1)  # (B, NQ, Way, D)
+        p_exp = prototypes.unsqueeze(1).expand(-1, NQ, -1, -1)  # (B, NQ, Way, D)
         
         # L1 distance
-        diff = torch.abs(q_exp - p_exp)  # (B, NQ, Way, D)
-        diff = diff.view(-1, D)  # (B*NQ*Way, D)
+        l1_dist = torch.abs(q_exp - p_exp)  # (B, NQ, Way, D)
+        l1_dist = l1_dist.view(-1, D)  # (B*NQ*Way, D)
         
         # Compute similarity scores
-        sims = self.relation_net(diff)  # (B*NQ*Way, 1)
+        sims = self.similarity(l1_dist)  # (B*NQ*Way, 1)
         scores = sims.view(B, NQ, Way)  # (B, NQ, Way)
         scores = scores.view(-1, Way)  # (B*NQ, Way)
         

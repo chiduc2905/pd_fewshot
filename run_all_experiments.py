@@ -58,6 +58,7 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
         '--episode_num_train', '200',
         '--episode_num_val', '300',
         '--episode_num_test', '300',
+        '--lambda_center', '0.01',  # Enable Center Loss for better feature clustering
         '--seed', str(seed),  # Fixed seed for reproducibility
     ]
     

@@ -98,8 +98,8 @@ def get_args():
                         help='Margin for Triplet loss (default: 0.1)')
     
     # Center Loss
-    parser.add_argument('--lambda_center', type=float, default=0.0, 
-                        help='Weight for Center Loss (default: 0.0, disabled)')
+    parser.add_argument('--lambda_center', type=float, default=0.01, 
+                        help='Weight for Center Loss (default: 0.01)')
     
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
