@@ -66,7 +66,7 @@ def get_args():
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
+    parser.add_argument('--query_num', type=int, default=1, help='Queries per class (same for train/val/test)')
     parser.add_argument('--image_size', type=int, default=64,
                         help='Input image size (default: 64)')
     

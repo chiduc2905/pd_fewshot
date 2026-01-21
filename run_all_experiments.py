@@ -21,10 +21,10 @@ SHOTS = [1, 5]
 # Training samples: [min, small, medium, all] - matches mamba_glscnet
 SAMPLES_LIST = [30, 60, 150, None]
 
-# Query samples (same for train/val/test) - matches mamba_glscnet
-QUERY_NUM = 5
+# Query samples (same for train/val/test)
+QUERY_NUM = 1
 
-# Base models (64x64)
+# Base models (all use 64x64 for fair comparison)
 BASE_MODELS = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet', 
                'siamese', 'dn4', 'feat', 'deepemd']
 
@@ -115,11 +115,11 @@ def main():
     print("="*40)
     for variant in MATCHINGNET_VARIANTS:
         if variant == 'matchingnet_resnet12':
-            model, backbone, img_size = 'matchingnet', 'resnet12', 128
+            model, backbone, img_size = 'matchingnet', 'resnet12', 64
         # elif variant == 'matchingnet_resnet18':
-        #     model, backbone, img_size = 'matchingnet', 'resnet18', 128
+        #     model, backbone, img_size = 'matchingnet', 'resnet18', 64
         else:
-            model, backbone, img_size = 'matchingnet', 'conv64f', 128
+            model, backbone, img_size = 'matchingnet', 'conv64f', 64
         
         for shot in SHOTS:
             for samples in SAMPLES_LIST:
@@ -157,7 +157,7 @@ def main():
                     model=model,
                     shot=shot,
                     samples=samples,
-                    image_size=128,
+                    image_size=64,
                     dataset_path=args.dataset_path,
                     dataset_name=args.dataset_name,
                     project=args.project,
