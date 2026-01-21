@@ -67,8 +67,8 @@ def get_args():
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
-    parser.add_argument('--image_size', type=int, default=128,
-                        help='Input image size (default: 128)')
+    parser.add_argument('--image_size', type=int, default=64,
+                        help='Input image size (default: 64)')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
@@ -194,7 +194,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         
     # Calculate feature dimension dynamically
     with torch.no_grad():
-        dummy_input = torch.randn(1, 3, 64, 64).to(device)
+        dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
         dummy_feat = net.encoder(dummy_input)
         feat_dim = dummy_feat.view(1, -1).size(1)
         

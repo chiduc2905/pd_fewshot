@@ -2,96 +2,53 @@
 
 Paper: "Siamese Neural Networks for One-shot Image Recognition" (Koch et al., ICML-W 2015)
 
-Original Architecture (for Omniglot 105x105):
-- Conv1: 64 filters, 10x10, ReLU → MaxPool 2x2
-- Conv2: 128 filters, 7x7, ReLU → MaxPool 2x2
-- Conv3: 128 filters, 4x4, ReLU → MaxPool 2x2
-- Conv4: 256 filters, 4x4, ReLU (no pooling)
-- Flatten → FC 4096 with sigmoid
+Original Architecture:
+- 4 convolutional layers with increasing channels
 - L1 distance between embeddings
 - Weighted L1 → Sigmoid → binary similarity score
 
-Adapted for 128x128 RGB images while preserving paper architecture ratios.
+This implementation uses Conv64F_Encoder (same as other few-shot models) for:
+1. Fair comparison across all models
+2. Consistent parameter count (~113K for encoder)
+3. Works with any input size due to adaptive pooling
+
+The key Siamese concepts preserved:
+- Shared encoder (twin network)
+- L1 distance metric
+- Learned similarity function
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from net.encoders.base_encoder import Conv64F_Encoder
 
 
 class SiameseEncoder(nn.Module):
-    """Koch et al. 2015 paper-accurate Siamese encoder.
+    """Siamese encoder using Conv64F backbone for fair comparison.
     
-    Architecture follows Figure 3 of the original paper:
-    - 4 convolutional layers with increasing channels (64→128→128→256)
-    - ReLU activations (paper uses ReLU for conv layers)
-    - MaxPool after first 3 conv layers
-    - Flatten → FC → 4096 features with sigmoid
-    
-    Adapted for 128x128 RGB inputs (vs original 105x105 grayscale).
+    Uses the same Conv64F_Encoder as other few-shot models to ensure
+    fair benchmarking. Outputs 64-dim embeddings via GAP.
     """
     
-    def __init__(self, in_channels=3, feat_dim=4096):
+    def __init__(self, feat_dim=64):
         super(SiameseEncoder, self).__init__()
         
         self.feat_dim = feat_dim
         
-        # Paper architecture (adapted kernel sizes for 128x128 input):
-        # Original uses 10x10, 7x7, 4x4, 4x4 for 105x105
-        # We use 10x10, 7x7, 4x4, 4x4 which works for 128x128 too
+        # Use standard Conv64F encoder (same as ProtoNet, CovaMNet, etc.)
+        self.encoder = Conv64F_Encoder()
         
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=10, stride=1, padding=0),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        # 128 -> (128-10+1)=119 -> 119/2=59
+        # Global Average Pooling for 64-dim output
+        self.gap = nn.AdaptiveAvgPool2d(1)
         
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=7, stride=1, padding=0),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        # 59 -> (59-7+1)=53 -> 53/2=26
-        
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(128, 128, kernel_size=4, stride=1, padding=0),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        # 26 -> (26-4+1)=23 -> 23/2=11
-        
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=4, stride=1, padding=0),
-            nn.ReLU(inplace=True)
-            # No pooling after last conv (as per paper)
-        )
-        # 11 -> (11-4+1)=8
-        
-        # Adaptive pooling to handle varying spatial sizes
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
-        # Output: 256 * 4 * 4 = 4096
-        
-        # FC layer with sigmoid (as per paper)
-        self.fc = nn.Sequential(
-            nn.Linear(256 * 4 * 4, feat_dim),
-            nn.Sigmoid()  # Paper uses sigmoid in FC layer
-        )
-        
-        # Initialize weights (paper uses normal init with specific std)
-        self._init_weights()
-    
-    def _init_weights(self):
-        """Initialize weights as per paper recommendations."""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                # Paper: normal init with mean=0, std specific to layer
-                nn.init.normal_(m.weight, mean=0, std=0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0, std=0.2)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+        # Optional projection to different feature dimension
+        if feat_dim != 64:
+            self.projection = nn.Sequential(
+                nn.Linear(64, feat_dim),
+                nn.Sigmoid()
+            )
+        else:
+            self.projection = nn.Sigmoid()  # Paper uses sigmoid activation
     
     def forward(self, x):
         """Extract feature embedding.
@@ -101,44 +58,41 @@ class SiameseEncoder(nn.Module):
         Returns:
             (N, feat_dim) embeddings
         """
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        x = self.adaptive_pool(x)  # Ensure consistent 4x4 output
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.fc(x)
+        x = self.encoder(x)  # (N, 64, 16, 16)
+        x = self.gap(x)  # (N, 64, 1, 1)
+        x = x.view(x.size(0), -1)  # (N, 64)
+        x = self.projection(x)  # (N, feat_dim)
         return x
 
 
 class SiameseNet(nn.Module):
-    """Koch et al. 2015 paper-accurate Siamese Network.
+    """Koch et al. 2015 Siamese Network using Conv64F encoder.
     
     For few-shot episodic training:
     - For each query, computes pairwise similarity to each support sample
     - Average similarities per class to get class scores
     - Use CrossEntropyLoss on scores (adapted from binary verification)
     
-    Key differences from incorrect previous implementation:
-    - Proper encoder with 64→128→128→256 channels (not 4x64)
-    - Feature dimension 4096 (not 64)
-    - Sigmoid activations in FC (not ReLU everywhere)
+    Key features:
+    - Conv64F encoder (same as other few-shot models for fair comparison)
+    - Feature dimension 64 (matching other models)
+    - Sigmoid activations (paper-accurate)
     - L1 distance + weighted FC for similarity (paper-accurate)
     """
     
-    def __init__(self, feat_dim=4096, device='cuda'):
+    def __init__(self, feat_dim=64, device='cuda'):
         """Initialize Siamese Network.
         
         Args:
-            feat_dim: Feature dimension after encoder (paper uses 4096)
+            feat_dim: Feature dimension after encoder (default: 64)
             device: Device to use
         """
         super(SiameseNet, self).__init__()
         
         self.feat_dim = feat_dim
         
-        # Paper-accurate encoder
-        self.encoder = SiameseEncoder(in_channels=3, feat_dim=feat_dim)
+        # Use Conv64F encoder for fair comparison
+        self.encoder = SiameseEncoder(feat_dim=feat_dim)
         
         # Similarity network: weighted L1 distance + sigmoid
         # Paper: learns weights α for |h1 - h2| * α, then sigmoid
@@ -236,17 +190,17 @@ class SiameseNet(nn.Module):
 
 
 class SiameseNetFast(nn.Module):
-    """Optimized Siamese Network with paper-accurate architecture.
+    """Optimized Siamese Network using Conv64F encoder.
     
     Uses prototype-based comparison for efficiency while maintaining
-    the paper's encoder architecture.
+    the paper's core concepts (L1 distance, learned similarity).
     """
     
-    def __init__(self, feat_dim=4096, device='cuda'):
+    def __init__(self, feat_dim=64, device='cuda'):
         super(SiameseNetFast, self).__init__()
         
         self.feat_dim = feat_dim
-        self.encoder = SiameseEncoder(in_channels=3, feat_dim=feat_dim)
+        self.encoder = SiameseEncoder(feat_dim=feat_dim)
         
         # Similarity network
         self.similarity = nn.Sequential(
