@@ -8,9 +8,9 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run all benchmark experiments')
     parser.add_argument('--project', type=str, default='prpd', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_official',
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1',
                         help='Path to dataset')
-    parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
+    parser.add_argument('--dataset_name', type=str, default='knee_aug_split', help='Dataset name for logging')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     return parser.parse_args()
 
@@ -18,11 +18,12 @@ def get_args():
 # Configuration
 SHOTS = [1, 5]
 
-# Training samples: [min, small, medium, all] - matches mamba_glscnet
-SAMPLES_LIST = [30, 60, 150, None]
+# Training samples: [small, medium, large, all] - matches mamba_glscnet
+SAMPLES_LIST = [60, 160, 240, None]
 
-# Query samples (same for train/val/test)
-QUERY_NUM = 1
+# Query samples - split for train/val/test (same values, but passed separately)
+TRAIN_QUERY_NUM = 1
+EVAL_QUERY_NUM = 1
 
 # Base models (all use 64x64 for fair comparison)
 BASE_MODELS = ['covamnet', 'protonet', 'cosine', 'baseline', 'relationnet', 
@@ -44,8 +45,10 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
         sys.executable, 'main.py',
         '--model', model,
         '--shot_num', str(shot),
-        '--way_num', '3',
-        '--query_num', str(QUERY_NUM),
+        '--way_num', '4',
+        '--query_num_train', str(TRAIN_QUERY_NUM),
+        '--query_num_val', str(EVAL_QUERY_NUM),
+        '--query_num_test', str(EVAL_QUERY_NUM),
         '--image_size', str(image_size),
         '--mode', 'train',
         '--project', project,
@@ -55,6 +58,7 @@ def run_experiment(model, shot, samples, image_size, dataset_path, dataset_name,
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '5e-4',  # Matched with mamba_glscnet
+        '--grad_clip', '2.0',  # Matched with mamba_glscnet
         '--episode_num_train', '200',
         '--episode_num_val', '300',
         '--episode_num_test', '300',

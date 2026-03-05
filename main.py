@@ -45,12 +45,13 @@ def get_args():
     parser = argparse.ArgumentParser(description='PD Scalogram Few-shot Learning')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_official')
+    parser.add_argument('--dataset_path', type=str,
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')
-    parser.add_argument('--dataset_name', type=str, default='scalogram',
-                        help='Dataset name for checkpoint naming (e.g., original, augmented)')
+    parser.add_argument('--dataset_name', type=str, default='knee_aug_split',
+                        help='Dataset name for checkpoint naming')
     
     # Model
     parser.add_argument('--model', type=str, default='covamnet', 
@@ -66,13 +67,19 @@ def get_args():
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=1, help='Queries per class (same for train/val/test)')
+    parser.add_argument('--query_num', type=int, default=None,
+                        help='Legacy: set same queries per class for train/val/test')
+    parser.add_argument('--query_num_train', type=int, default=1, help='Queries per class for training episodes')
+    parser.add_argument('--query_num_val', type=int, default=1, help='Queries per class for validation episodes')
+    parser.add_argument('--query_num_test', type=int, default=1, help='Queries per class for test episodes')
+    parser.add_argument('--selected_classes', type=str, default=None,
+                        help='Comma-separated class indices to use (e.g. "0,1" for first 2 classes). If None, use all classes.')
     parser.add_argument('--image_size', type=int, default=64,
                         help='Input image size (default: 64)')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
-                        help='Total training samples (e.g. 30=10/class)')
+                        help='Total training samples (must be divisible by way_num, e.g. 60=15/class for 4-way)')
     parser.add_argument('--episode_num_train', type=int, default=200)
     parser.add_argument('--episode_num_val', type=int, default=300)
     parser.add_argument('--episode_num_test', type=int, default=300)
@@ -81,12 +88,9 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
     parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for CosineAnnealingLR')
-    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping max norm')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizer')
+    parser.add_argument('--grad_clip', type=float, default=2.0, help='Gradient clipping max norm')
+    parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight decay for optimizer')
     parser.add_argument('--seed', type=int, default=42)
-    # Device
-    # parser.add_argument('--device', type=str, 
-    #                     default='cuda' if torch.cuda.is_available() else 'cpu')
     
     # Loss
     parser.add_argument('--loss', type=str, default='contrastive', 
@@ -228,7 +232,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         # This ensures: (1) different episodes each epoch, (2) reproducible across experiments
         train_seed = args.seed + epoch  # Epoch 1 uses seed+1, Epoch 2 uses seed+2, etc.
         train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                                  args.way_num, args.shot_num, args.query_num, train_seed)
+                                  args.way_num, args.shot_num, args.query_num_train, train_seed)
         train_gen = torch.Generator()
         train_gen.manual_seed(train_seed)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -320,7 +324,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         # will evaluate on identical validation episodes for unbiased comparison
         val_seed = args.seed + epoch  # Same formula as training seed
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num, val_seed)
+                                args.way_num, args.shot_num, args.query_num_val, val_seed)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main, criterion_center)
@@ -461,7 +465,7 @@ def calculate_p_value(acc, baseline, n):
     return 2 * norm.sf(abs(z))
 
 
-def test_final(net, loader, args):
+def test_final(net, loader, args, test_X=None, test_y=None):
     """
     Final evaluation with detailed metrics.
     
@@ -470,18 +474,24 @@ def test_final(net, loader, args):
     - Precision, Recall, F1, p-value
     - Inference time per episode
     
-    Plots: Confusion Matrix, t-SNE
+    Plots: Confusion Matrix, t-SNE, UMAP
+    
+    Args:
+        test_X: Full test set for visualization (to avoid duplicate samples in t-SNE/UMAP)
+        test_y: Full test labels
     """
     import time
     
     num_episodes = len(loader)
     print(f"\n{'='*60}")
     print(f"Final Test: {args.dataset_name}/{args.model} | {args.shot_num}-shot")
-    print(f"{num_episodes} episodes × {args.way_num} classes × {args.query_num} query = {num_episodes * args.way_num * args.query_num} predictions")
+    print(f"{num_episodes} episodes × {args.way_num} classes × {args.query_num_test} query = {num_episodes * args.way_num * args.query_num_test} predictions")
     print('='*60)
     
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
     net.eval()
-    all_preds, all_targets, all_features = [], [], []
+    all_preds, all_targets = [], []
     
     # Track per-episode metrics
     episode_accuracies = []
@@ -495,9 +505,9 @@ def test_final(net, loader, args):
             B, NQ, C, H, W = query.shape
             
             # Use same shot_num as training
-            support = support.view(B, args.way_num, args.shot_num, C, H, W).to(args.device)
-            query = query.to(args.device)
-            targets = q_labels.view(-1).to(args.device)
+            support = support.view(B, args.way_num, args.shot_num, C, H, W).to(device)
+            query = query.to(device)
+            targets = q_labels.view(-1).to(device)
             
             scores = net(query, support)
             preds = scores.argmax(dim=1)
@@ -513,20 +523,6 @@ def test_final(net, loader, args):
             
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
-            
-            # Extract features for t-SNE (Fixed embedding space: Encoder -> GAP -> Normalize)
-            q_flat = query.view(-1, C, H, W)
-            if hasattr(net, 'encoder'):
-                feat = net.encoder(q_flat)
-                # Handle both 4D feature maps and 2D flattened features
-                if feat.dim() == 4:  # (B, C, H, W) - default encoder
-                    feat = nn.functional.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
-                elif feat.dim() == 2:  # (B, feat_dim) - paper encoder, already flattened
-                    pass  # Already flattened
-                
-                # IMPORTANT: Normalize features for tighter clustering (cosine distance)
-                feat = F.normalize(feat, p=2, dim=1)
-                all_features.append(feat.cpu().numpy())
     
     # Convert to numpy arrays
     all_preds = np.array(all_preds)
@@ -625,24 +621,72 @@ def test_final(net, loader, args):
     # Confusion Matrix
     cm_base = os.path.join(args.path_results, 
                            f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
-    wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
+    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base, class_names=args.class_names)
+    if os.path.exists(f"{cm_base}_2col.png"):
+        wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
     
-    # t-SNE
-    if all_features:
-        features = np.vstack(all_features)
-        tsne_base = os.path.join(args.path_results, 
-                                 f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_tsne(features, all_targets, args.way_num, tsne_base)
-        if os.path.exists(f"{tsne_base}_tsne.png"):
-            wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_tsne.png")})
+    # ====================================================================
+    # t-SNE/UMAP: Use UNIQUE test samples (not episode duplicates!)
+    # ====================================================================
+    # Problem with old approach:
+    # - 300 episodes × queries = many samples
+    # - But test set only has a finite number of unique samples per class
+    # - Each sample appears multiple times → creates artificial "lumps" in t-SNE
+    #
+    # Solution: Extract features from full test set once (unique samples)
+    # ====================================================================
+    
+    if test_X is not None and test_y is not None and hasattr(net, 'encoder'):
+        print(f"\n{'='*60}")
+        print(f"Extracting features for t-SNE/UMAP from UNIQUE test samples")
+        print(f"Test set size: {len(test_X)} samples ({len(test_X)//args.way_num}/class)")
+        print('='*60)
         
-        # UMAP
-        umap_base = os.path.join(args.path_results, 
-                                 f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_umap(features, all_targets, args.way_num, umap_base)
-        if os.path.exists(f"{umap_base}_umap.png"):
-            wandb.log({"umap_plot": wandb.Image(f"{umap_base}_umap.png")})
+        with torch.no_grad():
+            # Extract features from unique test samples
+            test_X_device = test_X.to(device)
+            test_y_np = test_y.cpu().numpy()
+            
+            # Batch processing for memory efficiency
+            batch_size = 32
+            all_features = []
+            
+            for i in range(0, len(test_X), batch_size):
+                batch_X = test_X_device[i:i+batch_size]
+                
+                # Extract backbone features
+                feat = net.encoder(batch_X)
+                # Handle both 4D feature maps and 2D flattened features
+                if feat.dim() == 4:  # (B, C, H, W) - default encoder
+                    feat = nn.functional.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
+                elif feat.dim() == 2:  # (B, feat_dim) - paper encoder, already flattened
+                    pass  # Already flattened
+                
+                # L2 normalize for better clustering visualization
+                feat = F.normalize(feat, p=2, dim=1)
+                all_features.append(feat.cpu().numpy())
+            
+            features = np.vstack(all_features)
+            
+            print(f"Extracted {len(features)} unique features (shape: {features.shape})")
+            
+            # 1. t-SNE
+            tsne_path = os.path.join(args.path_results, 
+                                         f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+            plot_tsne(features, test_y_np, args.way_num, tsne_path, class_names=args.class_names)
+            
+            if os.path.exists(f"{tsne_path}_tsne.png"):
+                wandb.log({"tsne_plot": wandb.Image(f"{tsne_path}_tsne.png")})
+        
+            # 2. UMAP
+            umap_path = os.path.join(args.path_results, 
+                                     f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+            plot_umap(features, test_y_np, args.way_num, umap_path, class_names=args.class_names)
+            
+            if os.path.exists(f"{umap_path}_umap.png"):
+                wandb.log({"umap_plot": wandb.Image(f"{umap_path}_umap.png")})
+    else:
+        print("\n⚠️  Warning: test_X/test_y not provided or no encoder, skipping t-SNE/UMAP")
     
     print(f"\nResults logged to WandB and plots saved to {args.path_results}")
     
@@ -763,6 +807,12 @@ def main():
     if args.num_epochs is None:
         args.num_epochs = 100 if args.shot_num == 1 else 70
 
+    # Legacy compatibility: one query_num for all splits
+    if args.query_num is not None:
+        args.query_num_train = args.query_num
+        args.query_num_val = args.query_num
+        args.query_num_test = args.query_num
+
     # Auto-detect device if not specified (handled by argparse default)
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -786,6 +836,7 @@ def main():
     
     print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
     print(f"Encoder: {encoder_info}")
+    print(f"Dataset: {args.dataset_path}")
     
     # Initialize WandB with a descriptive run name
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
@@ -917,8 +968,83 @@ def main():
     val_X, val_y = to_tensor(dataset.X_val, dataset.y_val)
     test_X, test_y = to_tensor(dataset.X_test, dataset.y_test)
     
+    # ============================================================
+    # Resolve class names from dataset metadata (canonical 4-class split)
+    # ============================================================
+    pretty_map = {
+        'surface': 'Surface',
+        'internal': 'Internal',
+        'corona': 'Corona',
+        'notpd': 'NotPD',
+        'nopd': 'NotPD',
+    }
+    dataset_classes = list(getattr(dataset, 'classes', []))
+    if dataset_classes:
+        ALL_CLASS_NAMES = [pretty_map.get(c.lower(), c) for c in dataset_classes]
+    else:
+        n_classes = int(len(torch.unique(train_y)))
+        ALL_CLASS_NAMES = [f'Class{i}' for i in range(n_classes)]
+    
+    selected = None
+    if args.selected_classes:
+        selected = [int(c.strip()) for c in args.selected_classes.split(',')]
+        if any(c < 0 or c >= len(ALL_CLASS_NAMES) for c in selected):
+            raise ValueError(f"selected_classes={selected} out of range for classes={ALL_CLASS_NAMES}")
+        print(f"\n⚠️ Using only selected classes: {selected}")
+        
+        # Store actual class names for this run (for t-SNE, confusion matrix)
+        args.class_names = [ALL_CLASS_NAMES[i] for i in selected]
+        print(f"   Class names: {args.class_names}")
+        
+        # Update way_num to match selected classes
+        args.way_num = len(selected)
+        print(f"   way_num updated to {args.way_num}")
+        
+        def filter_classes(X, y, selected_classes):
+            """Filter data to only include selected classes and remap labels."""
+            mask = torch.zeros(len(y), dtype=torch.bool)
+            for c in selected_classes:
+                mask |= (y == c)
+            
+            X_filtered = X[mask]
+            y_filtered = y[mask]
+            
+            # Remap labels to 0, 1, 2, ... (contiguous)
+            label_map = {old: new for new, old in enumerate(selected_classes)}
+            y_remapped = torch.tensor([label_map[yi.item()] for yi in y_filtered])
+
+            return X_filtered, y_remapped
+        
+        train_X, train_y = filter_classes(train_X, train_y, selected)
+        val_X, val_y = filter_classes(val_X, val_y, selected)
+        test_X, test_y = filter_classes(test_X, test_y, selected)
+        
+        print(f"   Train: {len(train_X)}, Val: {len(val_X)}, Test: {len(test_X)}")
+    else:
+        # Use all classes
+        args.class_names = ALL_CLASS_NAMES
+        if args.way_num != len(args.class_names):
+            print(f"ℹ️ way_num={args.way_num} does not match dataset classes={len(args.class_names)}. "
+                  f"Using way_num={len(args.class_names)}.")
+            args.way_num = len(args.class_names)
+
+    wandb.config.update(
+        {
+            "way_num": args.way_num,
+            "query_num_train": args.query_num_train,
+            "query_num_val": args.query_num_val,
+            "query_num_test": args.query_num_test,
+        },
+        allow_val_change=True,
+    )
+    
     # Limit training samples if specified
     if args.training_samples:
+        if args.training_samples % args.way_num != 0:
+            raise ValueError(
+                f"training_samples ({args.training_samples}) must be divisible by way_num ({args.way_num}) "
+                "for balanced class sampling."
+            )
         per_class = args.training_samples // args.way_num
         X_list, y_list = [], []
         
@@ -941,7 +1067,7 @@ def main():
     
     # Test: Fixed seed ensures identical episodes across all runs  
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
-                             args.way_num, args.shot_num, args.query_num, args.seed)
+                             args.way_num, args.shot_num, args.query_num_test, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
     # Initialize Model
@@ -958,12 +1084,12 @@ def main():
         path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
         print(f'Testing with BEST checkpoint: {path}')
         net.load_state_dict(torch.load(path))
-        test_final(net, test_loader, args)
+        test_final(net, test_loader, args, test_X=test_X, test_y=test_y)
         
     else:  # Test only
         if args.weights:
             net.load_state_dict(torch.load(args.weights))
-            test_final(net, test_loader, args)
+            test_final(net, test_loader, args, test_X=test_X, test_y=test_y)
         else:
             print("Error: Please specify --weights for test mode")
 
