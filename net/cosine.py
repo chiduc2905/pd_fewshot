@@ -2,19 +2,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from net.encoders.base_encoder import Conv64F_Encoder
+from net.encoders.protonet_encoder import Conv64F_Paper_Encoder
 
 
 class CosineNet(nn.Module):
     """Few-shot classifier using cosine similarity metric."""
     
-    def __init__(self, device='cuda'):
+    def __init__(self, image_size=64, device='cuda'):
         super(CosineNet, self).__init__()
-        self.encoder = Conv64F_Encoder()
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(64, 64) 
-        
-        # Uses PyTorch default init
+        self.encoder = Conv64F_Paper_Encoder(image_size=image_size)
         self.to(device)
 
     def forward(self, query, support):
@@ -36,14 +32,6 @@ class CosineNet(nn.Module):
         # Encode
         q_feat = self.encoder(query_flat)
         s_feat = self.encoder(support_flat)
-        
-        # Pool and Flatten
-        q_feat = self.avg_pool(q_feat).view(q_feat.size(0), -1)
-        s_feat = self.avg_pool(s_feat).view(s_feat.size(0), -1)
-        
-        # Apply FC layer (Embedding)
-        q_feat = self.fc(q_feat)
-        s_feat = self.fc(s_feat)
         
         # Reshape support
         s_feat = s_feat.view(B, Way, Shot, -1)

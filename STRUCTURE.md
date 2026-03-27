@@ -16,11 +16,13 @@ pd_fewshot/
 │   ├── relationnet.py          # Relation Networks
 │   ├── covamnet.py             # Covariance Metric Networks
 │   ├── dn4.py                  # Dense Nearest-Neighbor (DN4)
-│   ├── feat.py                 # FEAT (Transformer-based)
-│   ├── deepemd.py              # DeepEMD (Earth Mover's Distance)
-│   ├── siamesenet.py           # Siamese Networks
+│   ├── feat.py                 # FEAT (ResNet12 + Transformer)
+│   ├── deepemd.py              # DeepEMD (ResNet12 + EMD)
+│   ├── can.py                  # CAN (Cross-Attention Network)
+│   ├── frn.py                  # FRN (Feature reconstruction)
+│   ├── deepbdc.py              # DeepBDC (2nd-order pooling)
+│   ├── maml.py                 # MAML
 │   ├── cosine.py               # Cosine Classifier
-│   ├── cosine_classifier.py    # Baseline++ (learnable temperature)
 │   └── encoders/               # CNN backbone implementations
 │       ├── base_encoder.py     # Conv64F encoder
 │       ├── resnet12_encoder.py # ResNet12 encoder
@@ -47,10 +49,12 @@ pd_fewshot/
 | **RelationNet** | Concat | Learned Relation Score (CNN) |
 | **CovaMNet** | CovaBlock | Covariance Metric |
 | **DN4** | None | Local Descriptor k-NN |
-| **FEAT** | Transformer | Adapted Euclidean Distance |
-| **DeepEMD** | Set Matching | Earth Mover's Distance |
-| **SiameseNet** | Concat | Learned Distance (MLP) |
-| **Baseline++** | AvgPool | Scaled Cosine Similarity |
+| **FEAT** | ResNet12 + Transformer | Adapted Euclidean Distance |
+| **DeepEMD** | ResNet12 + Set Matching | Earth Mover's Distance |
+| **CAN** | ResNet12 + Cross-Attn | Cross-Attention Similarity |
+| **FRN** | ResNet12 + Reconstruction | Reconstruction Distance |
+| **DeepBDC** | ResNet12 + BDC Pooling | Second-Order Prototype Distance |
+| **MAML** | Inner-loop adaptation | Task-adapted linear classifier |
 
 ## Loss Functions
 

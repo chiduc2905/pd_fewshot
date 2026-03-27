@@ -4,14 +4,14 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A comprehensive framework for **Few-Shot Learning** applied to Partial Discharge (PD) pattern classification in high-voltage electrical systems. This project implements 10+ state-of-the-art meta-learning algorithms to classify PD signals using only 1-10 training samples per class.
+A comprehensive framework for **Few-Shot Learning** applied to Partial Discharge (PD) pattern classification in high-voltage electrical systems. This project implements a unified benchmark suite spanning classical few-shot baselines, local-descriptor methods, and recent A*-style meta-learning models.
 
 ## 🎯 Highlights
 
-- **10+ Few-Shot Learning algorithms**: ProtoNet, MatchingNet, RelationNet, CovaMNet, DN4, FEAT, DeepEMD, SiameseNet, Baseline++
+- **12 benchmark models**: ProtoNet, MatchingNet, RelationNet, CovaMNet, DN4, FEAT, DeepEMD, MAML, CAN, FRN, DeepBDC, Cosine
 - **98.67% accuracy** with only 1-shot learning (1 sample per class)
 - **Episodic meta-learning** framework with N-way K-shot configuration
-- **Multiple CNN encoders**: Conv64F, ResNet12
+- **Paper-aligned backbones**: Conv4, Conv64F, Conv4-32, ResNet12
 - **Signal-to-image pipeline**: CWT scalogram transformation
 - **Comprehensive experiment automation** with WandB integration
 
@@ -40,10 +40,12 @@ pd_fewshot/
 │   ├── relationnet.py      # Relation Networks
 │   ├── covamnet.py         # Covariance Metric Networks
 │   ├── dn4.py              # Dense Nearest-Neighbor (DN4)
-│   ├── feat.py             # FEAT (Transformer-based)
-│   ├── deepemd.py          # DeepEMD
-│   ├── siamesenet.py       # Siamese Networks
-│   ├── cosine_classifier.py # Baseline++
+│   ├── feat.py             # FEAT (ResNet12)
+│   ├── deepemd.py          # DeepEMD (ResNet12)
+│   ├── can.py              # Cross Attention Network
+│   ├── frn.py              # Feature Map Reconstruction Networks
+│   ├── deepbdc.py          # DeepBDC
+│   ├── maml.py             # MAML
 │   └── encoders/           # CNN backbones
 │       ├── base_encoder.py
 │       ├── resnet12_encoder.py
@@ -88,11 +90,10 @@ python main.py --model relationnet --shot_num 1 --mode test --weights checkpoint
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model` | covamnet | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, siamese, baseline, cosine |
+| `--model` | covamnet | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, can, frn, deepbdc, maml, cosine, mann |
 | `--way_num` | 3 | Number of classes per episode |
 | `--shot_num` | 1 | Support samples per class |
 | `--query_num` | 1 | Query samples per class |
-| `--backbone` | conv64f | Encoder: conv64f, resnet12 |
 | `--image_size` | 128 | Input image size (default: 128) |
 | `--training_samples` | all | Limit training samples |
 | `--loss` | contrastive | Loss: contrastive, triplet |
@@ -130,14 +131,21 @@ Input images should be RGB (default: 128×128).
 - **DN4** (Li et al., CVPR 2019) - Dense k-NN with local descriptors
 
 ### Transformer-based Methods
-- **FEAT** (Ye et al., CVPR 2020) - Set-to-set feature adaptation
+- **FEAT** (Ye et al., CVPR 2020) - Set-to-set feature adaptation with ResNet12
+
+### Cross-Attention / Reconstruction Methods
+- **CAN** (Hou et al., NeurIPS 2019) - Class-specific cross-attention matching
+- **FRN** (Wertheimer et al., CVPR 2021) - Feature-map reconstruction metric
+
+### Second-Order Methods
+- **DeepBDC** (Xie et al., CVPR 2022) - Brownian distance covariance pooling
 
 ### Optimal Transport Methods
-- **DeepEMD** (Zhang et al., CVPR 2020) - Earth Mover's Distance
+- **DeepEMD** (Zhang et al., CVPR 2020) - Earth Mover's Distance with ResNet12 local descriptors
 
-### Pairwise Methods
-- **SiameseNet** (Koch et al., ICML 2015) - Learned pairwise similarity
-- **Baseline++** (Chen et al., ICLR 2019) - Cosine with learnable temperature
+### Optimization-based Methods
+- **MAML** (Finn et al., ICML 2017) - Gradient-based task adaptation
+  Default is now paper-style second-order; use `--maml_first_order` only when you explicitly want the approximation.
 
 ## 📈 Experiment Tracking
 

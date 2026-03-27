@@ -1,139 +1,194 @@
-"""ResNet-12 encoder for few-shot learning.
+"""Official-style ResNet-12 encoder variants for few-shot benchmarks."""
 
-Reference: TADAM, Meta-Baseline, and other few-shot learning papers.
-Standard architecture for miniImageNet/tieredImageNet benchmarks.
-"""
+import math
+
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def conv3x3(in_planes, out_planes):
     """3x3 convolution with padding."""
-    return nn.Conv2d(in_planes, out_planes, 3, padding=1, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False)
 
 
-def conv1x1(in_planes, out_planes):
-    """1x1 convolution for downsampling."""
-    return nn.Conv2d(in_planes, out_planes, 1, bias=False)
+def _pool_out_size(size, stride):
+    if stride <= 1:
+        return size
+    return ((size - stride) // stride) + 1
 
 
-class ResBlock(nn.Module):
-    """
-    Residual block with 3 convolutional layers.
-    
-    Structure: Conv -> BN -> LeakyReLU -> Conv -> BN -> LeakyReLU -> Conv -> BN
-               + Skip connection (1x1 conv if dimensions differ)
-               -> LeakyReLU -> MaxPool
-    """
-    
-    def __init__(self, inplanes, planes):
-        super(ResBlock, self).__init__()
-        
-        self.relu = nn.LeakyReLU(0.1, inplace=True)
-        
-        # 3 convolutional layers
+class DropBlock(nn.Module):
+    """Device-safe DropBlock used by few-shot ResNet-12 backbones."""
+
+    def __init__(self, block_size):
+        super().__init__()
+        self.block_size = int(block_size)
+
+    def forward(self, x, gamma):
+        if (not self.training) or gamma <= 0:
+            return x
+
+        batch_size, channels, height, width = x.shape
+        if height < self.block_size or width < self.block_size:
+            return x
+
+        sample_h = height - self.block_size + 1
+        sample_w = width - self.block_size + 1
+        sampling_mask = torch.rand(
+            batch_size,
+            channels,
+            sample_h,
+            sample_w,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        sampling_mask = (sampling_mask < gamma).to(x.dtype)
+
+        left_pad = (self.block_size - 1) // 2
+        right_pad = self.block_size // 2
+        block_mask = F.pad(sampling_mask, (left_pad, right_pad, left_pad, right_pad))
+        block_mask = F.max_pool2d(block_mask, kernel_size=self.block_size, stride=1, padding=self.block_size // 2)
+        keep_mask = 1.0 - block_mask
+
+        keep_count = keep_mask.sum().clamp_min(1.0)
+        return keep_mask * x * (keep_mask.numel() / keep_count)
+
+
+class BasicBlock(nn.Module):
+    """ResNet-12 basic block used in FEAT/FRN/DeepEMD-style backbones."""
+
+    expansion = 1
+
+    def __init__(
+        self,
+        inplanes,
+        planes,
+        stride=1,
+        downsample=None,
+        drop_rate=0.0,
+        drop_block=False,
+        block_size=5,
+        use_pool=True,
+    ):
+        super().__init__()
         self.conv1 = conv3x3(inplanes, planes)
         self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.LeakyReLU(0.1, inplace=True)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
         self.conv3 = conv3x3(planes, planes)
         self.bn3 = nn.BatchNorm2d(planes)
-        
-        # Skip connection with 1x1 conv for dimension matching
-        self.downsample = nn.Sequential(
-            conv1x1(inplanes, planes),
-            nn.BatchNorm2d(planes),
-        )
-        
-        # Spatial downsampling
-        self.maxpool = nn.MaxPool2d(2)
-    
+        self.downsample = downsample
+        self.pool = nn.MaxPool2d(kernel_size=stride, stride=stride) if use_pool and stride > 1 else nn.Identity()
+        self.drop_rate = float(drop_rate)
+        self.drop_block = bool(drop_block)
+        self.block_size = int(block_size)
+        self.num_batches_tracked = 0
+        self.dropblock = DropBlock(block_size=self.block_size)
+
     def forward(self, x):
-        # Main path
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-        
-        out = self.conv3(out)
-        out = self.bn3(out)
-        
-        # Skip connection
-        identity = self.downsample(x)
-        out += identity
-        out = self.relu(out)
-        
-        # Spatial downsampling
-        out = self.maxpool(out)
-        
+        self.num_batches_tracked += 1
+
+        residual = x
+
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out = self.relu(out + residual)
+        out = self.pool(out)
+
+        if self.drop_rate > 0:
+            if self.drop_block:
+                feat_size = out.size(-1)
+                keep_rate = max(
+                    1.0 - self.drop_rate / (20 * 2000) * self.num_batches_tracked,
+                    1.0 - self.drop_rate,
+                )
+                gamma = (1.0 - keep_rate) / (self.block_size ** 2)
+                gamma *= (feat_size ** 2) / max(1, (feat_size - self.block_size + 1) ** 2)
+                out = self.dropblock(out, gamma=gamma)
+            else:
+                out = F.dropout(out, p=self.drop_rate, training=self.training, inplace=True)
+
         return out
 
 
 class ResNet12Encoder(nn.Module):
-    """
-    ResNet-12 encoder for few-shot learning.
-    
-    Architecture:
-    - 4 residual blocks (3 conv layers each = 12 conv layers total)
-    - Channels: [64, 128, 256, 512]
-    - LeakyReLU(0.1) activation
-    - MaxPool2d(2) after each block
-    - Global Average Pooling at the end
-    
-    Input: (B, 3, 64, 64)
-    Output: (B, 512) features
-    
-    Used by: MatchingNet (with --backbone resnet12)
-    """
-    
-    def __init__(self, channels=None):
-        """
-        Args:
-            channels: List of 4 channel sizes. Default: [64, 128, 256, 512]
-        """
-        super(ResNet12Encoder, self).__init__()
-        
-        if channels is None:
-            channels = [64, 128, 256, 512]
-        
+    """Flexible official-style ResNet-12 encoder for different benchmark families."""
+
+    def __init__(
+        self,
+        image_size=64,
+        pool_output=True,
+        variant="fewshot",
+        drop_rate=0.0,
+        dropblock_size=5,
+    ):
+        super().__init__()
+        self.pool_output = bool(pool_output)
+        self.variant = variant
         self.inplanes = 3
-        
-        # 4 residual blocks
-        self.layer1 = self._make_layer(channels[0])
-        self.layer2 = self._make_layer(channels[1])
-        self.layer3 = self._make_layer(channels[2])
-        self.layer4 = self._make_layer(channels[3])
-        
-        self.out_dim = channels[3]
-        
-        # Weight initialization (temporarily disabled)
-        # for m in self.modules():
-        #     if isinstance(m, nn.Conv2d):
-        #         nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
-        #     elif isinstance(m, nn.BatchNorm2d):
-        #         nn.init.constant_(m.weight, 1)
-        #         nn.init.constant_(m.bias, 0)
-    
-    def _make_layer(self, planes):
-        block = ResBlock(self.inplanes, planes)
+
+        if variant == "deepbdc":
+            stage_strides = [2, 2, 2, 1]
+        else:
+            stage_strides = [2, 2, 2, 2]
+
+        self.layer1 = self._make_layer(64, stride=stage_strides[0], drop_rate=drop_rate)
+        self.layer2 = self._make_layer(160, stride=stage_strides[1], drop_rate=drop_rate)
+        self.layer3 = self._make_layer(320, stride=stage_strides[2], drop_rate=drop_rate, drop_block=True, block_size=dropblock_size)
+        self.layer4 = self._make_layer(640, stride=stage_strides[3], drop_rate=drop_rate, drop_block=True, block_size=dropblock_size)
+        self.out_channels = 640
+        self.out_dim = 640
+
+        spatial = int(image_size)
+        for stride in stage_strides:
+            spatial = _pool_out_size(spatial, stride)
+        self.out_spatial = max(1, spatial)
+        self.feat_dim = [self.out_channels, self.out_spatial, self.out_spatial]
+
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="leaky_relu")
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
+    def _make_layer(self, planes, stride=1, drop_rate=0.0, drop_block=False, block_size=5):
+        downsample = None
+        if stride != 1 or self.inplanes != planes:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes, kernel_size=1, stride=1, bias=False),
+                nn.BatchNorm2d(planes),
+            )
+
+        layer = BasicBlock(
+            self.inplanes,
+            planes,
+            stride=stride,
+            downsample=downsample,
+            drop_rate=drop_rate,
+            drop_block=drop_block,
+            block_size=block_size,
+            use_pool=True,
+        )
         self.inplanes = planes
-        return block
-    
-    def forward(self, x):
-        """
-        Args:
-            x: (B, 3, 64, 64) input images
-        Returns:
-            (B, 512) features after global average pooling
-        """
-        x = self.layer1(x)  # 64x64 -> 32x32
-        x = self.layer2(x)  # 32x32 -> 16x16
-        x = self.layer3(x)  # 16x16 -> 8x8
-        x = self.layer4(x)  # 8x8 -> 4x4
-        
-        # Global Average Pooling
-        x = x.view(x.size(0), x.size(1), -1).mean(dim=2)  # (B, 512)
-        
+        return nn.Sequential(layer)
+
+    def forward_features(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
         return x
+
+    def forward(self, x):
+        features = self.forward_features(x)
+        if not self.pool_output:
+            return features
+        return F.adaptive_avg_pool2d(features, 1).view(features.size(0), -1)

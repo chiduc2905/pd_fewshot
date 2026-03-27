@@ -10,7 +10,7 @@ from net.utils import init_weights
 class CovarianceNet(nn.Module):
     """Few-shot classifier using covariance-based similarity."""
     
-    def __init__(self, norm_layer=functools.partial(nn.BatchNorm2d, affine=True), num_classes=5, device='cuda', input_size=128):
+    def __init__(self, norm_layer=functools.partial(nn.BatchNorm2d, affine=True), device='cuda'):
         super(CovarianceNet, self).__init__()
 
         if type(norm_layer) == str:

@@ -64,7 +64,7 @@ class DN4(nn.Module):
         
         # s_feat: (B*Way*Shot, D, h, w) -> (B, Way, Shot, D, h*w) -> (B, Way, Shot*h*w, D)
         s_local = s_feat.view(B, Way, Shot, D, -1).permute(0, 1, 2, 4, 3)  # (B, Way, Shot, h*w, D)
-        s_local = s_local.view(B, Way, -1, D)  # (B, Way, Shot*h*w, D)
+        s_local = s_local.reshape(B, Way, -1, D)  # (B, Way, Shot*h*w, D)
         
         # L2 normalize descriptors for cosine similarity
         q_local = F.normalize(q_local, p=2, dim=-1)
@@ -87,7 +87,8 @@ class DN4(nn.Module):
                     
                     # For each query descriptor, find top-k similarities
                     # Then sum over all query descriptors
-                    topk_sim, _ = sim.topk(self.k, dim=1)  # (h*w, k)
+                    k_actual = min(self.k, sim.size(1))
+                    topk_sim, _ = sim.topk(k_actual, dim=1)  # (h*w, k)
                     class_score = topk_sim.sum()  # Aggregate all local matches
                     class_scores.append(class_score)
                 

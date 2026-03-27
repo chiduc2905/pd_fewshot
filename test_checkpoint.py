@@ -24,7 +24,8 @@ from torch.utils.data import DataLoader
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import seed_func
-from main import get_model, test_final
+from main import get_model, prepare_dataset_conditioned_model, test_final
+from net.model_factory import get_model_choices
 import wandb
 
 
@@ -39,15 +40,13 @@ def get_args():
     
     # Model specification (used to infer checkpoint if not specified)
     parser.add_argument('--model', type=str, default=None,
-                        choices=['cosine', 'baseline', 'protonet', 'covamnet', 'matchingnet', 
-                                 'relationnet', 'siamese', 'dn4', 'feat', 'deepemd'])
+                        choices=get_model_choices())
+    parser.add_argument('--fewshot_backbone', type=str, default='default', choices=['default', 'resnet12', 'conv64f'])
     parser.add_argument('--samples', type=int, default=None,
                         help='Training samples (18, 60, or None for all)')
     parser.add_argument('--shot', type=int, default=1, choices=[1, 5])
     parser.add_argument('--dataset', type=str, default='scalogram',
                         help='Dataset name for new checkpoint format (e.g., original, augmented)')
-    parser.add_argument('--backbone', type=str, default='conv64f',
-                        choices=['conv64f', 'resnet12'])
     
     # Test all checkpoints
     parser.add_argument('--all', action='store_true',
@@ -73,17 +72,17 @@ def parse_checkpoint_name(filename):
     """
     Parse checkpoint filename to extract dataset, model, samples, and shot.
     
-    Expected format: {dataset}_{model}_{samples}_{shot}shot_best.pth
+    Expected format: {dataset}_{model}_{samples}_{shot}shot_final.pth
     Examples:
-        - original_covamnet_18samples_1shot_best.pth
-        - augmented_matchingnet_all_5shot_best.pth
+        - original_covamnet_18samples_1shot_final.pth
+        - augmented_matchingnet_all_5shot_final.pth
     
     Also supports legacy format: {model}_{samples}_{shot}shot_best.pth
     """
     basename = os.path.basename(filename)
     
     # New pattern: dataset_model_samples_shotshot_best.pth
-    pattern_new = r'^(\w+)_(\w+)_(\d+samples|all)_(\d+)shot_best\.pth$'
+    pattern_new = r'^(\w+)_(\w+)_(\d+samples|all)_(\d+)shot_final\.pth$'
     match = re.match(pattern_new, basename)
     
     if match:
@@ -100,7 +99,7 @@ def parse_checkpoint_name(filename):
         return {'dataset': dataset, 'model': model, 'samples': samples, 'shot': shot}
     
     # Legacy pattern: model_samples_shotshot_best.pth
-    pattern_legacy = r'^(\w+)_(\d+samples|all)_(\d+)shot_best\.pth$'
+    pattern_legacy = r'^(\w+)_(\d+samples|all)_(\d+)shot_final\.pth$'
     match = re.match(pattern_legacy, basename)
     
     if match:
@@ -142,7 +141,6 @@ def test_single_checkpoint(checkpoint_path, args):
         samples = args.samples
         shot_num = args.shot
     
-    # All backbones now support 128x128
     image_size = args.image_size if hasattr(args, 'image_size') and args.image_size else 128
     
     # Create args for model
@@ -151,18 +149,16 @@ def test_single_checkpoint(checkpoint_path, args):
     
     model_args = ModelArgs()
     model_args.model = model_name
-    model_args.backbone = args.backbone
-    model_args.use_base_encoder = False
     model_args.way_num = args.way_num
     model_args.shot_num = shot_num
     model_args.query_num = args.query_num
     model_args.image_size = image_size
     model_args.path_results = args.path_results
     model_args.training_samples = samples
-    model_args.loss = 'contrastive'
-    model_args.lambda_center = 0
     model_args.dataset_name = dataset_name
     model_args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model_args.maml_second_order = True
+    model_args.fewshot_backbone = args.fewshot_backbone
     
     # Initialize WandB
     samples_str = f"{samples}samples" if samples else "all"
@@ -176,7 +172,6 @@ def test_single_checkpoint(checkpoint_path, args):
             'model': model_name,
             'shot_num': shot_num,
             'training_samples': samples,
-            'backbone': args.backbone,
             'checkpoint': checkpoint_path,
             'mode': 'test'
         },
@@ -206,7 +201,8 @@ def test_single_checkpoint(checkpoint_path, args):
     print(f"Loading checkpoint: {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, map_location=model_args.device)
     net.load_state_dict(state_dict)
-    
+    prepare_dataset_conditioned_model(net, train_X=torch.from_numpy(dataset.X_train.astype(np.float32)), train_y=torch.from_numpy(dataset.y_train).long(), args=model_args)
+
     # Run test
     test_final(net, test_loader, model_args)
     
@@ -221,7 +217,7 @@ def main():
     
     if args.all:
         # Test all checkpoints
-        pattern = os.path.join(args.checkpoints_dir, '*_best.pth')
+        pattern = os.path.join(args.checkpoints_dir, '*_final.pth')
         checkpoints = sorted(glob.glob(pattern))
         
         if not checkpoints:
@@ -249,12 +245,12 @@ def main():
     elif args.model:
         # Build checkpoint path from model/samples/shot/dataset
         samples_str = f"{args.samples}samples" if args.samples else "all"
-        checkpoint_name = f"{args.dataset}_{args.model}_{samples_str}_{args.shot}shot_best.pth"
+        checkpoint_name = f"{args.dataset}_{args.model}_{samples_str}_{args.shot}shot_final.pth"
         checkpoint_path = os.path.join(args.checkpoints_dir, checkpoint_name)
         
         if not os.path.exists(checkpoint_path):
             # Try legacy format without dataset
-            checkpoint_name_legacy = f"{args.model}_{samples_str}_{args.shot}shot_best.pth"
+            checkpoint_name_legacy = f"{args.model}_{samples_str}_{args.shot}shot_final.pth"
             checkpoint_path_legacy = os.path.join(args.checkpoints_dir, checkpoint_name_legacy)
             if os.path.exists(checkpoint_path_legacy):
                 checkpoint_path = checkpoint_path_legacy

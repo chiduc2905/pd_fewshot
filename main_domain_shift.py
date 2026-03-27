@@ -23,8 +23,51 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
-import torchvision.transforms as transforms
 import wandb
+
+try:
+    import torchvision.transforms as transforms
+except ImportError:
+    class _Compose:
+        def __init__(self, transforms_list):
+            self.transforms_list = transforms_list
+
+        def __call__(self, image):
+            out = image
+            for transform in self.transforms_list:
+                out = transform(out)
+            return out
+
+    class _Resize:
+        def __init__(self, size):
+            self.size = size
+
+        def __call__(self, image):
+            return image.resize(self.size, Image.BILINEAR)
+
+    class _ToTensor:
+        def __call__(self, image):
+            array = np.asarray(image, dtype=np.float32) / 255.0
+            if array.ndim == 2:
+                array = array[:, :, None]
+            array = np.transpose(array, (2, 0, 1))
+            return torch.from_numpy(array)
+
+    class _Normalize:
+        def __init__(self, mean, std):
+            self.mean = torch.tensor(mean, dtype=torch.float32).view(-1, 1, 1)
+            self.std = torch.tensor(std, dtype=torch.float32).view(-1, 1, 1)
+
+        def __call__(self, tensor):
+            return (tensor - self.mean) / self.std
+
+    class _FallbackTransforms:
+        Compose = _Compose
+        Resize = _Resize
+        ToTensor = _ToTensor
+        Normalize = _Normalize
+
+    transforms = _FallbackTransforms()
 
 # FLOPs calculation
 try:
@@ -34,18 +77,8 @@ except ImportError:
     THOP_AVAILABLE = False
 
 from dataloader.dataloader import FewshotDataset
-from function.function import (ContrastiveLoss, RelationLoss, SiameseLoss, CenterLoss, 
-                               seed_func, plot_confusion_matrix, plot_tsne)
-from net.cosine import CosineNet
-from net.cosine_classifier import CosineClassifier
-from net.protonet import ProtoNet
-from net.covamnet import CovaMNet
-from net.matchingnet import MatchingNet
-from net.relationnet import RelationNet
-from net.siamesenet import SiameseNetFast as SiameseNet
-from net.dn4 import DN4Fast as DN4
-from net.feat import FEAT
-from net.deepemd import DeepEMDSimple as DeepEMD
+from function.function import ContrastiveLoss, RelationLoss, seed_func, plot_confusion_matrix, plot_tsne
+from net.model_factory import build_model_from_args, get_model_choices
 
 
 # =============================================================================
@@ -76,11 +109,21 @@ def get_args():
     
     # Model
     parser.add_argument('--model', type=str, default='covamnet',
-                        choices=['cosine', 'baseline', 'protonet', 'covamnet', 'matchingnet', 
-                                 'relationnet', 'siamese', 'dn4', 'feat', 'deepemd'])
-    parser.add_argument('--backbone', type=str, default='conv64f',
-                        choices=['conv64f', 'resnet12'])
-    parser.add_argument('--use_base_encoder', action='store_true')
+                        choices=get_model_choices())
+    parser.add_argument('--fewshot_backbone', type=str, default='default', choices=['default', 'resnet12', 'conv64f'])
+    parser.add_argument(
+        '--maml_second_order',
+        dest='maml_second_order',
+        action='store_true',
+        help='Use paper-style second-order MAML gradients (default).',
+    )
+    parser.add_argument(
+        '--maml_first_order',
+        dest='maml_second_order',
+        action='store_false',
+        help='Use first-order MAML approximation for faster benchmarking.',
+    )
+    parser.set_defaults(maml_second_order=True)
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
@@ -106,7 +149,6 @@ def get_args():
     # Loss
     parser.add_argument('--loss', type=str, default='contrastive',
                         choices=['contrastive', 'triplet'])
-    parser.add_argument('--lambda_center', type=float, default=0.0)
     
     # WandB
     parser.add_argument('--project', type=str, default='prpd-domain-shift')
@@ -419,29 +461,8 @@ class NewDomainDataset:
 def get_model(args):
     """Initialize model based on args."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    if args.model == 'protonet':
-        model = ProtoNet(use_base_encoder=args.use_base_encoder, device=device)
-    elif args.model == 'covamnet':
-        model = CovaMNet(device=device)
-    elif args.model == 'matchingnet':
-        model = MatchingNet(backbone=args.backbone, device=device)
-    elif args.model == 'relationnet':
-        model = RelationNet(device=device)
-    elif args.model == 'siamese':
-        model = SiameseNet(device=device)
-    elif args.model == 'dn4':
-        model = DN4(k_neighbors=3, device=device)
-    elif args.model == 'feat':
-        model = FEAT(temperature=0.2, device=device)
-    elif args.model == 'deepemd':
-        model = DeepEMD(device=device)
-    elif args.model == 'baseline':
-        model = CosineClassifier(temperature=10.0, learnable_temp=True, device=device)
-    else:
-        model = CosineNet(device=device)
-    
-    return model.to(device)
+    args.device = device
+    return build_model_from_args(args).to(device)
 
 
 # =============================================================================
@@ -455,25 +476,10 @@ def train_loop(net, train_loader, args):
     # Loss function
     if args.model == 'relationnet':
         criterion_main = RelationLoss().to(device)
-    elif args.model == 'siamese':
-        # SiameseNet uses true contrastive loss with margin (Koch et al. 2015)
-        criterion_main = SiameseLoss(margin=1.0).to(device)
     else:
         criterion_main = ContrastiveLoss().to(device)
     
-    # Calculate feature dimension
-    with torch.no_grad():
-        dummy = torch.randn(1, 3, args.image_size, args.image_size).to(device)
-        dummy_feat = net.encoder(dummy)
-        feat_dim = dummy_feat.view(1, -1).size(1)
-    
-    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
-    
-    optimizer = optim.Adam([
-        {'params': net.parameters()},
-        {'params': criterion_center.parameters()}
-    ], lr=args.lr)
-    
+    optimizer = optim.Adam(net.parameters(), lr=args.lr)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
     
     for epoch in range(1, args.num_epochs + 1):
@@ -494,34 +500,7 @@ def train_loop(net, train_loader, args):
             
             scores = net(query, support)
             
-            # Loss computation - SiameseNet uses paired contrastive loss
-            if args.model == 'siamese':
-                # Extract embeddings from support + query for contrastive loss
-                q_flat = query.view(-1, C, H, W)
-                q_feats = net.encoder(q_flat)
-                if q_feats.dim() == 4:
-                    q_feats = F.adaptive_avg_pool2d(q_feats, 1)
-                q_feats = q_feats.view(q_feats.size(0), -1)
-                
-                s_flat = support.view(-1, C, H, W)
-                s_feats = net.encoder(s_flat)
-                if s_feats.dim() == 4:
-                    s_feats = F.adaptive_avg_pool2d(s_feats, 1)
-                s_feats = s_feats.view(s_feats.size(0), -1)
-                s_targets = s_labels.view(-1).to(device)
-                
-                all_feats = torch.cat([q_feats, s_feats], dim=0)
-                all_targets = torch.cat([targets, s_targets], dim=0)
-                
-                loss = criterion_main(all_feats, all_targets)
-            else:
-                loss = criterion_main(scores, targets)
-            
-            if args.lambda_center > 0:
-                q_flat = query.view(-1, C, H, W)
-                features = net.encoder(q_flat)
-                features = F.normalize(features.view(features.size(0), -1), p=2, dim=1)
-                loss += args.lambda_center * criterion_center(features, targets)
+            loss = criterion_main(scores, targets)
             
             loss.backward()
             optimizer.step()
@@ -758,7 +737,8 @@ def test_domain_shift(net, test_X, test_y, shot_num, args):
         tsne_base = os.path.join(args.path_results,
                                  f"tsne_{args.dataset_name}_{args.model}_{shot_num}shot")
         plot_tsne(features, all_targets, args.way_num, tsne_base)
-        wandb.log({f"tsne_{shot_num}shot": wandb.Image(f"{tsne_base}_2col.png")})
+        if os.path.exists(f"{tsne_base}_tsne.png"):
+            wandb.log({f"tsne_{shot_num}shot": wandb.Image(f"{tsne_base}_tsne.png")})
     
     # Save to txt file
     txt_path = os.path.join(args.path_results,

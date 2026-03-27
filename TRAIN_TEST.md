@@ -18,8 +18,9 @@ python main.py --model relationnet --shot_num 1 --mode test
 ### Model & Training
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model` | `covamnet` | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, siamese, baseline, cosine |
-| `--backbone` | `conv64f` | Encoder: conv64f, resnet12 |
+| `--model` | `covamnet` | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, can, frn, deepbdc, maml, cosine |
+| `--maml_second_order` | `True` | Paper-style MAML setting; kept for explicitness/backward compatibility |
+| `--maml_first_order` | `False` | Use first-order MAML approximation for faster runs |
 | `--shot_num` | `1` | K-shot (support samples per class) |
 | `--way_num` | `3` | N-way (classes per episode) |
 | `--query_num` | `1` | Query samples per class |
@@ -65,8 +66,8 @@ python main.py --mode train
 # RelationNet 5-shot
 python main.py --model relationnet --shot_num 5 --mode train
 
-# MatchingNet with ResNet12 backbone (128x128)
-python main.py --model matchingnet --backbone resnet12 --image_size 128 --mode train
+# MatchingNet benchmark model
+python main.py --model matchingnet --image_size 64 --mode train
 
 # Limited training samples (60 total = 20/class for 3-way)
 python main.py --model cosine --training_samples 60 --mode train
@@ -93,7 +94,7 @@ Run all model × shot × sample combinations:
 python run_all_experiments.py --project my_wandb_project
 ```
 
-This will train and evaluate all configured models with 1-shot, 5-shot, and 10-shot settings.
+Default batch models now include `can`, `frn`, and `deepbdc`, while `baseline` has been removed.
 
 ## Output Files
 

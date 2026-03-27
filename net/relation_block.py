@@ -13,44 +13,41 @@ class RelationBlock(nn.Module):
     Takes concatenated feature pairs and outputs relation scores in [0,1].
     """
     
-    def __init__(self, input_size=128, hidden_size=8):
+    def __init__(self, input_channels=64, hidden_size=8, spatial_size=14):
         """
         Args:
-            input_size: Input feature dimension (2 * feature_dim from concat)
+            input_channels: Input feature dimension from encoder
             hidden_size: Hidden dimension for relation module
         """
         super(RelationBlock, self).__init__()
-        
-        # Relation module: learns to compare concatenated features
+        padding = 1 if spatial_size < 10 else 0
         self.layer1 = nn.Sequential(
-            nn.Conv2d(input_size, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(input_channels * 2, input_channels, kernel_size=3, padding=padding),
+            nn.BatchNorm2d(input_channels, momentum=1, affine=True),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
-        
         self.layer2 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=padding),
+            nn.BatchNorm2d(input_channels, momentum=1, affine=True),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
-        
-        # Calculate flattened size after convolutions
-        # Assuming input is 4x4 from encoder, after 2 maxpools: 4->2->1
-        self.fc1 = nn.Linear(64 * 1 * 1, hidden_size)
+        shrink_s = lambda size: int((int((size - 2 + 2 * padding) / 2) - 2 + 2 * padding) / 2)
+        flattened_dim = input_channels * shrink_s(spatial_size) * shrink_s(spatial_size)
+        self.fc1 = nn.Linear(flattened_dim, hidden_size)
         self.fc2 = nn.Linear(hidden_size, 1)
         
     def forward(self, x):
         """
         Args:
-            x: (B, input_size, H, W) concatenated feature pairs
+            x: (B, 2*input_channels, H, W) concatenated feature pairs
         Returns:
-            scores: (B, 1) relation scores in [0,1] (with sigmoid, paper-compliant)
+            scores: (B, 1) relation scores in [0,1]
         """
         out = self.layer1(x)
         out = self.layer2(out)
-        out = out.view(out.size(0), -1)  # Flatten
+        out = out.view(out.size(0), -1)
         out = F.relu(self.fc1(out))
-        out = torch.sigmoid(self.fc2(out))  # Sigmoid for [0,1] scores
+        out = torch.sigmoid(self.fc2(out))
         return out

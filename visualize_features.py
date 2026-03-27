@@ -5,8 +5,8 @@ This script provides a command-line interface to visualize feature maps
 from trained few-shot learning encoders.
 
 Usage Examples:
-    # Visualize features from MatchingNet with resnet18 backbone
-    python visualize_features.py --model matchingnet --backbone resnet18 \
+    # Visualize features from MatchingNet
+    python visualize_features.py --model matchingnet \
         --image scalogram/corona/sample.png
 
     # Visualize all layers with heatmap overlay
@@ -14,7 +14,7 @@ Usage Examples:
         --output results/feature_maps --overlay
     
     # List available layers in a model
-    python visualize_features.py --model matchingnet --backbone resnet12 --list-layers
+    python visualize_features.py --model matchingnet --list-layers
 """
 import os
 import sys
@@ -41,9 +41,6 @@ def get_args():
     parser.add_argument('--model', type=str, default='matchingnet',
                        choices=['matchingnet', 'protonet', 'relationnet', 'covamnet', 'cosine'],
                        help='Model type (default: matchingnet)')
-    parser.add_argument('--backbone', type=str, default='conv64f',
-                       choices=['conv64f', 'resnet12'],
-                       help='Backbone for MatchingNet (default: conv64f)')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Path to model checkpoint (optional)')
     
@@ -87,7 +84,7 @@ def load_model(args):
     
     if args.model == 'matchingnet':
         from net.matchingnet import MatchingNet
-        model = MatchingNet(backbone=args.backbone, device=device)
+        model = MatchingNet(image_size=args.image_size, device=device)
         encoder = model.encoder
     elif args.model == 'protonet':
         from net.protonet import ProtoNet
@@ -158,11 +155,7 @@ def main():
     args = get_args()
     
     # Load model
-    print(f"\nLoading model: {args.model}", end="")
-    if args.model == 'matchingnet':
-        print(f" (backbone: {args.backbone})")
-    else:
-        print()
+    print(f"\nLoading model: {args.model}")
     
     encoder, device = load_model(args)
     

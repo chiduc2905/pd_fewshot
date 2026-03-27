@@ -20,7 +20,7 @@ class ResNet18Encoder(nn.Module):
     Input: (B, 3, H, W) - works with any spatial size >= 32
     Output: (B, 512) features
     
-    Used by: MatchingNet (with --backbone resnet18)
+    Legacy encoder kept for reference only.
     """
     
     def __init__(self, pretrained=False):

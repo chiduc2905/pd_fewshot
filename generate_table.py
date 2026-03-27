@@ -30,18 +30,20 @@ for r in rows:
         
         data[model][samples][shot] = {'acc': acc, 'f1': f1, 'recall': rec, 'prec': prec}
 
-models = ['protonet', 'matchingnet', 'relationnet', 'covamnet', 'dn4', 'siamese', 'cosine', 'baseline', 'feat', 'deepemd']
+models = ['protonet', 'matchingnet', 'relationnet', 'covamnet', 'dn4', 'maml', 'cosine', 'feat', 'deepemd', 'can', 'frn', 'deepbdc']
 model_names = {
     'protonet': ('ProtoNet', 'Euclidean'),
     'matchingnet': ('MatchingNet', 'Cosine'),
     'relationnet': ('RelationNet', 'Learned'),
     'covamnet': ('CovaMNet', 'Covariance'),
     'dn4': ('DN4', 'Local Desc.'),
-    'siamese': ('SiameseNet', 'Euclidean'),
+    'maml': ('MAML', 'Meta-Learned'),
     'cosine': ('Cosine', 'Cosine'),
-    'baseline': ('Baseline++', 'Cosine'),
     'feat': ('FEAT', 'Transformer'),
-    'deepemd': ('DeepEMD', 'EMD')
+    'deepemd': ('DeepEMD', 'EMD'),
+    'can': ('CAN', 'Cross-Attn'),
+    'frn': ('FRN', 'Reconstruction'),
+    'deepbdc': ('DeepBDC', '2nd-Order')
 }
 
 samples_order = ['18samples', '60samples', 'all']
@@ -90,7 +92,7 @@ with open('docs/results_table.tex', 'w', encoding='utf-8') as out:
 
 \\begin{table*}[!t]
 \\centering
-\\caption{Performance Comparison of Few-Shot Learning Methods on PD Scalogram Classification (Conv64F Backbone)}
+\\caption{Performance Comparison of Few-Shot Learning Methods on PD Scalogram Classification}
 \\label{tab:fewshot_results}
 \\renewcommand{\\arraystretch}{1.1}
 \\setlength{\\tabcolsep}{3pt}

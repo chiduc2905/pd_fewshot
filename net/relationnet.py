@@ -23,17 +23,16 @@ class RelationNet(nn.Module):
     - Relation: Concat query & support features -> MLP -> relation score
     """
     
-    def __init__(self, device='cuda'):
+    def __init__(self, image_size=64, device='cuda'):
         """
         Args:
             device: Device to use
         """
         super(RelationNet, self).__init__()
         
-        self.encoder = RelationNetEncoder()  # Output: (B, 64, 4, 4)
-        
-        # Relation module: input is concat of query and support (128 channels)
-        self.relation = RelationBlock(input_size=128, hidden_size=8)
+        self.encoder = RelationNetEncoder()
+        spatial_size = max(1, ((image_size - 2) // 2 - 2) // 2)
+        self.relation = RelationBlock(input_channels=64, hidden_size=8, spatial_size=spatial_size)
         
         self.apply(weights_init_relationnet)  # Paper-specific init
         self.to(device)
@@ -55,37 +54,37 @@ class RelationNet(nn.Module):
         query_flat = query.view(-1, C, H, W)
         support_flat = support.view(-1, C, H, W)
         
-        q_feat = self.encoder(query_flat)  # (B*NQ, 64, 4, 4)
-        s_feat = self.encoder(support_flat)  # (B*Way*Shot, 64, 4, 4)
+        q_feat = self.encoder(query_flat)
+        s_feat = self.encoder(support_flat)
         
-        # Reshape support features
-        s_feat = s_feat.view(B, Way, Shot, 64, 4, 4)
+        feat_h, feat_w = q_feat.size(-2), q_feat.size(-1)
+        s_feat = s_feat.view(B, Way, Shot, 64, feat_h, feat_w)
         
         # Compute prototypes (mean over shot)
         prototypes = s_feat.mean(dim=2)  # (B, Way, 64, 4, 4)
         
         # Reshape query features
-        q_feat = q_feat.view(B, NQ, 64, 4, 4)
+        q_feat = q_feat.view(B, NQ, 64, feat_h, feat_w)
         
         # Compute relation scores
         # For each query, concat with each prototype and pass through relation module
         scores_list = []
         
         for b in range(B):
-            q_b = q_feat[b]  # (NQ, 64, 4, 4)
-            p_b = prototypes[b]  # (Way, 64, 4, 4)
+            q_b = q_feat[b]
+            p_b = prototypes[b]
             
             # Expand and concatenate
             # q_b: (NQ, 1, 64, 4, 4) -> (NQ, Way, 64, 4, 4)
             # p_b: (1, Way, 64, 4, 4) -> (NQ, Way, 64, 4, 4)
-            q_expanded = q_b.unsqueeze(1).expand(NQ, Way, 64, 4, 4)
-            p_expanded = p_b.unsqueeze(0).expand(NQ, Way, 64, 4, 4)
+            q_expanded = q_b.unsqueeze(1).expand(NQ, Way, 64, feat_h, feat_w)
+            p_expanded = p_b.unsqueeze(0).expand(NQ, Way, 64, feat_h, feat_w)
             
             # Concatenate along channel dimension
-            relation_pairs = torch.cat([q_expanded, p_expanded], dim=2)  # (NQ, Way, 128, 4, 4)
+            relation_pairs = torch.cat([q_expanded, p_expanded], dim=2)
             
             # Reshape for relation module
-            relation_pairs = relation_pairs.view(NQ * Way, 128, 4, 4)
+            relation_pairs = relation_pairs.view(NQ * Way, 128, feat_h, feat_w)
             
             # Compute relation scores
             relations = self.relation(relation_pairs)  # (NQ*Way, 1)

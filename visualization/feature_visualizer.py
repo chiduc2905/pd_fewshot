@@ -25,7 +25,7 @@ class FeatureVisualizer:
     
     Example usage:
         >>> from net.matchingnet import MatchingNet
-        >>> model = MatchingNet(backbone='resnet18')
+        >>> model = MatchingNet(image_size=64)
         >>> visualizer = FeatureVisualizer(model.encoder)
         >>> image = load_image('scalogram.png')
         >>> features = visualizer.extract_all_layers(image)

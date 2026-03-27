@@ -10,7 +10,51 @@ import os
 import random
 import numpy as np
 from PIL import Image
-import torchvision.transforms as transforms
+import torch
+
+try:
+    import torchvision.transforms as transforms
+except ImportError:
+    class _Compose:
+        def __init__(self, transforms_list):
+            self.transforms_list = transforms_list
+
+        def __call__(self, image):
+            out = image
+            for transform in self.transforms_list:
+                out = transform(out)
+            return out
+
+    class _Resize:
+        def __init__(self, size):
+            self.size = size
+
+        def __call__(self, image):
+            return image.resize(self.size, Image.BILINEAR)
+
+    class _ToTensor:
+        def __call__(self, image):
+            array = np.asarray(image, dtype=np.float32) / 255.0
+            if array.ndim == 2:
+                array = array[:, :, None]
+            array = np.transpose(array, (2, 0, 1))
+            return torch.from_numpy(array)
+
+    class _Normalize:
+        def __init__(self, mean, std):
+            self.mean = torch.tensor(mean, dtype=torch.float32).view(-1, 1, 1)
+            self.std = torch.tensor(std, dtype=torch.float32).view(-1, 1, 1)
+
+        def __call__(self, tensor):
+            return (tensor - self.mean) / self.std
+
+    class _FallbackTransforms:
+        Compose = _Compose
+        Resize = _Resize
+        ToTensor = _ToTensor
+        Normalize = _Normalize
+
+    transforms = _FallbackTransforms()
 
 
 # Canonical 4-class setup for augmented split dataset

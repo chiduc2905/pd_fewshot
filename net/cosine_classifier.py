@@ -15,7 +15,7 @@ For few-shot episodic setting:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from net.encoders.base_encoder import Conv64F_Encoder
+from net.encoders.protonet_encoder import Conv64F_Paper_Encoder
 
 
 class CosineClassifier(nn.Module):
@@ -25,29 +25,10 @@ class CosineClassifier(nn.Module):
     Temperature is crucial - without it, cosine in [-1, 1] gives tiny gradients.
     """
     
-    def __init__(self, temperature=10.0, learnable_temp=True, device='cuda'):
-        """Initialize Cosine Classifier.
-        
-        Args:
-            temperature: Initial temperature/scale factor (default 10.0 as in paper)
-            learnable_temp: If True, temperature is a learnable parameter
-            device: Device to use
-        """
+    def __init__(self, scale_factor=2.0, image_size=64, device='cuda'):
         super(CosineClassifier, self).__init__()
-        
-        # Encoder: 3x64x64 -> 64x16x16 -> 64 (after pooling)
-        self.encoder = Conv64F_Encoder()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        
-        # Temperature scaling (crucial for cosine classifier!)
-        # Paper uses fixed scale=10 or learnable
-        if learnable_temp:
-            # Initialize with log to ensure positive after exp()
-            self.temperature = nn.Parameter(torch.tensor(float(temperature)))
-        else:
-            self.register_buffer('temperature', torch.tensor(float(temperature)))
-        
-        self.learnable_temp = learnable_temp
+        self.encoder = Conv64F_Paper_Encoder(image_size=image_size)
+        self.register_buffer("scale_factor", torch.tensor(float(scale_factor)))
         self.to(device)
     
     def encode(self, x):
@@ -58,11 +39,8 @@ class CosineClassifier(nn.Module):
         Returns:
             (N, D) L2-normalized embeddings
         """
-        feat = self.encoder(x)  # (N, 64, h, w)
-        feat = self.avg_pool(feat)  # (N, 64, 1, 1)
-        feat = feat.view(feat.size(0), -1)  # (N, 64)
-        feat = F.normalize(feat, p=2, dim=1)  # L2 normalize
-        return feat
+        feat = self.encoder(x)
+        return F.normalize(feat, p=2, dim=1)
     
     def forward(self, query, support):
         """Compute scaled cosine similarity scores.
@@ -98,9 +76,7 @@ class CosineClassifier(nn.Module):
         # (B, NQ, D) @ (B, D, Way) -> (B, NQ, Way)
         cos_sim = torch.bmm(q_emb, prototypes.transpose(1, 2))
         
-        # Apply temperature scaling (this is the key difference!)
-        # Without this, gradients are too small because cos ∈ [-1, 1]
-        scores = self.temperature * cos_sim
+        scores = self.scale_factor * cos_sim
         
         # Flatten for loss computation
         scores = scores.view(-1, Way)  # (B*NQ, Way)
@@ -115,7 +91,7 @@ class CosineClassifierWithFC(nn.Module):
     before computing cosine similarity.
     """
     
-    def __init__(self, embed_dim=64, temperature=10.0, learnable_temp=True, device='cuda'):
+    def __init__(self, embed_dim=64, scale_factor=2.0, image_size=64, device='cuda'):
         """Initialize Cosine Classifier with FC.
         
         Args:
@@ -126,27 +102,19 @@ class CosineClassifierWithFC(nn.Module):
         """
         super(CosineClassifierWithFC, self).__init__()
         
-        self.encoder = Conv64F_Encoder()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.encoder = Conv64F_Paper_Encoder(image_size=image_size)
         
         # Projection layer (optional, some papers use this)
         self.projection = nn.Sequential(
-            nn.Linear(64, embed_dim),
+            nn.LazyLinear(embed_dim),
             nn.ReLU(inplace=True),
             nn.Linear(embed_dim, embed_dim)
         )
-        
-        # Temperature
-        if learnable_temp:
-            self.temperature = nn.Parameter(torch.tensor(float(temperature)))
-        else:
-            self.register_buffer('temperature', torch.tensor(float(temperature)))
-        
+        self.register_buffer("scale_factor", torch.tensor(float(scale_factor)))
         self.to(device)
     
     def encode(self, x):
         feat = self.encoder(x)
-        feat = self.avg_pool(feat).view(feat.size(0), -1)
         feat = self.projection(feat)
         feat = F.normalize(feat, p=2, dim=1)
         return feat
@@ -164,7 +132,7 @@ class CosineClassifierWithFC(nn.Module):
         prototypes = F.normalize(s_emb.mean(dim=2), p=2, dim=2)
         
         cos_sim = torch.bmm(q_emb, prototypes.transpose(1, 2))
-        scores = self.temperature * cos_sim
+        scores = self.scale_factor * cos_sim
         scores = scores.view(-1, Way)
         
         return scores

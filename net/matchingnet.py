@@ -1,173 +1,88 @@
-"""Matching Networks for One Shot Learning."""
+"""Matching Networks with full context embeddings."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from net.encoders.matchingnet_encoder import MatchingNetEncoder
 
 
-class AttentionLSTM(nn.Module):
-    """
-    Attention LSTM for processing query with attention over support set.
-    
-    From Matching Networks paper (Vinyals et al., NIPS 2016)
-    """
-    def __init__(self, input_size, hidden_size, num_layers=1):
-        super(AttentionLSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size + hidden_size, hidden_size, num_layers, batch_first=True)
-        
-    def forward(self, x, support_embeddings):
-        """
-        Args:
-            x: (B, feature_dim) query embedding
-            support_embeddings: (B, Way*Shot, feature_dim) support embeddings
-        Returns:
-            (B, hidden_size) attended query representation
-        """
-        B = x.size(0)
-        h = torch.zeros(self.num_layers, B, self.hidden_size).to(x.device)
-        c = torch.zeros(self.num_layers, B, self.hidden_size).to(x.device)
-        
-        # Read support set with attention
-        for step in range(support_embeddings.size(1)):
-            # Attention over support
-            # Compute attention scores
-            attention_scores = torch.bmm(
-                h[-1].unsqueeze(1),  # (B, 1, hidden_size)
-                support_embeddings.transpose(1, 2)  # (B, feature_dim, Way*Shot)
-            ).squeeze(1)  # (B, Way*Shot)
-            
-            attention_weights = F.softmax(attention_scores, dim=1)  # (B, Way*Shot)
-            
-            # Attended support representation
-            r = torch.bmm(
-                attention_weights.unsqueeze(1),  # (B, 1, Way*Shot)
-                support_embeddings  # (B, Way*Shot, feature_dim)
-            ).squeeze(1)  # (B, feature_dim)
-            
-            # LSTM step: input is concat(x, r)
-            lstm_input = torch.cat([x, r], dim=1).unsqueeze(1)  # (B, 1, input_size+hidden_size)
-            _, (h, c) = self.lstm(lstm_input, (h, c))
-        
-        return h[-1]  # (B, hidden_size)
+class FullyContextualEmbedding(nn.Module):
+    """Attention LSTM query encoder from the original Matching Networks paper."""
+
+    def __init__(self, feat_dim):
+        super().__init__()
+        self.lstm_cell = nn.LSTMCell(feat_dim * 2, feat_dim)
+        self.softmax = nn.Softmax(dim=1)
+        self.feat_dim = feat_dim
+
+    def forward(self, query, support_context):
+        if query.dim() == 1:
+            query = query.unsqueeze(0)
+        hidden = query
+        cell = torch.zeros_like(query)
+        support_t = support_context.transpose(0, 1)
+        steps = support_context.size(0)
+
+        for _ in range(steps):
+            attn_logits = hidden.mm(support_t)
+            attn = self.softmax(attn_logits)
+            readout = attn.mm(support_context)
+            lstm_input = torch.cat([query, readout], dim=1)
+            hidden, cell = self.lstm_cell(lstm_input, (hidden, cell))
+            hidden = hidden + query
+
+        return hidden
 
 
 class MatchingNet(nn.Module):
-    """
-    Matching Networks for One Shot Learning (Full version with LSTM).
-    
-    Paper: Vinyals et al. "Matching Networks for One Shot Learning" (NIPS 2016)
-    
-    Key components:
-    1. CNN encoder (shared for support and query)
-    2. Bidirectional LSTM for full context embeddings of support set (g)
-    3. Attention LSTM for query encoding with attention over support (f)
-    4. Cosine similarity-based attention kernel
-    5. Weighted prediction over support labels
-    
-    This implementation uses adaptive pooling for consistent 1024 features.
-    """
-    
-    def __init__(self, backbone='conv64f', device='cuda'):
-        """
-        Args:
-            backbone: 'conv64f' (1024 dim) or 'resnet12' (512 dim)
-            device: Device to use
-        """
-        super(MatchingNet, self).__init__()
-        
-        self.backbone = backbone
-        
-        # Select backbone and determine feature dimension
-        if backbone == 'resnet12':
-            from net.encoders.resnet12_encoder import ResNet12Encoder
-            self.encoder = ResNet12Encoder()
-            feat_dim = 512  # ResNet12 uses GAP -> 512 dim
-        else:  # conv64f
-            self.encoder = MatchingNetEncoder()
-            feat_dim = 64  # Paper-compliant: GAP -> 64 dim (not 1024!)
-        
-        self.feat_dim = feat_dim
-        
-        # Full contextual embeddings (paper-compliant dimensions)
-        # BiLSTM: input 64 -> hidden 32 bidirectional -> output 64
-        self.support_lstm = nn.LSTM(feat_dim, feat_dim // 2, batch_first=True, bidirectional=True)
-        self.query_attention_lstm = AttentionLSTM(input_size=feat_dim, hidden_size=feat_dim)
-        
-        # Paper uses PyTorch default init
+    """Paper-style Matching Networks with BiLSTM support encoding and FCE query encoding."""
+
+    def __init__(self, image_size=64, device="cuda"):
+        super().__init__()
+        self.encoder = MatchingNetEncoder(image_size=image_size)
+        self.feat_dim = self.encoder.out_dim
+        self.support_encoder = nn.LSTM(
+            self.feat_dim,
+            self.feat_dim,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.query_encoder = FullyContextualEmbedding(self.feat_dim)
+        self.scale_factor = 100.0
         self.to(device)
-    
+
+    def encode_support_set(self, support_embeddings):
+        out = self.support_encoder(support_embeddings.unsqueeze(0))[0].squeeze(0)
+        support_context = support_embeddings + out[:, : self.feat_dim] + out[:, self.feat_dim :]
+        support_norm = F.normalize(support_context, p=2, dim=1)
+        return support_context, support_norm
+
     def forward(self, query, support):
-        """
-        Compute matching scores using attention mechanism.
-        
-        Args:
-            query: (B, NQ, C, H, W) query images
-            support: (B, Way, Shot, C, H, W) support images
-        Returns:
-            scores: (B*NQ, Way) matching scores
-        """
-        B, NQ, C, H, W = query.size()
-        B_s, Way, Shot, C_s, H_s, W_s = support.size()
-        
-        # Flatten and encode
-        query_flat = query.view(-1, C, H, W)
-        support_flat = support.view(-1, C, H, W)
-        
-        q_encoded = self.encoder(query_flat)  # (B*NQ, feat_dim)
-        s_encoded = self.encoder(support_flat)  # (B*Way*Shot, feat_dim)
-        
-        # Reshape
-        q_encoded = q_encoded.view(B, NQ, -1)  # (B, NQ, feat_dim)
-        s_encoded = s_encoded.view(B, Way, Shot, -1)  # (B, Way, Shot, feat_dim)
-        
-        # Full context embeddings with LSTM (paper-compliant)
-        # Support set: bidirectional LSTM (g function)
-        s_flat_for_lstm = s_encoded.view(B, Way * Shot, -1)  # (B, Way*Shot, 1024)
-        s_context, _ = self.support_lstm(s_flat_for_lstm)  # (B, Way*Shot, 1024)
-        s_context = s_context.view(B, Way, Shot, -1)  # (B, Way, Shot, 1024)
-        
-        # Query: Attention LSTM (f function)
-        q_context = []
-        for i in range(NQ):
-            q_i = q_encoded[:, i, :]  # (B, 1024)
-            q_i_context = self.query_attention_lstm(q_i, s_flat_for_lstm)  # (B, 1024)
-            q_context.append(q_i_context)
-        q_context = torch.stack(q_context, dim=1)  # (B, NQ, 1024)
-        
-        # Compute attention kernel (cosine similarity)
-        # For each query, compare with each support example
-        scores_list = []
-        
-        for b in range(B):
-            q_b = q_context[b]  # (NQ, 1024)
-            s_b = s_context[b]  # (Way, Shot, 1024)
-            
-            # Normalize
-            q_norm = F.normalize(q_b, p=2, dim=1)  # (NQ, 1024)
-            s_norm = F.normalize(s_b.view(Way * Shot, -1), p=2, dim=1)  # (Way*Shot, 1024)
-            
-            # Cosine similarity
-            similarity = torch.mm(q_norm, s_norm.t())  # (NQ, Way*Shot)
-            
-            # Attention weights
-            attention = F.softmax(similarity, dim=1)  # (NQ, Way*Shot)
-            
-            # Weighted vote: each support example votes for its class
-            # Create one-hot labels for support set
-            support_labels = torch.arange(Way).repeat_interleave(Shot).to(query.device)  # (Way*Shot,)
-            one_hot = F.one_hot(support_labels, num_classes=Way).float()  # (Way*Shot, Way)
-            
-            # Weighted prediction
-            scores_b = torch.mm(attention, one_hot)  # (NQ, Way)
-            scores_list.append(scores_b)
-        
-        scores = torch.cat(scores_list, dim=0)  # (B*NQ, Way)
-        
-        # Convert probabilities to logits for CrossEntropy loss
-        # CrossEntropy expects logits, not probabilities
-        # log(probs) converts probs to log-probs which work like logits
-        scores = torch.log(scores + 1e-8)  # Add epsilon to avoid log(0)
-        
-        return scores
+        batch_size, num_query, channels, height, width = query.size()
+        _, way_num, shot_num, _, _, _ = support.size()
+
+        query_flat = query.view(-1, channels, height, width)
+        support_flat = support.view(-1, channels, height, width)
+
+        query_embeddings = self.encoder(query_flat).view(batch_size, num_query, -1)
+        support_embeddings = self.encoder(support_flat).view(batch_size, way_num * shot_num, -1)
+
+        scores = []
+        for batch_idx in range(batch_size):
+            support_context, support_norm = self.encode_support_set(support_embeddings[batch_idx])
+            adapted_queries = []
+            for query_idx in range(num_query):
+                adapted_queries.append(self.query_encoder(query_embeddings[batch_idx, query_idx], support_context).squeeze(0))
+            adapted_queries = torch.stack(adapted_queries, dim=0)
+            query_norm = F.normalize(adapted_queries, p=2, dim=1)
+
+            similarities = F.relu(query_norm.mm(support_norm.t())) * self.scale_factor
+            attention = F.softmax(similarities, dim=1)
+            support_labels = torch.arange(way_num, device=query.device).repeat_interleave(shot_num)
+            support_one_hot = F.one_hot(support_labels, num_classes=way_num).float()
+            probs = attention.mm(support_one_hot)
+            scores.append(torch.log(probs + 1e-6))
+
+        return torch.cat(scores, dim=0)
