@@ -163,7 +163,7 @@ class _SPIFBase(BaseConv64FewShotModel):
         stable_dim: int = 64,
         variant_dim: int = 64,
         gate_hidden: int = 16,
-        top_r: int = 3,
+        top_r: int = 4,
         alpha_init: float = 0.7,
         learnable_alpha: bool = False,
         gate_on: bool = True,

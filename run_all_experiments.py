@@ -44,7 +44,18 @@ def get_args():
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--cudnn_deterministic", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--cudnn_benchmark", type=str, default="true", choices=["true", "false"])
-    return parser.parse_args()
+    parser.add_argument("--spif_global_only", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--spif_local_only", type=str, default="false", choices=["true", "false"])
+    parser.add_argument(
+        "--spifce_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "contrib", "contrib_detailed"],
+        help="Expand SPIFCE contribution ablations with tagged runs",
+    )
+    args, passthrough_args = parser.parse_known_args()
+    args.passthrough_args = passthrough_args
+    return args
 
 
 EXPERIMENT_MODES = {
@@ -69,6 +80,188 @@ def get_smnet_root():
     return (Path(__file__).resolve().parent.parent / "proposed_model" / "smnet").resolve()
 
 
+def get_pulse_fewshot_root():
+    return Path(__file__).resolve().parent
+
+
+def build_spifce_ablation_variants(suite_name):
+    base_variants = [
+        {
+            "tag": "base_shared_proto",
+            "label": "Base shared prototype",
+            "extra_args": [
+                "--spif_factorization_on",
+                "false",
+                "--spif_gate_on",
+                "false",
+                "--spif_global_only",
+                "true",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "factor_only",
+            "label": "Factorization only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "true",
+                "--spif_gate_on",
+                "false",
+                "--spif_global_only",
+                "true",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "gate_only",
+            "label": "Gate only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "false",
+                "--spif_gate_on",
+                "true",
+                "--spif_global_only",
+                "true",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "local_module_only",
+            "label": "Local module only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "false",
+                "--spif_gate_on",
+                "false",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "factor_gate",
+            "label": "Factorization + gate",
+            "extra_args": [
+                "--spif_factorization_on",
+                "true",
+                "--spif_gate_on",
+                "true",
+                "--spif_global_only",
+                "true",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "factor_local",
+            "label": "Factorization + local",
+            "extra_args": [
+                "--spif_factorization_on",
+                "true",
+                "--spif_gate_on",
+                "false",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "gate_local",
+            "label": "Gate + local",
+            "extra_args": [
+                "--spif_factorization_on",
+                "false",
+                "--spif_gate_on",
+                "true",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+        {
+            "tag": "full",
+            "label": "Full SPIFCE",
+            "extra_args": [
+                "--spif_factorization_on",
+                "true",
+                "--spif_gate_on",
+                "true",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "false",
+            ],
+        },
+    ]
+    if suite_name != "contrib_detailed":
+        return base_variants
+
+    return base_variants + [
+        {
+            "tag": "shared_local_branch_only",
+            "label": "Shared local branch only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "false",
+                "--spif_gate_on",
+                "false",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "true",
+            ],
+        },
+        {
+            "tag": "factor_local_branch_only",
+            "label": "Factorized local branch only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "true",
+                "--spif_gate_on",
+                "false",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "true",
+            ],
+        },
+        {
+            "tag": "gate_local_branch_only",
+            "label": "Gated local branch only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "false",
+                "--spif_gate_on",
+                "true",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "true",
+            ],
+        },
+        {
+            "tag": "full_local_branch_only",
+            "label": "Full local branch only",
+            "extra_args": [
+                "--spif_factorization_on",
+                "true",
+                "--spif_gate_on",
+                "true",
+                "--spif_global_only",
+                "false",
+                "--spif_local_only",
+                "true",
+            ],
+        },
+    ]
+
+
 def run_experiment(
     model,
     shot,
@@ -83,14 +276,26 @@ def run_experiment(
     pin_memory,
     persistent_workers,
     prefetch_factor,
+    spif_global_only,
+    spif_local_only,
+    passthrough_args=None,
+    variant_args=None,
+    experiment_tag=None,
+    experiment_label=None,
 ):
     print(f"\n{'=' * 72}")
     print("Experiment")
     print('=' * 72)
     print(f"Model       : {model}")
+    if experiment_label:
+        print(f"Variant     : {experiment_label}")
+    if experiment_tag:
+        print(f"Tag         : {experiment_tag}")
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {fewshot_backbone}")
+    if model.startswith("spif"):
+        print(f"SPIF Ablate : global_only={spif_global_only}, local_only={spif_local_only}")
     print(
         f"Runtime     : workers={num_workers}, pin_memory={pin_memory}, "
         f"persistent_workers={persistent_workers}, "
@@ -99,8 +304,12 @@ def run_experiment(
     print("=" * 72)
 
     use_external_smnet = model in EXTERNAL_SMNET_MODELS
-    grad_clip = "0.0" if model == "hierarchical_consensus_slot_mamba_net" else "0.0"
-    target_script = str(get_smnet_root() / "main.py") if use_external_smnet else "main.py"
+    grad_clip = "0.0"
+    target_script = (
+        str(get_smnet_root() / "main.py")
+        if use_external_smnet
+        else str(get_pulse_fewshot_root() / "main.py")
+    )
     cmd = [
         sys.executable,
         target_script,
@@ -184,6 +393,15 @@ def run_experiment(
         cmd.extend(["--fewshot_backbone", fewshot_backbone])
     if not use_external_smnet:
         cmd.extend(["--deepemd_fast_val", "false"])
+        if model.startswith("spif"):
+            cmd.extend(
+                [
+                    "--spif_global_only",
+                    spif_global_only,
+                    "--spif_local_only",
+                    spif_local_only,
+                ]
+            )
         if model == "deepemd" and shot > 1:
             cmd.extend(
                 [
@@ -195,6 +413,12 @@ def run_experiment(
                     "true",
                 ]
             )
+    if passthrough_args:
+        cmd.extend(passthrough_args)
+    if variant_args:
+        cmd.extend(variant_args)
+    if experiment_tag:
+        cmd.extend(["--experiment_tag", experiment_tag])
 
     try:
         subprocess.run(cmd, check=True)
@@ -252,6 +476,8 @@ def generate_comparison_charts(dataset_name, shots, models):
 
 def main():
     args = get_args()
+    if args.spif_global_only == "true" and args.spif_local_only == "true":
+        raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
     requested_models = [model.strip() for model in args.models.split(",") if model.strip()]
     valid_models = set(get_model_choices())
@@ -262,16 +488,44 @@ def main():
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("results", exist_ok=True)
 
-    if args.mode_id is not None:
-        samples = EXPERIMENT_MODES[args.mode_id]
-        experiments = [(model, samples, shot) for model in requested_models for shot in shots]
+    if args.spifce_ablation_suite != "none":
+        if requested_models != ["spifce"]:
+            raise ValueError(
+                "`--spifce_ablation_suite` currently supports only `--models spifce` "
+                f"(got {requested_models})"
+            )
+        ablation_variants = build_spifce_ablation_variants(args.spifce_ablation_suite)
+        samples_list = [EXPERIMENT_MODES[args.mode_id]] if args.mode_id is not None else SAMPLES_LIST
+        experiments = [
+            {
+                "model": "spifce",
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "experiment_label": variant["label"],
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
         print("=" * 72)
-        print("pulse_fewshot - Single Experiment")
+        print("pulse_fewshot - SPIFCE Contribution Ablation Suite")
         print("=" * 72)
-        print(f"Mode        : {args.mode_id} ({samples if samples else 'All'} samples)")
+        if args.mode_id is None:
+            print("Mode Mapping:")
+            for mode_id, sample_count in EXPERIMENT_MODES.items():
+                print(f"  Mode {mode_id}: {sample_count if sample_count else 'All'} samples")
+        else:
+            samples = EXPERIMENT_MODES[args.mode_id]
+            print(f"Mode        : {args.mode_id} ({samples if samples else 'All'} samples)")
         print(f"Models      : {', '.join(requested_models)}")
-        print(f"Shots       : {', '.join(map(str, shots))}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.spifce_ablation_suite}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            print(f"  - {variant['tag']}: {variant['label']}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"GPU         : {args.gpu_id}")
         print(
@@ -281,14 +535,62 @@ def main():
         )
         print(
             "Overrides   : "
-            f"lr=5e-4, grad_clip={'1.0 for consensus, else 0.0'}, "
+            f"lr=5e-4, grad_clip=0.0, "
             "label_smoothing=0, augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print("=" * 72)
+    elif args.mode_id is not None:
+        samples = EXPERIMENT_MODES[args.mode_id]
+        experiments = [
+            {
+                "model": model,
+                "samples": samples,
+                "shot": shot,
+                "variant_args": None,
+                "experiment_tag": None,
+                "experiment_label": None,
+            }
+            for model in requested_models
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - Single Experiment")
+        print("=" * 72)
+        print(f"Mode        : {args.mode_id} ({samples if samples else 'All'} samples)")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(map(str, shots))}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        if any(model.startswith("spif") for model in requested_models):
+            print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
+        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            f"lr=5e-4, grad_clip=0.0, "
+            "label_smoothing=0, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
         print(f"Total       : {len(experiments)} experiment(s)")
         print("=" * 72)
     else:
         experiments = [
-            (model, samples, shot)
+            {
+                "model": model,
+                "samples": samples,
+                "shot": shot,
+                "variant_args": None,
+                "experiment_tag": None,
+                "experiment_label": None,
+            }
             for model in requested_models
             for samples in SAMPLES_LIST
             for shot in shots
@@ -302,6 +604,8 @@ def main():
         print(f"Models      : {', '.join(requested_models)}")
         print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
+        if any(model.startswith("spif") for model in requested_models):
+            print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"GPU         : {args.gpu_id}")
         print(
@@ -311,16 +615,21 @@ def main():
         )
         print(
             "Overrides   : "
-            f"lr=5e-4, grad_clip={'1.0 for consensus, else 0.0'}, "
+            f"lr=5e-4, grad_clip=0.0, "
             "label_smoothing=0, augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
         print(f"Total       : {len(experiments)} experiments")
         print("=" * 72)
 
     success_count = 0
     failed_experiments = []
 
-    for idx, (model, samples, shot) in enumerate(experiments, 1):
+    for idx, experiment in enumerate(experiments, 1):
+        model = experiment["model"]
+        samples = experiment["samples"]
+        shot = experiment["shot"]
         print(f"\n[{idx}/{len(experiments)}]", end=" ")
         success = run_experiment(
             model=model,
@@ -336,11 +645,18 @@ def main():
             pin_memory=args.pin_memory,
             persistent_workers=args.persistent_workers,
             prefetch_factor=args.prefetch_factor,
+            spif_global_only=args.spif_global_only,
+            spif_local_only=args.spif_local_only,
+            passthrough_args=args.passthrough_args,
+            variant_args=experiment["variant_args"],
+            experiment_tag=experiment["experiment_tag"],
+            experiment_label=experiment["experiment_label"],
         )
         if success:
             success_count += 1
         else:
-            failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples")
+            tag_suffix = f"_{experiment['experiment_tag']}" if experiment["experiment_tag"] else ""
+            failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples{tag_suffix}")
 
     print("\n" + "=" * 60)
     print("EXPERIMENT SUMMARY")
@@ -353,10 +669,15 @@ def main():
         for experiment in failed_experiments:
             print(f"  - {experiment}")
 
-    print("\n" + "=" * 60)
-    print("Generating comparison charts...")
-    print("=" * 60)
-    generate_comparison_charts(args.dataset_name, shots, requested_models)
+    if args.spifce_ablation_suite == "none":
+        print("\n" + "=" * 60)
+        print("Generating comparison charts...")
+        print("=" * 60)
+        generate_comparison_charts(args.dataset_name, shots, requested_models)
+    else:
+        print("\n" + "=" * 60)
+        print("Skipping standard comparison charts for tagged ablation runs.")
+        print("=" * 60)
     print("\nAll experiments completed!")
 
 

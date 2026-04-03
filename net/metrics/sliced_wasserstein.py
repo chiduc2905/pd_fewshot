@@ -1,4 +1,16 @@
-"""Reusable sliced Wasserstein distance for token-level few-shot matching."""
+"""Reusable legacy sliced Wasserstein distance for token-level few-shot matching.
+
+This estimator is kept for backward compatibility with older experimental
+models. It is intentionally lightweight, but it is not the same as the
+paper-style estimator in ``net.metrics.sliced_wasserstein_paper``:
+
+- unequal token counts are aligned through interpolation on sorted projections;
+- the outer ``1 / p`` root is applied per projection before projection
+  averaging.
+
+Use the paper-style modules for experiments that need exact 1D transport under
+the standard Monte-Carlo sliced Wasserstein estimator.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +40,7 @@ def merge_support_tokens_by_class(support_tokens: torch.Tensor, merge_mode: str 
 
 
 class SlicedWassersteinDistance(nn.Module):
-    """Compute sliced Wasserstein distances between token sets."""
+    """Compute the legacy heuristic SW distance between token sets."""
 
     def __init__(
         self,

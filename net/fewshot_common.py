@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from net.encoders.smnet_conv64f_encoder import build_resnet12_family_encoder
 
@@ -15,6 +16,29 @@ def feature_map_to_tokens(feature_map: torch.Tensor) -> torch.Tensor:
     if feature_map.dim() != 4:
         raise ValueError(f"Expected a 4D feature map, got shape={tuple(feature_map.shape)}")
     return feature_map.flatten(2).transpose(1, 2).contiguous()
+
+
+def multiscale_feature_map_to_tokens(
+    feature_map: torch.Tensor,
+    pooled_grids: Sequence[int] = (4, 1),
+) -> list[torch.Tensor]:
+    """Build a spatial pyramid of token sets from one feature map.
+
+    Returns a list ordered as:
+    1. original-resolution local tokens
+    2. pooled-grid tokens for each grid in `pooled_grids`
+    """
+    if feature_map.dim() != 4:
+        raise ValueError(f"Expected a 4D feature map, got shape={tuple(feature_map.shape)}")
+
+    token_groups = [feature_map_to_tokens(feature_map)]
+    for grid_size in pooled_grids:
+        grid_size = int(grid_size)
+        if grid_size <= 0:
+            raise ValueError(f"pooled grid sizes must be positive, got {grid_size}")
+        pooled = F.adaptive_avg_pool2d(feature_map, output_size=(grid_size, grid_size))
+        token_groups.append(feature_map_to_tokens(pooled))
+    return token_groups
 
 
 def merge_support_tokens(support_tokens: torch.Tensor, merge_mode: str = "concat") -> torch.Tensor:
