@@ -1003,6 +1003,7 @@ def build_model_from_args(args):
             rdp_lambda_init=lambda_init,
             rdp_alpha_init=float(getattr(args, "spif_rdp_alpha_init", 1.0)),
             rdp_tau_init=float(getattr(args, "spif_rdp_tau_init", 10.0)),
+            rdp_gamma_init=float(getattr(args, "spif_rdp_gamma_init", 1.0)),
             rdp_variance_floor=float(getattr(args, "spif_rdp_variance_floor", 1e-2)),
             rdp_compact_loss_weight=float(getattr(args, "spif_rdp_compact_loss_weight", 0.1)),
             rdp_sep_loss_weight=float(getattr(args, "spif_rdp_sep_loss_weight", 0.05)),

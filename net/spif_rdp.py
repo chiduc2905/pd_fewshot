@@ -41,6 +41,7 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
         lambda_init: float = 1e-3,
         alpha_init: float = 1.0,
         tau_init: float = 10.0,
+        gamma_init: float = 1.0,
         variance_floor: float = 1e-2,
         eps: float = 1e-6,
     ) -> None:
@@ -65,6 +66,10 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
         self.lambda_raw = nn.Parameter(torch.tensor(_inverse_softplus(lambda_init), dtype=torch.float32))
         self.alpha_raw = nn.Parameter(torch.tensor(_inverse_softplus(alpha_init), dtype=torch.float32))
         self.tau_raw = nn.Parameter(torch.tensor(_inverse_softplus(tau_init - 0.1), dtype=torch.float32))
+        # Log-det correction weight: γ controls how much the log-det term
+        # penalizes high-variance classes. At γ=0 → original scoring.
+        # At K→∞, γ converges to the true value → full Gaussian QDA.
+        self.gamma_raw = nn.Parameter(torch.tensor(_inverse_softplus(max(float(gamma_init), 1e-4)), dtype=torch.float32))
 
     def lambda_value(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         return F.softplus(self.lambda_raw).to(device=device, dtype=dtype)
@@ -74,6 +79,9 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
 
     def tau_value(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         return (F.softplus(self.tau_raw) + 0.1).to(device=device, dtype=dtype)
+
+    def gamma_value(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return F.softplus(self.gamma_raw).to(device=device, dtype=dtype)
 
     def forward(
         self,
@@ -117,8 +125,17 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
         mahalanobis_distance = (diff.square() / variance.unsqueeze(0).clamp_min(self.eps)).sum(dim=-1)
         euclidean_distance = diff.square().sum(dim=-1)
 
+        # ===== Architectural contribution: log-determinant correction =====
+        # Full Gaussian log-likelihood: log p(q|c) = -½ d_M(q,c) - ½ Σ_j log v_{c,j} - const
+        # The log-det term penalizes high-variance classes, which is missing
+        # in pure Mahalanobis scoring.
+        # d_corrected = ρ_c · [d_M(q,c) + γ · Σ_j log v_{c,j}] + (1-ρ_c) · d_E(q,c)
+        gamma_value = self.gamma_value(query_global.device, query_global.dtype)
+        log_det_per_class = variance.clamp_min(self.eps).log().sum(dim=-1)  # (Way,)
+        mahalanobis_with_logdet = mahalanobis_distance + gamma_value * log_det_per_class.unsqueeze(0)
+
         # ===== Architectural contribution: reliability-modulated distance blend =====
-        total_distance = reliability.unsqueeze(0) * mahalanobis_distance + (
+        total_distance = reliability.unsqueeze(0) * mahalanobis_with_logdet + (
             1.0 - reliability.unsqueeze(0)
         ) * euclidean_distance
         tau_value = self.tau_value(query_global.device, query_global.dtype)
@@ -133,10 +150,12 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
             "support_weights": support_weights,
             "mahalanobis_distance": mahalanobis_distance,
             "euclidean_distance": euclidean_distance,
+            "log_det_per_class": log_det_per_class,
             "total_distance": total_distance,
             "lambda_value": lambda_value.detach(),
             "alpha_value": alpha_value.detach(),
             "tau_value": tau_value.detach(),
+            "gamma_value": gamma_value.detach(),
         }
 
 
@@ -163,6 +182,7 @@ class SPIFRDP(BaseConv64FewShotModel):
         rdp_lambda_init: float = 1e-3,
         rdp_alpha_init: float = 1.0,
         rdp_tau_init: float = 10.0,
+        rdp_gamma_init: float = 1.0,
         rdp_variance_floor: float = 1e-2,
         rdp_compact_loss_weight: float = 0.1,
         rdp_sep_loss_weight: float = 0.05,
@@ -225,6 +245,7 @@ class SPIFRDP(BaseConv64FewShotModel):
             lambda_init=rdp_lambda_init,
             alpha_init=rdp_alpha_init,
             tau_init=rdp_tau_init,
+            gamma_init=rdp_gamma_init,
             variance_floor=rdp_variance_floor,
             eps=self.rdp_eps,
         )
@@ -369,6 +390,8 @@ class SPIFRDP(BaseConv64FewShotModel):
             "lambda_value": global_outputs["lambda_value"],
             "alpha_value": global_outputs["alpha_value"],
             "tau_value": global_outputs["tau_value"],
+            "gamma_value": global_outputs["gamma_value"],
+            "log_det_per_class": global_outputs["log_det_per_class"].detach(),
             "mean_gate": mean_gate.detach(),
             "stable_global_embeddings": torch.cat(
                 [
@@ -432,6 +455,8 @@ class SPIFRDP(BaseConv64FewShotModel):
             "lambda_value": torch.stack([item["lambda_value"] for item in diagnostics]).mean(),
             "alpha_value": torch.stack([item["alpha_value"] for item in diagnostics]).mean(),
             "tau_value": torch.stack([item["tau_value"] for item in diagnostics]).mean(),
+            "gamma_value": torch.stack([item["gamma_value"] for item in diagnostics]).mean(),
+            "log_det_per_class": torch.stack([item["log_det_per_class"] for item in diagnostics], dim=0),
             "mean_gate": torch.stack([item["mean_gate"] for item in diagnostics]).mean(),
             "stable_global_embeddings": torch.cat(
                 [item["stable_global_embeddings"] for item in diagnostics],

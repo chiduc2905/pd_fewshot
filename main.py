@@ -606,6 +606,7 @@ def get_args():
     parser.add_argument("--spif_rdp_lambda_init", type=float, default=1e-3)
     parser.add_argument("--spif_rdp_alpha_init", type=float, default=1.0)
     parser.add_argument("--spif_rdp_tau_init", type=float, default=10.0)
+    parser.add_argument("--spif_rdp_gamma_init", type=float, default=1.0)
     parser.add_argument("--spif_rdp_beta0_init", type=float, default=0.5)
     parser.add_argument("--spif_rdp_variance_floor", type=float, default=1e-2)
     parser.add_argument("--spif_rdp_compact_loss_weight", type=float, default=0.1)

@@ -134,13 +134,15 @@ class SPIFEncoder(nn.Module):
         stable_tokens, variant_tokens = self.factorize_tokens(tokens, factorization_on=factorization_on)
         gate = self.compute_gate(stable_tokens, gate_on=gate_on)
 
-        gated_stable = stable_tokens * gate
-        stable_global = self.pool_global(gated_stable, gate)
+        # pool_global multiplies by gate internally, so pass raw stable_tokens
+        stable_global = self.pool_global(stable_tokens, gate)
         variant_global = variant_tokens.mean(dim=1)
 
         stable_global = F.normalize(stable_global, p=2, dim=-1)
         variant_global = F.normalize(variant_global, p=2, dim=-1)
 
+        # Gate stable tokens ONCE for local branch after global pooling
+        gated_stable = stable_tokens * gate
         stable_tokens = self._normalize_token_branch(gated_stable, self.stable_token_norm)
         variant_tokens = self._normalize_token_branch(variant_tokens, self.variant_token_norm)
 
@@ -276,9 +278,10 @@ class _SPIFBase(BaseConv64FewShotModel):
 
     @staticmethod
     def compute_global_scores(query_global: torch.Tensor, prototypes: torch.Tensor) -> torch.Tensor:
+        # query_global and prototypes are already L2-normalized upstream
         return torch.matmul(
-            F.normalize(query_global, p=2, dim=-1),
-            F.normalize(prototypes, p=2, dim=-1).transpose(0, 1),
+            query_global,
+            prototypes.transpose(0, 1),
         )
 
     def compute_local_partial_scores(

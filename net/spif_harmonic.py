@@ -596,11 +596,17 @@ class _SPIFHarmonicBase(BaseConv64FewShotModel):
             query_global_out["embeddings"],
             support_global_embeddings,
         )
+        # Use final_gate from Mamba-refined global head for local branch weights
+        # instead of raw SPIF gate — ensures consistent token importance across branches
+        query_final_gate_weights = query_global_out["final_gate"].squeeze(-1)
+        support_final_gate_weights = support_global_out["final_gate"].reshape(
+            way_num, shot_num, -1,
+        )
         local_out = self.local_head(
             episode["query_tokens"],
             episode["support_tokens"],
-            query_weights=episode["query_gate"].squeeze(-1),
-            support_weights=episode["support_gate"].squeeze(-1),
+            query_weights=query_final_gate_weights,
+            support_weights=support_final_gate_weights,
         )
         local_logits = local_out["logits"]
         fusion_out = self.fusion_head(
