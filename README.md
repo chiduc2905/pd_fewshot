@@ -90,7 +90,7 @@ python main.py --model relationnet --shot_num 1 --mode test --weights checkpoint
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model` | covamnet | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, can, frn, deepbdc, maml, cosine, mann |
+| `--model` | covamnet | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, can, frn, deepbdc, maml, cosine |
 | `--way_num` | 3 | Number of classes per episode |
 | `--shot_num` | 1 | Support samples per class |
 | `--query_num` | 1 | Query samples per class |

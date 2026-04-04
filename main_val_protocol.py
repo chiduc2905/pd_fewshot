@@ -239,19 +239,14 @@ def main():
     base.log_model_parameters(net, args.model, device=args.device, image_size=args.image_size)
 
     if args.mode == "train":
-        if args.model == "adchot":
-            base.train_adchot_loop(net, train_X, train_y, val_X, val_y, args)
-        else:
-            base.train_loop(net, train_X, train_y, val_X, val_y, args)
+        base.train_loop(net, train_X, train_y, val_X, val_y, args)
         path = base.get_best_model_path(args)
         print(f"Evaluating with best checkpoint on val: {path}")
         base.load_model_weights(net, path, args.device)
-        base.prepare_dataset_conditioned_model(net, train_X, train_y, args)
         final_eval_mlfork_style(net, val_loader, args)
     else:
         if args.weights:
             base.load_model_weights(net, args.weights, args.device)
-            base.prepare_dataset_conditioned_model(net, train_X, train_y, args)
             final_eval_mlfork_style(net, val_loader, args)
         else:
             print("Error: Please specify --weights for test mode")
