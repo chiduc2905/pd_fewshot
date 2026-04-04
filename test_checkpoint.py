@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import seed_func
-from main import get_model, prepare_dataset_conditioned_model, test_final
+from main import get_model, test_final
 from net.model_factory import get_model_choices
 import wandb
 
@@ -201,7 +201,6 @@ def test_single_checkpoint(checkpoint_path, args):
     print(f"Loading checkpoint: {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, map_location=model_args.device)
     net.load_state_dict(state_dict)
-    prepare_dataset_conditioned_model(net, train_X=torch.from_numpy(dataset.X_train.astype(np.float32)), train_y=torch.from_numpy(dataset.y_train).long(), args=model_args)
 
     # Run test
     test_final(net, test_loader, model_args)

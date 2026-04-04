@@ -108,21 +108,6 @@ MODEL_REGISTRY = {
         "architecture": "Conv4-32 encoder + inner-loop adaptation",
         "metric": "Task-adapted Linear Classifier",
     },
-    "mann": {
-        "display_name": "MANN",
-        "architecture": "Conv64F embedding + external memory controller + least-used access write/read",
-        "metric": "External-Memory Episodic Readout",
-    },
-    "adchot": {
-        "display_name": "ADC-HOT",
-        "architecture": "ResNet12 backbone pretraining + paper-style adaptive distribution calibration with hierarchical OT",
-        "metric": "Calibrated Logistic Regression",
-    },
-    "adcmamba_sw": {
-        "display_name": "ADC-Mamba-SW",
-        "architecture": "Old ADC-HOT prior calibration + official Mamba token encoder + POT sliced Wasserstein prior trust",
-        "metric": "Calibrated Gaussian + Sliced Wasserstein Distance",
-    },
     "uscmamba": {
         "display_name": "USCMambaNet",
         "architecture": "PatchEmbed -> Conv stem -> dual-branch fusion -> late attention -> cosine metric head",
@@ -212,6 +197,16 @@ MODEL_REGISTRY = {
         "display_name": "SPIF-RDP",
         "architecture": "SPIF stable/variant encoder -> reliability-weighted distributional class object (prototype, diagonal variance, reliability) -> reliability-modulated global distance",
         "metric": "Reliability-Calibrated Distributional Prototype",
+    },
+    "spif_ota": {
+        "display_name": "SPIF-OTA",
+        "architecture": "Backbone tokens -> transport projector -> physics-aware token masses -> single-branch entropic OT matching -> shot-wise evidence aggregation",
+        "metric": "Physics-Aware Entropic Optimal Transport",
+    },
+    "spif_otccls": {
+        "display_name": "SPIF-OTCCLS",
+        "architecture": "ResNet12 RGB backbone -> stable/variant factorization with feature-wise gate -> energy-weighted sliced Wasserstein global scoring + confusability-conditioned local cosine scoring",
+        "metric": "Energy-Sliced Wasserstein + Confusability Local Cosine",
     },
     "spifaeb_v2": {
         "display_name": "SPIFAEB-v2",
@@ -431,46 +426,6 @@ def build_model_from_args(args):
             inner_steps=5,
             first_order=not getattr(args, "maml_second_order", False),
             max_way_num=32,
-            device=device,
-        )
-    if args.model == "mann":
-        MANNNet = _load_symbol("net.mann", "MANNNet")
-        return MANNNet(
-            image_size=image_size,
-            way_num=getattr(args, "way_num", 4),
-            cell_size=200,
-            memory_slots=128,
-            memory_dim=40,
-            num_reads=4,
-            gamma=0.95,
-            device=device,
-        )
-    if args.model == "adchot":
-        ADCHOTNet = _load_symbol("net.adchot", "ADCHOTNet")
-        return ADCHOTNet(
-            image_size=image_size,
-            way_num=getattr(args, "way_num", 4),
-            beta=0.8,
-            alpha=0.21,
-            lambd=0.3,
-            fewshot_backbone=fewshot_backbone,
-            device=device,
-        )
-    if args.model == "adcmamba_sw":
-        ADCMambaSWNet = _load_symbol("net.adcmamba_sw", "ADCMambaSWNet")
-        return ADCMambaSWNet(
-            image_size=image_size,
-            way_num=getattr(args, "way_num", 4),
-            token_dim=getattr(args, "token_dim", 128) or 128,
-            state_dim=getattr(args, "ssm_state_dim", 16),
-            mamba_depth=getattr(args, "ssm_depth", 2),
-            alpha=0.21,
-            lambd=0.3,
-            ema=0.05,
-            sw_num_projections=getattr(args, "sw_num_projections", 64),
-            sw_weight=getattr(args, "sw_weight", 1.0),
-            transport_temperature=getattr(args, "transport_temperature", 6.0),
-            fewshot_backbone=fewshot_backbone,
             device=device,
         )
     if args.model == "hierarchical_episodic_ssm_net":
@@ -1013,6 +968,62 @@ def build_model_from_args(args):
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
+        )
+    if args.model == "spif_ota":
+        SPIFOTA = _load_symbol("net.spif_ota", "SPIFOTA")
+        return SPIFOTA(
+            in_channels=3,
+            hidden_dim=64,
+            transport_dim=int(getattr(args, "spif_ota_transport_dim", None) or getattr(args, "token_dim", None) or 128),
+            projector_hidden_dim=(
+                None
+                if getattr(args, "spif_ota_projector_hidden_dim", None) is None
+                else int(getattr(args, "spif_ota_projector_hidden_dim"))
+            ),
+            mass_hidden_dim=(
+                None
+                if getattr(args, "spif_ota_mass_hidden_dim", None) is None
+                else int(getattr(args, "spif_ota_mass_hidden_dim"))
+            ),
+            mass_temperature=float(getattr(args, "spif_ota_mass_temperature", 1.0)),
+            sinkhorn_epsilon=float(getattr(args, "spif_ota_sinkhorn_epsilon", 0.05)),
+            sinkhorn_iterations=int(getattr(args, "spif_ota_sinkhorn_iterations", 60)),
+            shot_hidden_dim=int(getattr(args, "spif_ota_shot_hidden_dim", 32)),
+            shot_aggregation=str(getattr(args, "spif_ota_shot_aggregation", "learned")),
+            position_cost_weight=float(getattr(args, "spif_ota_position_cost_weight", 0.0)),
+            use_column_bias=_bool_flag(getattr(args, "spif_ota_use_column_bias", "true"), default=True),
+            lambda_mass=float(getattr(args, "spif_ota_lambda_mass", 0.0)),
+            lambda_consistency=float(getattr(args, "spif_ota_lambda_consistency", 0.0)),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            eps=float(getattr(args, "spif_ota_eps", 1e-6)),
+        )
+    if args.model == "spif_otccls":
+        SPIFOTCCLS = _load_symbol("net.spif_otccls", "SPIFOTCCLS")
+        return SPIFOTCCLS(
+            in_channels=3,
+            hidden_dim=640,
+            feature_dim=int(getattr(args, "spif_otccls_feature_dim", 256)),
+            gate_hidden=int(getattr(args, "spif_otccls_gate_hidden", 128)),
+            num_projections=int(getattr(args, "spif_otccls_num_projections", 64)),
+            num_quantiles=int(getattr(args, "spif_otccls_num_quantiles", 100)),
+            tau_g_init=float(getattr(args, "spif_otccls_tau_g_init", 10.0)),
+            tau_l_init=float(getattr(args, "spif_otccls_tau_l_init", 1.0)),
+            beta_init=float(getattr(args, "spif_otccls_beta_init", 0.5)),
+            alpha_init=float(getattr(args, "spif_otccls_alpha_init", 1.0)),
+            compact_loss_weight=float(getattr(args, "spif_otccls_compact_loss_weight", 0.1)),
+            decorr_loss_weight=float(getattr(args, "spif_otccls_decorr_loss_weight", 0.05)),
+            entropy_loss_weight=float(getattr(args, "spif_otccls_entropy_loss_weight", 0.01)),
+            global_only=_bool_flag(getattr(args, "spif_global_only", "false"), default=False),
+            local_only=_bool_flag(getattr(args, "spif_local_only", "false"), default=False),
+            swd_backend=str(getattr(args, "spif_otccls_swd_backend", "pot")),
+            eps=float(getattr(args, "spif_otccls_eps", 1e-6)),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=float(getattr(args, "spif_otccls_backbone_drop_rate", 0.05)),
+            resnet12_dropblock_size=int(getattr(args, "spif_otccls_backbone_dropblock_size", 5)),
         )
     if args.model == "spifce_shot":
         SPIFCEShot = _load_symbol("net.spif_shot", "SPIFCEShot")

@@ -11,8 +11,8 @@ from net.model_factory import get_model_choices, get_model_metadata
 
 SAMPLES_LIST = [60, 160, 240, None]
 SHOTS_DEFAULT = [1, 5]
-TRAIN_QUERY_NUM = 1
-EVAL_QUERY_NUM = 1
+TRAIN_QUERY_NUM = 5
+EVAL_QUERY_NUM = 10
 FIXED_CUDNN_DETERMINISTIC = "true"
 FIXED_CUDNN_BENCHMARK = "false"
 
@@ -33,7 +33,7 @@ def get_args():
     parser.add_argument(
         "--models",
         type=str,
-        default="covamnet,protonet,cosine,relationnet,matchingnet,mann,dn4,feat,deepemd,adchot,adcmamba_sw,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net",
+        default="covamnet,protonet,cosine,relationnet,matchingnet,dn4,feat,deepemd,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net",
         help="Comma-separated model registry names to run",
     )
     parser.add_argument("--fewshot_backbone", type=str, default="default", choices=["default", "resnet12", "conv64f"])
@@ -326,7 +326,7 @@ def run_experiment(
         "--query_num_test",
         str(EVAL_QUERY_NUM),
         "--image_size",
-        "64",
+        "84",
         "--mode",
         "train",
         "--project",
@@ -343,16 +343,22 @@ def run_experiment(
         "100",
         "--lr",
         "5e-4",
+        "--scheduler",
+        "cosine",
         "--step_size",
         "10",
         "--gamma",
         "0.5",
+        "--warmup_epochs",
+        "5",
+        "--min_lr",
+        "1e-6",
         "--weight_decay",
         "5e-4",
         "--grad_clip",
         grad_clip,
         "--label_smoothing",
-        "0.0",
+        "0.1",
         "--train_augment",
         "false",
         "--time_shift_prob",
@@ -368,7 +374,7 @@ def run_experiment(
         "--episode_num_val",
         "300",
         "--episode_num_test",
-        "300",
+        "400",
         "--seed",
         str(seed),
         "--gpu_id",
@@ -535,8 +541,9 @@ def main():
         )
         print(
             "Overrides   : "
-            f"lr=5e-4, grad_clip=0.0, "
-            "label_smoothing=0, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
+            "query(train/val/test)=5/10/10, episodes(test)=400, augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -574,8 +581,9 @@ def main():
         )
         print(
             "Overrides   : "
-            f"lr=5e-4, grad_clip=0.0, "
-            "label_smoothing=0, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
+            "query(train/val/test)=5/10/10, episodes(test)=400, augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -615,8 +623,9 @@ def main():
         )
         print(
             "Overrides   : "
-            f"lr=5e-4, grad_clip=0.0, "
-            "label_smoothing=0, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
+            "query(train/val/test)=5/10/10, episodes(test)=400, augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")

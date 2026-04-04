@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim import lr_scheduler
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
 import wandb
@@ -41,6 +41,34 @@ def _bool_flag(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).lower() == "true"
+
+
+PAPER_BASELINE_MODELS = {
+    "cosine",
+    "protonet",
+    "covamnet",
+    "matchingnet",
+    "relationnet",
+    "dn4",
+    "feat",
+    "deepemd",
+    "can",
+    "frn",
+    "deepbdc",
+    "maml",
+}
+
+
+def model_uses_label_smoothing(model_name):
+    return str(model_name) not in PAPER_BASELINE_MODELS
+
+
+def effective_label_smoothing(args, train=False):
+    if not train:
+        return 0.0
+    if not model_uses_label_smoothing(getattr(args, "model", "")):
+        return 0.0
+    return float(getattr(args, "label_smoothing", 0.0))
 
 
 def resolve_runtime_device(args):
@@ -88,16 +116,16 @@ def get_args():
     parser.add_argument("--way_num", type=int, default=4)
     parser.add_argument("--shot_num", type=int, default=1)
     parser.add_argument("--query_num", type=int, default=None, help="Legacy: same queries for all splits")
-    parser.add_argument("--query_num_train", type=int, default=1)
-    parser.add_argument("--query_num_val", type=int, default=1)
-    parser.add_argument("--query_num_test", type=int, default=1)
+    parser.add_argument("--query_num_train", type=int, default=5)
+    parser.add_argument("--query_num_val", type=int, default=10)
+    parser.add_argument("--query_num_test", type=int, default=10)
     parser.add_argument(
         "--selected_classes",
         type=str,
         default=None,
         help='Comma-separated class indices to use (e.g. "0,1"). If None, use all classes.',
     )
-    parser.add_argument("--image_size", type=int, default=64)
+    parser.add_argument("--image_size", type=int, default=84)
     parser.add_argument("--token_dim", type=int, default=128)
     parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--ssm_state_dim", type=int, default=16)
@@ -616,6 +644,39 @@ def get_args():
     parser.add_argument("--spif_rdp_consistency_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_decorr_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_sparse_weight", type=float, default=0.0)
+    parser.add_argument("--spif_ota_transport_dim", type=int, default=None)
+    parser.add_argument("--spif_ota_projector_hidden_dim", type=int, default=None)
+    parser.add_argument("--spif_ota_mass_hidden_dim", type=int, default=None)
+    parser.add_argument("--spif_ota_mass_temperature", type=float, default=1.0)
+    parser.add_argument("--spif_ota_sinkhorn_epsilon", type=float, default=0.05)
+    parser.add_argument("--spif_ota_sinkhorn_iterations", type=int, default=60)
+    parser.add_argument("--spif_ota_shot_hidden_dim", type=int, default=32)
+    parser.add_argument(
+        "--spif_ota_shot_aggregation",
+        type=str,
+        default="learned",
+        choices=["learned", "mean"],
+    )
+    parser.add_argument("--spif_ota_position_cost_weight", type=float, default=0.0)
+    parser.add_argument("--spif_ota_use_column_bias", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--spif_ota_lambda_mass", type=float, default=0.0)
+    parser.add_argument("--spif_ota_lambda_consistency", type=float, default=0.0)
+    parser.add_argument("--spif_ota_eps", type=float, default=1e-6)
+    parser.add_argument("--spif_otccls_feature_dim", type=int, default=256)
+    parser.add_argument("--spif_otccls_gate_hidden", type=int, default=128)
+    parser.add_argument("--spif_otccls_num_projections", type=int, default=64)
+    parser.add_argument("--spif_otccls_num_quantiles", type=int, default=100)
+    parser.add_argument("--spif_otccls_tau_g_init", type=float, default=10.0)
+    parser.add_argument("--spif_otccls_tau_l_init", type=float, default=1.0)
+    parser.add_argument("--spif_otccls_beta_init", type=float, default=0.5)
+    parser.add_argument("--spif_otccls_alpha_init", type=float, default=1.0)
+    parser.add_argument("--spif_otccls_compact_loss_weight", type=float, default=0.1)
+    parser.add_argument("--spif_otccls_decorr_loss_weight", type=float, default=0.05)
+    parser.add_argument("--spif_otccls_entropy_loss_weight", type=float, default=0.01)
+    parser.add_argument("--spif_otccls_swd_backend", type=str, default="pot", choices=["pot", "quantile", "auto"])
+    parser.add_argument("--spif_otccls_eps", type=float, default=1e-6)
+    parser.add_argument("--spif_otccls_backbone_drop_rate", type=float, default=0.05)
+    parser.add_argument("--spif_otccls_backbone_dropblock_size", type=int, default=5)
     parser.add_argument("--spif_local_sw_num_projections", type=int, default=64)
     parser.add_argument("--spif_local_sw_p", type=float, default=2.0)
     parser.add_argument("--spif_local_sw_normalize", type=str, default="true", choices=["true", "false"])
@@ -730,7 +791,7 @@ def get_args():
     )
     parser.add_argument("--episode_num_train", type=int, default=200)
     parser.add_argument("--episode_num_val", type=int, default=300)
-    parser.add_argument("--episode_num_test", type=int, default=300)
+    parser.add_argument("--episode_num_test", type=int, default=400)
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -741,9 +802,13 @@ def get_args():
     parser.add_argument("--cudnn_benchmark", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--gpu_id", type=int, default=0, help="CUDA device id (negative to force CPU)")
     parser.add_argument("--lr", type=float, default=5e-4, help="Base learning rate")
+    parser.add_argument("--scheduler", type=str, default="cosine", choices=["step", "cosine"])
     parser.add_argument("--step_size", type=int, default=10, help="StepLR decay interval in epochs")
     parser.add_argument("--gamma", type=float, default=0.5, help="StepLR multiplicative decay factor")
-    parser.add_argument("--label_smoothing", type=float, default=0.0)
+    parser.add_argument("--warmup_epochs", type=int, default=5)
+    parser.add_argument("--warmup_start_factor", type=float, default=0.1)
+    parser.add_argument("--min_lr", type=float, default=1e-6)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
     parser.add_argument(
         "--classification_loss",
         type=str,
@@ -807,18 +872,6 @@ def get_model(args):
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
             f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 100)}, "
             f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)})"
-        )
-    if args.model == "adchot":
-        print("  adchot: supervised base-class pretraining + fitted base statistics + OT calibration")
-    if args.model == "adcmamba_sw":
-        print(
-            "  adcmamba_sw: official mamba_ssm token encoder + POT sliced Wasserstein distance "
-            f"(token_dim={getattr(args, 'token_dim', 128)}, "
-            f"d_state={getattr(args, 'ssm_state_dim', 16)}, "
-            f"depth={getattr(args, 'ssm_depth', 2)}, "
-            f"sw_proj={getattr(args, 'sw_num_projections', 64)}, "
-            f"sw_weight={getattr(args, 'sw_weight', 1.0)}, "
-            f"transport_temperature={getattr(args, 'transport_temperature', 6.0)})"
         )
     if args.model == "hierarchical_episodic_ssm_net":
         print(
@@ -964,6 +1017,42 @@ def get_model(args):
         print(
             "  note: this implementation is now global-only for accuracy. `spif_global_only`, `spif_local_only`, "
             "`spif_rdp_top_r`, and `spif_rdp_beta0_init` are accepted only for backward compatibility."
+        )
+    if args.model == "spif_ota":
+        print(
+            "  spif_ota: single-branch transport projector + physics-aware token masses + "
+            "batched entropic OT + shot-wise evidence aggregation "
+            f"(transport_dim={getattr(args, 'spif_ota_transport_dim', None) or getattr(args, 'token_dim', None) or 128}, "
+            f"mass_hidden={getattr(args, 'spif_ota_mass_hidden_dim', None)}, "
+            f"mass_temp={getattr(args, 'spif_ota_mass_temperature', 1.0)}, "
+            f"sinkhorn_eps={getattr(args, 'spif_ota_sinkhorn_epsilon', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'spif_ota_sinkhorn_iterations', 60)}, "
+            f"shot_hidden={getattr(args, 'spif_ota_shot_hidden_dim', 32)}, "
+            f"shot_agg={getattr(args, 'spif_ota_shot_aggregation', 'learned')}, "
+            f"position_cost={getattr(args, 'spif_ota_position_cost_weight', 0.0)}, "
+            f"use_column_bias={getattr(args, 'spif_ota_use_column_bias', 'true')}, "
+            f"lambda_mass={getattr(args, 'spif_ota_lambda_mass', 0.0)}, "
+            f"lambda_consistency={getattr(args, 'spif_ota_lambda_consistency', 0.0)})"
+        )
+    if args.model == "spif_otccls":
+        print(
+            "  spif_otccls: ResNet12 RGB backbone + feature-wise stable/variant gating + "
+            "energy-weighted sliced Wasserstein global branch + confusability-conditioned local branch "
+            f"(feature_dim={getattr(args, 'spif_otccls_feature_dim', 256)}, "
+            f"gate_hidden={getattr(args, 'spif_otccls_gate_hidden', 128)}, "
+            f"num_projections={getattr(args, 'spif_otccls_num_projections', 64)}, "
+            f"num_quantiles={getattr(args, 'spif_otccls_num_quantiles', 100)}, "
+            f"tau_g_init={getattr(args, 'spif_otccls_tau_g_init', 10.0)}, "
+            f"tau_l_init={getattr(args, 'spif_otccls_tau_l_init', 1.0)}, "
+            f"beta_init={getattr(args, 'spif_otccls_beta_init', 0.5)}, "
+            f"alpha_init={getattr(args, 'spif_otccls_alpha_init', 1.0)}, "
+            f"compact_loss_weight={getattr(args, 'spif_otccls_compact_loss_weight', 0.1)}, "
+            f"decorr_loss_weight={getattr(args, 'spif_otccls_decorr_loss_weight', 0.05)}, "
+            f"entropy_loss_weight={getattr(args, 'spif_otccls_entropy_loss_weight', 0.01)}, "
+            f"swd_backend={getattr(args, 'spif_otccls_swd_backend', 'pot')}, "
+            f"backbone_drop_rate={getattr(args, 'spif_otccls_backbone_drop_rate', 0.05)}, "
+            f"global_only={getattr(args, 'spif_global_only', 'false')}, "
+            f"local_only={getattr(args, 'spif_local_only', 'false')})"
         )
     if args.model == "spifaeb_v2":
         stable_dim = int(getattr(args, "spif_stable_dim", 64) or 64)
@@ -1346,7 +1435,7 @@ def forward_scores(
 ):
     phase = phase or ("train" if train else "eval")
     if args.model == "maml":
-        smoothing = args.label_smoothing if train else 0.0
+        smoothing = effective_label_smoothing(args, train=train)
         return net(query, support, label_smoothing=smoothing)
     if args.model == "deepemd":
         if phase == "train":
@@ -1414,6 +1503,8 @@ def forward_scores(
         "spifaeb",
         "spifaeb_shot",
         "spif_rdp",
+        "spif_ota",
+        "spif_otccls",
     }:
         return net(query, support, return_aux=collect_diagnostics)
     if getattr(net, "requires_query_targets", False):
@@ -1424,7 +1515,7 @@ def forward_scores(
 def compute_standard_classification_loss(scores, targets, args, contrastive_loss_fn, train=False):
     if getattr(args, "classification_loss", "cross_entropy") == "repo_contrastive":
         return contrastive_loss_fn(scores, targets)
-    smoothing = args.label_smoothing if train else 0.0
+    smoothing = effective_label_smoothing(args, train=train)
     return F.cross_entropy(scores, targets, label_smoothing=smoothing)
 
 
@@ -1662,12 +1753,18 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "mean_reliability",
         "beta_eff",
         "beta0",
+        "rho_bar",
         "compact_loss",
+        "decorr_loss",
+        "entropy_loss",
         "separation_loss",
         "factorization_aux_loss",
         "lambda_value",
         "alpha_value",
         "tau_value",
+        "tau_local_value",
+        "support_energy_entropy",
+        "mean_attention_entropy",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -1750,16 +1847,22 @@ def format_diagnostic_summary(metrics):
         "mean_reliability",
         "beta_eff",
         "beta0",
+        "rho_bar",
         "global_margin",
         "local_margin",
         "global_branch_ce",
         "local_branch_ce",
         "compact_loss",
+        "decorr_loss",
+        "entropy_loss",
         "separation_loss",
         "factorization_aux_loss",
         "lambda_value",
         "alpha_value",
         "tau_value",
+        "tau_local_value",
+        "support_energy_entropy",
+        "mean_attention_entropy",
         "mean_shot_weight_entropy",
         "true_distance",
         "best_negative_distance",
@@ -1783,23 +1886,76 @@ def format_diagnostic_summary(metrics):
     return ", ".join(chunks)
 
 
-def _dataset_conditioned_ready(net):
-    ready = getattr(net, "base_stats_ready", None)
-    if ready is None:
-        return False
-    if isinstance(ready, torch.Tensor):
-        return bool(ready.item())
-    return bool(ready)
+def build_scheduler(optimizer, args):
+    scheduler_name = getattr(args, "scheduler", "cosine")
+    if scheduler_name == "step":
+        return lr_scheduler.StepLR(
+            optimizer,
+            step_size=args.step_size,
+            gamma=args.gamma,
+        )
+
+    warmup_epochs = max(0, int(getattr(args, "warmup_epochs", 0)))
+    warmup_start_factor = float(getattr(args, "warmup_start_factor", 0.1))
+    warmup_start_factor = min(max(warmup_start_factor, 1e-4), 1.0)
+    min_lr = float(getattr(args, "min_lr", 1e-6))
+    total_epochs = max(1, int(args.num_epochs))
+
+    if warmup_epochs > 0 and total_epochs > warmup_epochs:
+        warmup = lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=warmup_start_factor,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        cosine = lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, total_epochs - warmup_epochs),
+            eta_min=min_lr,
+        )
+        return lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_epochs],
+        )
+
+    if warmup_epochs > 0:
+        return lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=warmup_start_factor,
+            end_factor=1.0,
+            total_iters=max(1, warmup_epochs),
+        )
+
+    return lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_epochs,
+        eta_min=min_lr,
+    )
 
 
-def prepare_dataset_conditioned_model(net, train_X, train_y, args, force=False):
-    if not hasattr(net, "fit_base_statistics"):
+def describe_scheduler(args):
+    scheduler_name = getattr(args, "scheduler", "cosine")
+    if scheduler_name == "step":
+        return f"StepLR(step_size={args.step_size}, gamma={args.gamma})"
+    warmup_epochs = max(0, int(getattr(args, "warmup_epochs", 0)))
+    warmup_start_factor = min(max(float(getattr(args, "warmup_start_factor", 0.1)), 1e-4), 1.0)
+    cosine_desc = f"CosineAnnealingLR(T_max={args.num_epochs}, eta_min={getattr(args, 'min_lr', 1e-6):.1e})"
+    if warmup_epochs <= 0:
+        return cosine_desc
+    return (
+        f"LinearLR(start_factor={warmup_start_factor:.1e}, total_iters={warmup_epochs}) -> "
+        f"CosineAnnealingLR(T_max={max(1, args.num_epochs - warmup_epochs)}, eta_min={getattr(args, 'min_lr', 1e-6):.1e})"
+    )
+
+
+def maybe_load_scheduler_state(scheduler, scheduler_state, checkpoint_path):
+    if scheduler is None or scheduler_state is None:
         return
-    if not force and _dataset_conditioned_ready(net):
-        return
-    print("Fitting ADC-HOT base statistics from the training split ...")
-    fit_batch_size = max(16, min(64, len(train_X)))
-    net.fit_base_statistics(train_X, train_y, batch_size=fit_batch_size)
+    try:
+        scheduler.load_state_dict(scheduler_state)
+    except Exception as exc:
+        print(f"Warning: failed to load scheduler state from {checkpoint_path}: {exc}")
 
 
 def train_loop(net, train_X, train_y, val_X, val_y, args):
@@ -1808,11 +1964,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
     contrastive_loss_fn = ContrastiveLoss().to(device)
 
     optimizer = optim.AdamW(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = lr_scheduler.StepLR(
-        optimizer,
-        step_size=args.step_size,
-        gamma=args.gamma,
-    )
+    scheduler = build_scheduler(optimizer, args)
 
     train_augment = _bool_flag(args.train_augment, default=False)
     augment_cfg = build_train_augment_cfg(args)
@@ -1835,8 +1987,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
             scheduler_state = checkpoint.get("scheduler_state")
             if optimizer_state is not None:
                 optimizer.load_state_dict(optimizer_state)
-            if scheduler is not None and scheduler_state is not None:
-                scheduler.load_state_dict(scheduler_state)
+            maybe_load_scheduler_state(scheduler, scheduler_state, args.resume)
             history = checkpoint.get("history", history)
             best_acc = float(checkpoint.get("best_acc", 0.0))
             start_epoch = int(checkpoint.get("epoch", 0)) + 1
@@ -1848,17 +1999,19 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         print(f"Initialized model weights from {args.weights}")
 
     val_seed = args.seed + 1
+    train_smoothing = effective_label_smoothing(args, train=True)
+    smoothing_policy = "enabled for repo-new models only" if train_smoothing > 0 else "disabled for paper baselines"
 
     print(
-        f"Training protocol: scheduler=StepLR(step_size={args.step_size}, gamma={args.gamma}), "
+        f"Training protocol: scheduler={describe_scheduler(args)}, "
         f"lr={args.lr:.2e}, classification_loss={args.classification_loss}, "
-        f"label_smoothing={args.label_smoothing:.3f}, "
+        f"label_smoothing=config={args.label_smoothing:.3f}, effective={train_smoothing:.3f} ({smoothing_policy}), "
         f"train_augment={train_augment}, train_seed=args.seed+epoch, val_seed={val_seed}, "
         f"num_workers={args.num_workers}, pin_memory={_pin_memory_enabled(args)}, "
         f"persistent_workers={_persistent_workers_enabled(args)}, "
         f"cudnn(deterministic={torch.backends.cudnn.deterministic}, benchmark={torch.backends.cudnn.benchmark})"
     )
-    if args.classification_loss != "cross_entropy" and args.label_smoothing > 0:
+    if args.classification_loss != "cross_entropy" and train_smoothing > 0:
         print("Warning: label_smoothing is ignored when classification_loss=repo_contrastive.")
     if train_augment:
         print(f"Augmentation config: {augment_cfg}")
@@ -2019,193 +2172,6 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
             print(f"  -> New best val: {val_acc:.4f}")
             wandb.run.summary["best_val_acc"] = best_acc
 
-            final_path = get_best_model_path(args)
-            torch.save(net.state_dict(), final_path)
-            print(f"  Saved best model to {final_path}")
-
-        if _bool_flag(args.save_last_checkpoint, default=True):
-            last_path = get_last_checkpoint_path(args)
-            checkpoint = {
-                "epoch": epoch,
-                "model_state": net.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict(),
-                "best_acc": best_acc,
-                "history": history,
-                "args": vars(args),
-            }
-            torch.save(checkpoint, last_path)
-
-    samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
-    tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
-    curves_path = os.path.join(
-        args.path_results,
-        f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}",
-    )
-    try:
-        plot_training_curves(history, curves_path)
-        if os.path.exists(f"{curves_path}_curves.png"):
-            wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
-    except RuntimeError as exc:
-        print(f"Skipping training curves: {exc}")
-
-    print(f"Best Validation Accuracy: {best_acc:.4f}")
-    return best_acc, history
-
-
-def train_adchot_loop(net, train_X, train_y, val_X, val_y, args):
-    device = torch.device(args.device)
-    contrastive_loss_fn = ContrastiveLoss().to(device)
-    history = {
-        "train_acc": [],
-        "val_acc": [],
-        "train_loss": [],
-        "val_loss": [],
-    }
-
-    optimizer = optim.AdamW(net.pretrain_parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = lr_scheduler.StepLR(
-        optimizer,
-        step_size=args.step_size,
-        gamma=args.gamma,
-    )
-
-    best_acc = 0.0
-    start_epoch = 1
-
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location=args.device)
-        state_dict = strip_module_prefix(unwrap_model_state(checkpoint))
-        net.load_state_dict(state_dict)
-
-        if isinstance(checkpoint, dict) and "model_state" in checkpoint:
-            optimizer_state = checkpoint.get("optimizer_state")
-            scheduler_state = checkpoint.get("scheduler_state")
-            if optimizer_state is not None:
-                optimizer.load_state_dict(optimizer_state)
-            if scheduler_state is not None:
-                scheduler.load_state_dict(scheduler_state)
-            history = checkpoint.get("history", history)
-            best_acc = float(checkpoint.get("best_acc", 0.0))
-            start_epoch = int(checkpoint.get("epoch", 0)) + 1
-            print(f"Resuming ADC-HOT training from {args.resume} at epoch {start_epoch}/{args.num_epochs}")
-        else:
-            print(f"Loaded ADC-HOT weights from {args.resume}; restarting pretraining from epoch 1")
-    elif args.weights:
-        load_model_weights(net, args.weights, args.device)
-        print(f"Initialized ADC-HOT model weights from {args.weights}")
-
-    supervised_batch_size = max(16, min(64, len(train_X)))
-    train_loader = DataLoader(
-        TensorDataset(train_X, train_y),
-        **_build_loader_kwargs(
-            args,
-            batch_size=supervised_batch_size,
-            shuffle=True,
-            generator=torch.Generator().manual_seed(args.seed),
-            worker_seed=args.seed,
-        ),
-    )
-    val_seed = args.seed + 1
-
-    print(
-        "ADC-HOT protocol: supervised backbone pretraining on base classes, "
-        "then fit base statistics and evaluate episodes with the paper-style calibration head."
-    )
-    if args.classification_loss != "cross_entropy" and args.label_smoothing > 0:
-        print("Warning: label_smoothing is ignored when classification_loss=repo_contrastive.")
-
-    if start_epoch > args.num_epochs:
-        print(f"Checkpoint already reached epoch {start_epoch - 1}; skipping ADC-HOT training loop.")
-        prepare_dataset_conditioned_model(net, train_X, train_y, args)
-        return best_acc, history
-
-    for epoch in range(start_epoch, args.num_epochs + 1):
-        net.train()
-        total_loss = 0.0
-        train_correct = 0
-        train_total = 0
-        current_lr = optimizer.param_groups[0]["lr"]
-
-        non_blocking = _pin_memory_enabled(args) and device.type == "cuda"
-        pbar = tqdm(train_loader, desc=f"ADC-HOT Epoch {epoch}/{args.num_epochs}")
-        for images, labels in pbar:
-            optimizer.zero_grad()
-            images = images.to(device, non_blocking=non_blocking)
-            labels = labels.to(device)
-
-            logits = net.pretrain_logits(images)
-            loss = compute_standard_classification_loss(
-                logits,
-                labels,
-                args,
-                contrastive_loss_fn,
-                train=True,
-            )
-            loss.backward()
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(net.pretrain_parameters(), args.grad_clip)
-            optimizer.step()
-
-            total_loss += loss.item()
-            preds = logits.argmax(dim=1)
-            train_correct += (preds == labels).sum().item()
-            train_total += labels.size(0)
-            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{current_lr:.2e}")
-
-        scheduler.step()
-        train_acc = train_correct / train_total if train_total > 0 else 0.0
-        avg_loss = total_loss / max(1, len(train_loader))
-
-        prepare_dataset_conditioned_model(net, train_X, train_y, args, force=True)
-
-        val_ds = FewshotDataset(
-            val_X,
-            val_y,
-            args.episode_num_val,
-            args.way_num,
-            args.shot_num,
-            args.query_num_val,
-            seed=val_seed,
-        )
-        val_loader = DataLoader(
-            val_ds,
-            **_build_loader_kwargs(
-                args,
-                batch_size=1,
-                shuffle=False,
-                worker_seed=val_seed,
-            ),
-        )
-        val_acc, val_loss, _ = evaluate(net, val_loader, args)
-
-        history["train_acc"].append(train_acc)
-        history["val_acc"].append(val_acc)
-        history["train_loss"].append(avg_loss)
-        history["val_loss"].append(val_loss if val_loss else 0.0)
-
-        train_val_gap = train_acc - val_acc
-        print(
-            f"Epoch {epoch}: SupLoss={avg_loss:.4f}, SupTrain={train_acc:.4f}, "
-            f"EpisodicVal={val_acc:.4f} (gap={train_val_gap:+.4f})"
-        )
-
-        wandb.log(
-            {
-                "epoch": epoch,
-                "loss/train": avg_loss,
-                "loss/val": val_loss,
-                "accuracy/train": train_acc,
-                "accuracy/val": val_acc,
-                "train_val_gap": train_val_gap,
-                "lr": current_lr,
-            }
-        )
-
-        if val_acc > best_acc:
-            best_acc = val_acc
-            print(f"  -> New best val: {val_acc:.4f}")
-            wandb.run.summary["best_val_acc"] = best_acc
             final_path = get_best_model_path(args)
             torch.save(net.state_dict(), final_path)
             print(f"  Saved best model to {final_path}")
@@ -2609,7 +2575,7 @@ def calculate_flops(model, input_size=(3, 64, 64), device="cuda"):
     return None, None
 
 
-def log_model_parameters(model, model_name, device="cuda", image_size=64):
+def log_model_parameters(model, model_name, device="cuda", image_size=84):
     total_params = sum(param.numel() for param in model.parameters())
     trainable_params = sum(param.numel() for param in model.parameters() if param.requires_grad)
 
@@ -2804,20 +2770,15 @@ def main():
     log_model_parameters(net, args.model, device=args.device, image_size=args.image_size)
 
     if args.mode == "train":
-        if args.model == "adchot":
-            train_adchot_loop(net, train_X, train_y, val_X, val_y, args)
-        else:
-            train_loop(net, train_X, train_y, val_X, val_y, args)
+        train_loop(net, train_X, train_y, val_X, val_y, args)
         if not _bool_flag(args.skip_final_test, default=False):
             path = get_best_model_path(args)
             print(f"Testing with best checkpoint: {path}")
             load_model_weights(net, path, args.device)
-            prepare_dataset_conditioned_model(net, train_X, train_y, args)
             test_final(net, test_loader, args, test_X=test_X, test_y=test_y, test_file_paths=test_file_paths)
     else:
         if args.weights:
             load_model_weights(net, args.weights, args.device)
-            prepare_dataset_conditioned_model(net, train_X, train_y, args)
             test_final(net, test_loader, args, test_X=test_X, test_y=test_y, test_file_paths=test_file_paths)
         else:
             print("Error: Please specify --weights for test mode")
