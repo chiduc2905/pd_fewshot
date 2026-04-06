@@ -281,7 +281,6 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
         euclidean_distance = diff.square().sum(dim=-1)
         mahalanobis_distance = (diff.square() / variance.unsqueeze(0).clamp_min(self.eps)).sum(dim=-1)
 
-<<<<<<< HEAD
         # ===== Architectural contribution: log-determinant correction =====
         # Full Gaussian log-likelihood: log p(q|c) = -½ d_M(q,c) - ½ Σ_j log v_{c,j} - const
         # The log-det term penalizes high-variance classes, which is missing
@@ -293,13 +292,6 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
 
         # ===== Architectural contribution: reliability-modulated distance blend =====
         total_distance = reliability.unsqueeze(0) * mahalanobis_with_logdet + (
-=======
-        query_var_sqrt = variance.new_full((), self.variance_floor).sqrt()
-        bures_term = (query_var_sqrt - variance.sqrt()).square().sum(dim=-1)
-        bw_distance = euclidean_distance + bures_term.unsqueeze(0)
-
-        original_distance = reliability.unsqueeze(0) * mahalanobis_distance + (
->>>>>>> 52843a780ed18efe33834d5cf1f039e4b3676beb
             1.0 - reliability.unsqueeze(0)
         ) * euclidean_distance
         total_distance = bw_distance if self.use_bures_global else original_distance
@@ -316,11 +308,7 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
             "support_weights": support_weights,
             "mahalanobis_distance": mahalanobis_distance,
             "euclidean_distance": euclidean_distance,
-<<<<<<< HEAD
             "log_det_per_class": log_det_per_class,
-=======
-            "bw_distance": bw_distance,
->>>>>>> 52843a780ed18efe33834d5cf1f039e4b3676beb
             "total_distance": total_distance,
             "lambda_value": lambda_value.detach(),
             "alpha_value": alpha_value.detach(),
@@ -663,7 +651,6 @@ class SPIFRDP(BaseConv64FewShotModel):
                 )
             return logits
 
-<<<<<<< HEAD
         return {
             "logits": logits,
             "aux_loss": aux_loss,
@@ -695,55 +682,3 @@ class SPIFRDP(BaseConv64FewShotModel):
                 dim=0,
             ),
         }
-=======
-        local_scores = None
-        beta_eff = None
-        if diagnostics and diagnostics[0]["local_scores"] is not None:
-            local_scores = torch.cat([item["local_scores"] for item in diagnostics], dim=0)
-            beta_eff = torch.stack([item["beta_eff"] for item in diagnostics]).mean()
-
-        return SPIFRDPOutput(
-            {
-                "logits": logits,
-                "aux_loss": aux_loss,
-                "global_scores": torch.cat([item["global_scores"] for item in diagnostics], dim=0),
-                "total_distance": torch.cat([item["total_distance"] for item in diagnostics], dim=0),
-                "mahalanobis_distance": torch.cat([item["mahalanobis_distance"] for item in diagnostics], dim=0),
-                "euclidean_distance": torch.cat([item["euclidean_distance"] for item in diagnostics], dim=0),
-                "class_reliability": torch.cat([item["class_reliability"] for item in diagnostics], dim=0),
-                "class_compactness": torch.cat([item["class_compactness"] for item in diagnostics], dim=0),
-                "prototype": torch.stack([item["prototype"] for item in diagnostics], dim=0),
-                "variance": torch.stack([item["variance"] for item in diagnostics], dim=0),
-                "support_weights": torch.stack([item["support_weights"] for item in diagnostics], dim=0),
-                "mean_reliability": torch.stack([item["mean_reliability"] for item in diagnostics]).mean(),
-                "compact_loss": torch.stack([item["compact_loss"] for item in diagnostics]).mean(),
-                "separation_loss": torch.stack([item["separation_loss"] for item in diagnostics]).mean(),
-                "factorization_aux_loss": torch.stack([item["factorization_aux_loss"] for item in diagnostics]).mean(),
-                "lambda_value": torch.stack([item["lambda_value"] for item in diagnostics]).mean(),
-                "alpha_value": torch.stack([item["alpha_value"] for item in diagnostics]).mean(),
-                "tau_value": torch.stack([item["tau_value"] for item in diagnostics]).mean(),
-                "mean_gate": torch.stack([item["mean_gate"] for item in diagnostics]).mean(),
-                "stable_global_embeddings": torch.cat(
-                    [item["stable_global_embeddings"] for item in diagnostics],
-                    dim=0,
-                ),
-                "variant_global_embeddings": torch.cat(
-                    [item["variant_global_embeddings"] for item in diagnostics],
-                    dim=0,
-                ),
-                "local_scores": local_scores,
-                "bw_distance": torch.cat([item["bw_distance"] for item in diagnostics], dim=0),
-                "rho_var_loss": torch.stack([item["rho_var_loss"] for item in diagnostics]).mean(),
-                "beta_eff": beta_eff,
-            }
-        )
-
-
-ABLATION_CONFIGS = {
-    "full_model": dict(global_only=False, rdp_rho_var_weight=0.01, use_bures_global=True),
-    "global_bw_only": dict(global_only=True, rdp_rho_var_weight=0.0, use_bures_global=True),
-    "global_original": dict(global_only=True, rdp_rho_var_weight=0.0, use_bures_global=False),
-    "local_no_vhat_coupling": dict(global_only=False, use_bures_global=True, local_use_vhat_coupling=False),
-    "no_rho_var_reg": dict(global_only=False, rdp_rho_var_weight=0.0, use_bures_global=True),
-}
->>>>>>> 52843a780ed18efe33834d5cf1f039e4b3676beb
