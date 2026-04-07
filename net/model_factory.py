@@ -303,6 +303,11 @@ MODEL_REGISTRY = {
         "architecture": "ResNet12/Conv64F -> Transformer tokens -> support basis distillation -> SW prior retrieval -> prior-completed reconstruction subspace",
         "metric": "Prior-Augmented Reconstruction Subspace",
     },
+    "hrot_fsl": {
+        "display_name": "HROT-FSL",
+        "architecture": "Backbone spatial tokens -> Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive mass",
+        "metric": "Hyperbolic Relational Optimal Transport",
+    },
     "transport_prior_replay_mamba_net": {
         "display_name": "TPR-MambaNet",
         "architecture": "Conv64F -> multi-atom support prior calibration -> replay-controlled query reader -> trajectory transport head",
@@ -1682,6 +1687,43 @@ def build_model_from_args(args):
             eval_projection_mode=str(getattr(args, "spif_papersw_eval_projection_mode", "fixed")),
             eval_num_repeats=int(getattr(args, "spif_papersw_eval_num_repeats", 1)),
             projection_seed=int(getattr(args, "spif_papersw_projection_seed", 7)),
+        )
+    if args.model == "hrot_fsl":
+        HROTFSL = _load_symbol("net.hrot_fsl", "HROTFSL")
+        hidden_dim = 640 if fewshot_backbone == "resnet12" else 64
+        return HROTFSL(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "hrot_token_dim", getattr(args, "token_dim", 128)) or 128),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            variant=str(getattr(args, "hrot_variant", "E")),
+            eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
+            curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
+            projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),
+            score_scale=float(getattr(args, "hrot_score_scale", 16.0)),
+            tau_q=float(getattr(args, "hrot_tau_q", 0.5)),
+            tau_c=float(getattr(args, "hrot_tau_c", 0.5)),
+            sinkhorn_epsilon=float(getattr(args, "hrot_sinkhorn_epsilon", 0.1)),
+            sinkhorn_iterations=int(getattr(args, "hrot_sinkhorn_iterations", 60)),
+            sinkhorn_tolerance=float(getattr(args, "hrot_sinkhorn_tolerance", 1e-5)),
+            fixed_mass=float(getattr(args, "hrot_fixed_mass", 0.8)),
+            min_mass=float(getattr(args, "hrot_min_mass", 0.1)),
+            mass_bonus_init=float(getattr(args, "hrot_mass_bonus_init", 1.0)),
+            lambda_rho=float(getattr(args, "hrot_lambda_rho", 0.01)),
+            rho_target=float(getattr(args, "hrot_rho_target", 0.8)),
+            lambda_curvature=float(getattr(args, "hrot_lambda_curvature", 0.0)),
+            min_curvature=float(getattr(args, "hrot_min_curvature", 0.05)),
+            normalize_euclidean_tokens=_bool_flag(
+                getattr(args, "hrot_normalize_euclidean_tokens", "true"),
+                default=True,
+            ),
+            eval_use_float64=_bool_flag(getattr(args, "hrot_eval_use_float64", "true"), default=True),
+            hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
+            ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
+            eps=float(getattr(args, "hrot_eps", 1e-6)),
         )
     if args.model in {"warn", "pars_net"}:
         WassersteinRoutedAttentiveReconstructionNet = _load_symbol(

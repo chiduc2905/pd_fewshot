@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -196,3 +198,37 @@ def test_spif_ota_model_factory_builds_and_runs():
     assert outputs["logits"].shape == (2, 3)
     assert outputs["support_tokens"].shape[-1] == 24
     assert torch.isfinite(outputs["logits"]).all()
+
+
+def test_forward_scores_routes_query_targets_to_spif_ota():
+    source = Path("main.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+
+    forward_scores = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "forward_scores"
+    )
+    spif_ota_branch = None
+    for node in ast.walk(forward_scores):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Attribute)
+            and test.left.attr == "model"
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "spif_ota"
+        ):
+            spif_ota_branch = node
+            break
+
+    assert spif_ota_branch is not None, "forward_scores must keep a dedicated spif_ota branch"
+
+    call = spif_ota_branch.body[0].value
+    assert isinstance(call, ast.Call)
+    keyword_names = {kw.arg for kw in call.keywords}
+    assert "query_targets" in keyword_names
+    assert "return_aux" in keyword_names

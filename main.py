@@ -782,6 +782,29 @@ def get_args():
     parser.add_argument("--warn_score_scale", type=float, default=16.0)
     parser.add_argument("--warn_diversity_weight", type=float, default=0.0)
     parser.add_argument("--warn_recon_lambda_init", type=float, default=0.1)
+    parser.add_argument("--hrot_token_dim", type=int, default=None)
+    parser.add_argument("--hrot_variant", type=str, default="E", choices=["A", "B", "C", "D", "E"])
+    parser.add_argument("--hrot_eam_hidden_dim", type=int, default=256)
+    parser.add_argument("--hrot_curvature_init", type=float, default=1.0)
+    parser.add_argument("--hrot_projection_scale", type=float, default=0.1)
+    parser.add_argument("--hrot_score_scale", type=float, default=16.0)
+    parser.add_argument("--hrot_tau_q", type=float, default=0.5)
+    parser.add_argument("--hrot_tau_c", type=float, default=0.5)
+    parser.add_argument("--hrot_sinkhorn_epsilon", type=float, default=0.1)
+    parser.add_argument("--hrot_sinkhorn_iterations", type=int, default=60)
+    parser.add_argument("--hrot_sinkhorn_tolerance", type=float, default=1e-5)
+    parser.add_argument("--hrot_fixed_mass", type=float, default=0.8)
+    parser.add_argument("--hrot_min_mass", type=float, default=0.1)
+    parser.add_argument("--hrot_mass_bonus_init", type=float, default=1.0)
+    parser.add_argument("--hrot_lambda_rho", type=float, default=0.01)
+    parser.add_argument("--hrot_rho_target", type=float, default=0.8)
+    parser.add_argument("--hrot_lambda_curvature", type=float, default=0.0)
+    parser.add_argument("--hrot_min_curvature", type=float, default=0.05)
+    parser.add_argument("--hrot_normalize_euclidean_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--hrot_eval_use_float64", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--hrot_hyperbolic_backend", type=str, default="auto", choices=["auto", "geoopt", "native"])
+    parser.add_argument("--hrot_ot_backend", type=str, default="native", choices=["auto", "native", "pot"])
+    parser.add_argument("--hrot_eps", type=float, default=1e-6)
 
     parser.add_argument(
         "--training_samples",
@@ -1310,6 +1333,25 @@ def get_model(args):
             f"sw_proj={getattr(args, 'warn_sw_num_projections', 64)}, "
             f"prior_temp={getattr(args, 'warn_prior_temperature', 1.0)})"
         )
+    if args.model == "hrot_fsl":
+        print(
+            "  hrot_fsl: backbone spatial tokens -> Euclidean projector -> "
+            "Poincare-ball geometry -> balanced/unbalanced relational transport "
+            f"(variant={getattr(args, 'hrot_variant', 'E')}, "
+            f"token_dim={getattr(args, 'hrot_token_dim', None) or getattr(args, 'token_dim', 128)}, "
+            f"eam_hidden={getattr(args, 'hrot_eam_hidden_dim', 256)}, "
+            f"curvature_init={getattr(args, 'hrot_curvature_init', 1.0)}, "
+            f"proj_scale={getattr(args, 'hrot_projection_scale', 0.1)}, "
+            f"score_scale={getattr(args, 'hrot_score_scale', 16.0)}, "
+            f"tau_q={getattr(args, 'hrot_tau_q', 0.5)}, "
+            f"tau_c={getattr(args, 'hrot_tau_c', 0.5)}, "
+            f"sinkhorn_eps={getattr(args, 'hrot_sinkhorn_epsilon', 0.1)}, "
+            f"sinkhorn_iters={getattr(args, 'hrot_sinkhorn_iterations', 60)}, "
+            f"hyp_backend={getattr(args, 'hrot_hyperbolic_backend', 'auto')}, "
+            f"ot_backend={getattr(args, 'hrot_ot_backend', 'native')}, "
+            f"fixed_mass={getattr(args, 'hrot_fixed_mass', 0.8)}, "
+            f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)})"
+        )
     return model
 
 
@@ -1495,6 +1537,22 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
+    if args.model == "spif_ota":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
+    if args.model == "hrot_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
     if args.model in {
         "spifce",
         "spifmax",
@@ -1503,7 +1561,6 @@ def forward_scores(
         "spifaeb",
         "spifaeb_shot",
         "spif_rdp",
-        "spif_ota",
         "spif_otccls",
     }:
         return net(query, support, return_aux=collect_diagnostics)
