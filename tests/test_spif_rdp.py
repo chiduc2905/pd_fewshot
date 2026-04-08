@@ -109,6 +109,8 @@ def test_distributional_head_matches_manual_formula():
     assert torch.allclose(outputs["mahalanobis_distance"], mahalanobis_distance, atol=1e-6, rtol=0.0)
     assert torch.allclose(outputs["euclidean_distance"], euclidean_distance, atol=1e-6, rtol=0.0)
     assert torch.allclose(outputs["total_distance"], total_distance, atol=1e-6, rtol=0.0)
+    assert outputs["bw_distance"].shape == total_distance.shape
+    assert torch.isfinite(outputs["bw_distance"]).all()
     assert torch.allclose(outputs["global_scores"], global_scores, atol=1e-6, rtol=0.0)
     assert torch.allclose(outputs["support_weights"].sum(dim=1), torch.ones(2), atol=1e-6, rtol=0.0)
 
@@ -160,6 +162,7 @@ def test_spif_rdp_forward_is_finite_in_low_shot_regimes(shot_num: int):
     assert outputs["logits"].shape == (3, 5)
     assert outputs["global_scores"].shape == (3, 5)
     assert outputs["total_distance"].shape == (3, 5)
+    assert outputs["bw_distance"].shape == (3, 5)
     assert outputs["mahalanobis_distance"].shape == (3, 5)
     assert outputs["euclidean_distance"].shape == (3, 5)
     assert outputs["class_reliability"].shape == (3, 5)
@@ -172,6 +175,7 @@ def test_spif_rdp_forward_is_finite_in_low_shot_regimes(shot_num: int):
         "logits",
         "global_scores",
         "total_distance",
+        "bw_distance",
         "mahalanobis_distance",
         "euclidean_distance",
         "class_reliability",
@@ -270,3 +274,85 @@ def test_spif_rdp_model_factory_builds_and_runs():
     assert outputs["logits"].shape == (2, 3)
     assert outputs["global_scores"].shape == (2, 3)
     assert outputs["total_distance"].shape == (2, 3)
+
+
+def test_spif_rdp_mars_backbone_runs_and_backpropagates():
+    torch.manual_seed(11)
+    model = _build_model(
+        backbone_name="mars",
+        image_size=32,
+        hidden_dim=64,
+        stable_dim=24,
+        variant_dim=24,
+        gate_hidden=8,
+        mars_base_dim=16,
+        mars_output_dim=64,
+        mars_drop_path=0.0,
+        mars_perturb_sigma=0.0,
+        rdp_use_mars_global_prior=True,
+        rdp_mars_global_mix_init=0.4,
+    )
+    model.train()
+
+    query = torch.randn(1, 2, 3, 32, 32)
+    support = torch.randn(1, 3, 2, 3, 32, 32)
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].pow(2).mean() + outputs["aux_loss"]
+    loss.backward()
+
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["local_scores"].shape == (2, 3)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["local_scores"]).all()
+    assert model.mars_global_adapter[1].weight.grad is not None
+    assert torch.isfinite(model.mars_global_adapter[1].weight.grad).all()
+
+
+def test_spif_rdp_model_factory_builds_and_runs_with_mars():
+    args = SimpleNamespace(
+        model="spif_rdp",
+        device="cpu",
+        image_size=32,
+        fewshot_backbone="mars",
+        spif_stable_dim=24,
+        spif_variant_dim=24,
+        spif_gate_hidden=8,
+        spif_gate_on="true",
+        spif_factorization_on="true",
+        spif_global_only="false",
+        spif_local_only="false",
+        spif_token_l2norm="true",
+        spif_consistency_dropout=0.1,
+        spif_rdp_top_r=4,
+        spif_rdp_lambda_init=0.5,
+        spif_rdp_alpha_init=1.2,
+        spif_rdp_tau_init=4.0,
+        spif_rdp_variance_floor=0.05,
+        spif_rdp_compact_loss_weight=0.1,
+        spif_rdp_sep_loss_weight=0.05,
+        spif_rdp_sep_margin=0.5,
+        spif_rdp_eps=1e-6,
+        spif_rdp_consistency_weight=0.0,
+        spif_rdp_decorr_weight=0.0,
+        spif_rdp_sparse_weight=0.0,
+        spif_rdp_beta_init=0.5,
+        spif_rdp_mars_base_dim=16,
+        spif_rdp_mars_output_dim=64,
+        spif_rdp_mars_drop_path=0.0,
+        spif_rdp_mars_perturb_sigma=0.0,
+        spif_rdp_use_mars_global_prior="true",
+        spif_rdp_mars_global_mix_init=0.4,
+    )
+    model = build_model_from_args(args)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 32, 32)
+    support = torch.randn(1, 3, 2, 3, 32, 32)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["global_scores"].shape == (2, 3)
+    assert outputs["local_scores"].shape == (2, 3)

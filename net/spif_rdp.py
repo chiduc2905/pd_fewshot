@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from net.fewshot_common import BaseConv64FewShotModel, feature_map_to_tokens
-from net.spif import SPIFEncoder
+from net.spif import SPIFEncoder, SPIFTokenOutputs
 
 
 def _inverse_softplus(value: float, floor: float = 1e-6) -> float:
@@ -203,7 +203,7 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
         gamma_init: float = 1.0,
         variance_floor: float = 1e-2,
         eps: float = 1e-6,
-        use_bures_global: bool = True,
+        use_bures_global: bool = False,
     ) -> None:
         super().__init__()
         if int(stable_dim) <= 0:
@@ -290,8 +290,14 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
         log_det_per_class = variance.clamp_min(self.eps).log().sum(dim=-1)  # (Way,)
         mahalanobis_with_logdet = mahalanobis_distance + gamma_value * log_det_per_class.unsqueeze(0)
 
-        # ===== Architectural contribution: reliability-modulated distance blend =====
-        total_distance = reliability.unsqueeze(0) * mahalanobis_with_logdet + (
+        # Keep the legacy reliability-modulated point-to-class distance as the
+        # canonical scoring term. The separate `bw_distance` key is preserved
+        # for diagnostics/backward compatibility even though the query side is a
+        # point embedding rather than a full covariance estimate.
+        original_distance = reliability.unsqueeze(0) * mahalanobis_distance + (
+            1.0 - reliability.unsqueeze(0)
+        ) * euclidean_distance
+        bw_distance = reliability.unsqueeze(0) * mahalanobis_with_logdet + (
             1.0 - reliability.unsqueeze(0)
         ) * euclidean_distance
         total_distance = bw_distance if self.use_bures_global else original_distance
@@ -310,6 +316,8 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
             "euclidean_distance": euclidean_distance,
             "log_det_per_class": log_det_per_class,
             "total_distance": total_distance,
+            "bw_distance": bw_distance,
+            "original_distance": original_distance,
             "lambda_value": lambda_value.detach(),
             "alpha_value": alpha_value.detach(),
             "tau_value": tau_value.detach(),
@@ -318,7 +326,7 @@ class ReliabilityCalibratedDistributionalHead(nn.Module):
 
 
 class SPIFRDP(BaseConv64FewShotModel):
-    """SPIF-RDP with global BW scoring and Sinkhorn-OT local residuals."""
+    """SPIF-RDP with reliability-calibrated global scoring and Sinkhorn-OT local residuals."""
 
     def __init__(
         self,
@@ -354,11 +362,17 @@ class SPIFRDP(BaseConv64FewShotModel):
         local_chunk_size: int = 16,
         local_chunk_threshold: int = 10_000_000,
         local_use_vhat_coupling: bool = True,
-        use_bures_global: bool = True,
+        use_bures_global: bool = False,
         backbone_name: str = "resnet12",
         image_size: int = 64,
         resnet12_drop_rate: float = 0.0,
         resnet12_dropblock_size: int = 5,
+        mars_base_dim: int = 64,
+        mars_output_dim: int = 640,
+        mars_drop_path: float = 0.1,
+        mars_perturb_sigma: float = 0.05,
+        rdp_use_mars_global_prior: bool = True,
+        rdp_mars_global_mix_init: float = 0.35,
     ) -> None:
         super().__init__(
             in_channels=in_channels,
@@ -367,6 +381,10 @@ class SPIFRDP(BaseConv64FewShotModel):
             image_size=image_size,
             resnet12_drop_rate=resnet12_drop_rate,
             resnet12_dropblock_size=resnet12_dropblock_size,
+            mars_base_dim=mars_base_dim,
+            mars_output_dim=mars_output_dim,
+            mars_drop_path=mars_drop_path,
+            mars_perturb_sigma=mars_perturb_sigma,
         )
         if global_only and local_only:
             raise ValueError("global_only and local_only cannot both be true")
@@ -382,6 +400,8 @@ class SPIFRDP(BaseConv64FewShotModel):
             raise ValueError("rdp_beta_init must be positive")
         if float(rdp_rho_var_weight) < 0.0:
             raise ValueError("rdp_rho_var_weight must be non-negative")
+        if not (0.0 <= float(rdp_mars_global_mix_init) <= 1.0):
+            raise ValueError("rdp_mars_global_mix_init must be in [0, 1]")
 
         self.stable_dim = int(stable_dim)
         self.variant_dim = int(variant_dim)
@@ -401,6 +421,7 @@ class SPIFRDP(BaseConv64FewShotModel):
         self.rdp_eps = float(rdp_eps)
         self.rdp_rho_var_weight = float(rdp_rho_var_weight)
         self.use_bures_global = bool(use_bures_global)
+        self.rdp_use_mars_global_prior = bool(rdp_use_mars_global_prior) and self.backbone_name == "mars"
 
         self.encoder_head = SPIFEncoder(
             input_dim=hidden_dim,
@@ -435,10 +456,60 @@ class SPIFRDP(BaseConv64FewShotModel):
             use_vhat_coupling=bool(local_use_vhat_coupling),
         )
         self.beta_raw = nn.Parameter(torch.tensor(_inverse_softplus(rdp_beta_init), dtype=torch.float32))
+        if self.backbone_name == "mars":
+            self.mars_global_adapter = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, self.stable_dim),
+            )
+            mix_init = min(max(float(rdp_mars_global_mix_init), 1e-4), 1.0 - 1e-4)
+            self.mars_global_mix_logit = nn.Parameter(
+                torch.tensor(math.log(mix_init / (1.0 - mix_init)), dtype=torch.float32)
+            )
+        else:
+            self.mars_global_adapter = None
+            self.register_parameter("mars_global_mix_logit", None)
+
+    def _mars_global_mix(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if self.mars_global_mix_logit is None:
+            return torch.tensor(0.0, device=device, dtype=dtype)
+        return torch.sigmoid(self.mars_global_mix_logit).to(device=device, dtype=dtype)
+
+    def _extract_backbone_tokens(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.backbone_name == "mars" and hasattr(self.backbone, "forward_dual"):
+            feature_map, local_tokens, global_feat = self.backbone.forward_dual(images)
+            feature_map = self.backbone_adapter(feature_map)
+            if not isinstance(self.backbone_adapter, nn.Identity):
+                local_tokens = feature_map_to_tokens(feature_map)
+                global_feat = feature_map.mean(dim=(2, 3))
+            return local_tokens, global_feat
+
+        feature_map = self.encode(images)
+        return feature_map_to_tokens(feature_map), feature_map.mean(dim=(2, 3))
 
     def encode_tokens(self, images: torch.Tensor):
-        tokens = feature_map_to_tokens(self.encode(images))
-        return self.encoder_head(tokens, factorization_on=self.factorization_on, gate_on=self.gate_on)
+        tokens, backbone_global = self._extract_backbone_tokens(images)
+        outputs = self.encoder_head(tokens, factorization_on=self.factorization_on, gate_on=self.gate_on)
+
+        if self.rdp_use_mars_global_prior and self.mars_global_adapter is not None:
+            prior = self.mars_global_adapter(F.normalize(backbone_global, p=2, dim=-1))
+            prior = F.normalize(prior, p=2, dim=-1)
+            mix = self._mars_global_mix(outputs.stable_global.device, outputs.stable_global.dtype)
+            stable_global = F.normalize(
+                (1.0 - mix) * outputs.stable_global + mix * prior,
+                p=2,
+                dim=-1,
+            )
+            outputs = SPIFTokenOutputs(
+                stable_tokens=outputs.stable_tokens,
+                variant_tokens=outputs.variant_tokens,
+                gate=outputs.gate,
+                stable_global=stable_global,
+                variant_global=outputs.variant_global,
+            )
+        return outputs
 
     def _encode_episode(self, query: torch.Tensor, support: torch.Tensor) -> dict[str, torch.Tensor]:
         way_num, shot_num = support.shape[:2]
@@ -618,6 +689,7 @@ class SPIFRDP(BaseConv64FewShotModel):
             ).detach(),
             "local_scores": None if local_scores is None else local_scores.detach(),
             "bw_distance": global_outputs["bw_distance"].detach(),
+            "original_distance": global_outputs["original_distance"].detach(),
             "rho_var_loss": rho_var_loss.detach(),
             "beta_eff": None if beta_eff is None else beta_eff.detach(),
         }
@@ -651,13 +723,15 @@ class SPIFRDP(BaseConv64FewShotModel):
                 )
             return logits
 
-        return {
+        outputs = {
             "logits": logits,
             "aux_loss": aux_loss,
             "global_scores": torch.cat([item["global_scores"] for item in diagnostics], dim=0),
             "total_distance": torch.cat([item["total_distance"] for item in diagnostics], dim=0),
             "mahalanobis_distance": torch.cat([item["mahalanobis_distance"] for item in diagnostics], dim=0),
             "euclidean_distance": torch.cat([item["euclidean_distance"] for item in diagnostics], dim=0),
+            "bw_distance": torch.cat([item["bw_distance"] for item in diagnostics], dim=0),
+            "original_distance": torch.cat([item["original_distance"] for item in diagnostics], dim=0),
             "class_reliability": torch.cat([item["class_reliability"] for item in diagnostics], dim=0),
             "class_compactness": torch.cat([item["class_compactness"] for item in diagnostics], dim=0),
             "prototype": torch.stack([item["prototype"] for item in diagnostics], dim=0),
@@ -682,3 +756,9 @@ class SPIFRDP(BaseConv64FewShotModel):
                 dim=0,
             ),
         }
+        if diagnostics and diagnostics[0]["local_scores"] is not None:
+            outputs["local_scores"] = torch.cat([item["local_scores"] for item in diagnostics], dim=0)
+        if diagnostics and diagnostics[0]["beta_eff"] is not None:
+            outputs["beta_eff"] = torch.stack([item["beta_eff"] for item in diagnostics]).mean()
+        outputs["rho_var_loss"] = torch.stack([item["rho_var_loss"] for item in diagnostics]).mean()
+        return outputs

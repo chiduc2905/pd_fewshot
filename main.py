@@ -111,7 +111,7 @@ def get_args():
         help="Use first-order MAML approximation for faster benchmarking.",
     )
     parser.set_defaults(maml_second_order=True)
-    parser.add_argument("--fewshot_backbone", type=str, default="resnet12", choices=["default", "resnet12", "conv64f"])
+    parser.add_argument("--fewshot_backbone", type=str, default="resnet12", choices=["default", "resnet12", "conv64f", "mars"])
 
     parser.add_argument("--way_num", type=int, default=4)
     parser.add_argument("--shot_num", type=int, default=1)
@@ -635,7 +635,7 @@ def get_args():
     parser.add_argument("--spif_rdp_alpha_init", type=float, default=1.0)
     parser.add_argument("--spif_rdp_tau_init", type=float, default=10.0)
     parser.add_argument("--spif_rdp_gamma_init", type=float, default=1.0)
-    parser.add_argument("--spif_rdp_beta0_init", type=float, default=0.5)
+    parser.add_argument("--spif_rdp_beta_init", "--spif_rdp_beta0_init", dest="spif_rdp_beta_init", type=float, default=0.5)
     parser.add_argument("--spif_rdp_variance_floor", type=float, default=1e-2)
     parser.add_argument("--spif_rdp_compact_loss_weight", type=float, default=0.1)
     parser.add_argument("--spif_rdp_sep_loss_weight", type=float, default=0.05)
@@ -644,6 +644,12 @@ def get_args():
     parser.add_argument("--spif_rdp_consistency_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_decorr_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_sparse_weight", type=float, default=0.0)
+    parser.add_argument("--spif_rdp_mars_base_dim", type=int, default=64)
+    parser.add_argument("--spif_rdp_mars_output_dim", type=int, default=640)
+    parser.add_argument("--spif_rdp_mars_drop_path", type=float, default=0.1)
+    parser.add_argument("--spif_rdp_mars_perturb_sigma", type=float, default=0.05)
+    parser.add_argument("--spif_rdp_use_mars_global_prior", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--spif_rdp_mars_global_mix_init", type=float, default=0.35)
     parser.add_argument("--spif_ota_transport_dim", type=int, default=None)
     parser.add_argument("--spif_ota_projector_hidden_dim", type=int, default=None)
     parser.add_argument("--spif_ota_mass_hidden_dim", type=int, default=None)
@@ -1018,11 +1024,13 @@ def get_model(args):
         )
     if args.model == "spif_rdp":
         stable_dim = int(getattr(args, "spif_stable_dim", 64) or 64)
+        backbone_name = getattr(args, "fewshot_backbone", "resnet12")
         print(
             "  spif_rdp: stable/variant SPIF encoder + reliability-weighted class prototype + "
-            "diagonal variance floor + reliability-modulated global distance "
+            "diagonal variance floor + reliability-modulated global distance + Sinkhorn-OT local residual "
             f"(stable_dim={stable_dim}, "
             f"variant_dim={getattr(args, 'spif_variant_dim', 64)}, "
+            f"backbone={backbone_name}, "
             f"top_r={getattr(args, 'spif_rdp_top_r', 5)}, "
             f"lambda_init={getattr(args, 'spif_rdp_lambda_init', 1e-3)}, "
             f"alpha_init={getattr(args, 'spif_rdp_alpha_init', 1.0)}, "
@@ -1038,8 +1046,9 @@ def get_model(args):
             f"factorization={getattr(args, 'spif_factorization_on', 'true')})"
         )
         print(
-            "  note: this implementation is now global-only for accuracy. `spif_global_only`, `spif_local_only`, "
-            "`spif_rdp_top_r`, and `spif_rdp_beta0_init` are accepted only for backward compatibility."
+            "  note: `spif_rdp_top_r` is accepted only for backward compatibility. "
+            "`spif_global_only` and `spif_local_only` still work. "
+            "`spif_rdp_beta0_init` remains accepted as a legacy alias of `spif_rdp_beta_init`."
         )
     if args.model == "spif_ota":
         print(

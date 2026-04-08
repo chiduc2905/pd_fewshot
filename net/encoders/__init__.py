@@ -3,6 +3,7 @@
 from .base_encoder import Conv64F_Encoder, get_norm_layer
 from .protonet_encoder import Conv64F_Paper_Encoder
 from .matchingnet_encoder import MatchingNetEncoder
+from .mars_encoder import MARSEncoder
 from .relationnet_encoder import RelationNetEncoder
 from .smnet_conv64f_encoder import SMNetConv64FEncoder, build_resnet12_family_encoder
 
@@ -20,6 +21,7 @@ __all__ = [
     'Conv64F_Encoder',
     'Conv64F_Paper_Encoder',
     'MatchingNetEncoder',
+    'MARSEncoder',
     'RelationNetEncoder',
     'SMNetConv64FEncoder',
     'ResNet12Encoder',

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from net.encoders.mars_encoder import MARSEncoder
 from net.encoders.resnet12_encoder import ResNet12Encoder
 
 
@@ -73,6 +74,10 @@ def build_resnet12_family_encoder(
     variant: str = "fewshot",
     drop_rate: float = 0.0,
     dropblock_size: int = 5,
+    mars_base_dim: int = 64,
+    mars_output_dim: int = 640,
+    mars_drop_path: float = 0.1,
+    mars_perturb_sigma: float = 0.05,
 ) -> nn.Module:
     """Build the legacy ResNet12 encoder or the additive smnet Conv64F option."""
 
@@ -91,5 +96,14 @@ def build_resnet12_family_encoder(
             image_size=image_size,
             pool_output=pool_output,
             pool_last=pool_last,
+        )
+    if backbone_name == "mars":
+        return MARSEncoder(
+            image_size=image_size,
+            pool_output=pool_output,
+            base_dim=mars_base_dim,
+            output_dim=mars_output_dim,
+            drop_path=mars_drop_path,
+            perturb_sigma=mars_perturb_sigma,
         )
     raise ValueError(f"Unsupported fewshot_backbone: {backbone_name}")

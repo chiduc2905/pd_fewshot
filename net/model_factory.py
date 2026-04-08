@@ -335,7 +335,7 @@ def resolve_fewshot_backbone(args):
     backbone = str(getattr(args, "fewshot_backbone", "resnet12")).lower()
     if backbone == "default":
         return "resnet12"
-    if backbone not in {"resnet12", "conv64f"}:
+    if backbone not in {"resnet12", "conv64f", "mars"}:
         raise ValueError(f"Unsupported fewshot_backbone: {backbone}")
     return backbone
 
@@ -944,9 +944,12 @@ def build_model_from_args(args):
         variant_dim = int(getattr(args, "spif_variant_dim", stable_dim) or stable_dim)
         gate_hidden = int(getattr(args, "spif_gate_hidden", max(1, stable_dim // 4)) or max(1, stable_dim // 4))
         lambda_init = float(getattr(args, "spif_rdp_lambda_init", 1e-3))
+        mars_base_dim = int(getattr(args, "spif_rdp_mars_base_dim", 64) or 64)
+        mars_output_dim = int(getattr(args, "spif_rdp_mars_output_dim", 640) or 640)
+        hidden_dim = mars_output_dim if fewshot_backbone == "mars" else 64
         return SPIFRDP(
             in_channels=3,
-            hidden_dim=64,
+            hidden_dim=hidden_dim,
             stable_dim=stable_dim,
             variant_dim=variant_dim,
             gate_hidden=gate_hidden,
@@ -969,10 +972,26 @@ def build_model_from_args(args):
             rdp_sep_loss_weight=float(getattr(args, "spif_rdp_sep_loss_weight", 0.05)),
             rdp_sep_margin=float(getattr(args, "spif_rdp_sep_margin", 0.5)),
             rdp_eps=float(getattr(args, "spif_rdp_eps", 1e-6)),
+            rdp_beta_init=float(
+                getattr(
+                    args,
+                    "spif_rdp_beta_init",
+                    getattr(args, "spif_rdp_beta0_init", 0.5),
+                )
+            ),
             backbone_name=fewshot_backbone,
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
+            mars_base_dim=mars_base_dim,
+            mars_output_dim=mars_output_dim,
+            mars_drop_path=float(getattr(args, "spif_rdp_mars_drop_path", 0.1)),
+            mars_perturb_sigma=float(getattr(args, "spif_rdp_mars_perturb_sigma", 0.05)),
+            rdp_use_mars_global_prior=_bool_flag(
+                getattr(args, "spif_rdp_use_mars_global_prior", "true"),
+                default=True,
+            ),
+            rdp_mars_global_mix_init=float(getattr(args, "spif_rdp_mars_global_mix_init", 0.35)),
         )
     if args.model == "spif_ota":
         SPIFOTA = _load_symbol("net.spif_ota", "SPIFOTA")
