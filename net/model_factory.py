@@ -1,5 +1,6 @@
 """Model registry and builders for pulse_fewshot benchmarks."""
 
+import os
 from importlib import import_module
 
 
@@ -358,6 +359,9 @@ def build_model_from_args(args):
     device = getattr(args, "device", "cuda")
     image_size = getattr(args, "image_size", 64)
     fewshot_backbone = resolve_fewshot_backbone(args)
+    vmamba_repo_root = getattr(args, "vmamba_repo_root", None)
+    if vmamba_repo_root:
+        os.environ["VMAMBA_REPO_ROOT"] = str(vmamba_repo_root)
 
     if args.model == "protonet":
         ProtoNet = _load_symbol("net.protonet", "ProtoNet")

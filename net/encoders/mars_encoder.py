@@ -1,17 +1,20 @@
-"""MARS encoder adapted for few-shot backbones.
-
-This module exposes a feature-map compatible encoder for the rest of the
-few-shot codebase while still making MARS' dual token/global outputs available
-to models that want to consume them directly.
-"""
+"""MARS encoder backed by the official VMamba VSS block."""
 
 from __future__ import annotations
 
-import math
+import importlib
+import importlib.util
+import inspect
+import os
+import sys
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+VMAMBA_REPO_ENV = "VMAMBA_REPO_ROOT"
 
 
 def _tokens_to_hw(tokens: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -20,6 +23,69 @@ def _tokens_to_hw(tokens: torch.Tensor, height: int, width: int) -> torch.Tensor
 
 def _hw_to_tokens(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(2).transpose(1, 2).contiguous()
+
+
+def _iter_vmamba_module_candidates(repo_root: str | None):
+    yield ("module", "vmamba")
+    yield ("module", "classification.models.vmamba")
+
+    roots = []
+    if repo_root:
+        roots.append(Path(repo_root).expanduser())
+    env_root = os.environ.get(VMAMBA_REPO_ENV)
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield ("file", root / "vmamba.py")
+        yield ("file", root / "classification" / "models" / "vmamba.py")
+
+
+def _load_vmamba_module(repo_root: str | None = None):
+    errors: list[str] = []
+    for kind, candidate in _iter_vmamba_module_candidates(repo_root):
+        if kind == "module":
+            try:
+                module = importlib.import_module(candidate)
+            except Exception as exc:
+                errors.append(f"{candidate}: {exc}")
+                continue
+        else:
+            module_path = candidate
+            if not module_path.is_file():
+                errors.append(f"{module_path}: not found")
+                continue
+            module_name = f"_pulse_vmamba_{abs(hash(str(module_path.resolve())))}"
+            module = sys.modules.get(module_name)
+            if module is None:
+                spec = importlib.util.spec_from_file_location(module_name, module_path)
+                if spec is None or spec.loader is None:
+                    errors.append(f"{module_path}: could not build import spec")
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception as exc:
+                    sys.modules.pop(module_name, None)
+                    errors.append(f"{module_path}: {exc}")
+                    continue
+        if hasattr(module, "VSSBlock"):
+            return module
+        errors.append(f"{candidate}: VSSBlock not found")
+
+    detail = "; ".join(errors[-4:])
+    raise ImportError(
+        "MARS backbone requires the official VMamba `VSSBlock`. "
+        "Install VMamba so `import vmamba` works, or pass `--vmamba_repo_root` / "
+        f"`{VMAMBA_REPO_ENV}` to the official repository root. "
+        f"Recent import attempts: {detail}"
+    )
 
 
 class EpisodicLayerNorm(nn.Module):
@@ -35,129 +101,60 @@ class EpisodicLayerNorm(nn.Module):
         return F.layer_norm(x, (x.shape[-1],), self.weight, self.bias, self.eps)
 
 
-class SelectiveSSM(nn.Module):
-    """Simplified selective scan block over token sequences."""
+class OfficialVMambaVSSBlock(nn.Module):
+    """Thin wrapper around the upstream VMamba VSSBlock."""
 
-    def __init__(self, d_inner: int, d_state: int = 16, dt_rank: int | None = None) -> None:
+    def __init__(
+        self,
+        dim: int,
+        drop_path: float = 0.0,
+        d_state: int = 16,
+        ssm_ratio: float = 2.0,
+        vmamba_repo_root: str | None = None,
+    ) -> None:
         super().__init__()
-        self.d_inner = int(d_inner)
-        self.d_state = int(d_state)
-        dt_rank = int(dt_rank or math.ceil(float(d_inner) / 16.0))
+        vmamba_module = _load_vmamba_module(vmamba_repo_root)
+        vss_block_cls = getattr(vmamba_module, "VSSBlock")
 
-        self.dt_proj = nn.Linear(dt_rank, d_inner, bias=True)
-        self.x_proj = nn.Linear(d_inner, dt_rank + 2 * d_state, bias=False)
+        signature = inspect.signature(vss_block_cls.__init__)
+        params = signature.parameters
+        kwargs = {}
 
-        a = torch.arange(1, d_state + 1, dtype=torch.float32).unsqueeze(0).repeat(d_inner, 1)
-        self.A_log = nn.Parameter(torch.log(a))
-        self.D = nn.Parameter(torch.ones(d_inner))
+        if "hidden_dim" in params:
+            kwargs["hidden_dim"] = int(dim)
+        elif "dim" in params:
+            kwargs["dim"] = int(dim)
+        else:
+            raise TypeError("Official VMamba VSSBlock signature is missing `hidden_dim`/`dim`.")
 
-        nn.init.uniform_(self.dt_proj.weight, -0.1, 0.1)
+        if "drop_path" in params:
+            kwargs["drop_path"] = float(drop_path)
+        if "ssm_d_state" in params:
+            kwargs["ssm_d_state"] = int(d_state)
+        elif "d_state" in params:
+            kwargs["d_state"] = int(d_state)
+        if "ssm_ratio" in params:
+            kwargs["ssm_ratio"] = float(ssm_ratio)
+        if "channel_first" in params:
+            kwargs["channel_first"] = False
+
+        try:
+            self.block = vss_block_cls(**kwargs)
+        except TypeError as exc:
+            raise TypeError(
+                "Failed to instantiate the official VMamba VSSBlock with the detected "
+                f"adapter kwargs {kwargs}. The installed VMamba version is likely "
+                "incompatible with this MARS adapter."
+            ) from exc
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, inner_dim = x.shape
-        xz = self.x_proj(x)
-        dt_rank = self.dt_proj.in_features
-        dt_raw, b_ssm, c_ssm = xz.split([dt_rank, self.d_state, self.d_state], dim=-1)
-
-        dt = F.softplus(self.dt_proj(dt_raw))
-        a = -torch.exp(self.A_log.float()).to(device=x.device, dtype=x.dtype)
-
-        d_a = torch.exp(dt.unsqueeze(-1) * a.unsqueeze(0).unsqueeze(0))
-        d_b = dt.unsqueeze(-1) * b_ssm.unsqueeze(2)
-
-        hidden = torch.zeros(
-            batch_size,
-            inner_dim,
-            self.d_state,
-            device=x.device,
-            dtype=x.dtype,
-        )
-        outputs = []
-        for token_idx in range(seq_len):
-            hidden = d_a[:, token_idx] * hidden + d_b[:, token_idx] * x[:, token_idx].unsqueeze(-1)
-            out = (hidden * c_ssm[:, token_idx].unsqueeze(1)).sum(dim=-1)
-            outputs.append(out)
-        y = torch.stack(outputs, dim=1)
-        return y + x * self.D
-
-
-class DropPath(nn.Module):
-    def __init__(self, drop_prob: float = 0.0) -> None:
-        super().__init__()
-        self.drop_prob = float(drop_prob)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.training or self.drop_prob == 0.0:
-            return x
-        keep_prob = 1.0 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = torch.rand(shape, dtype=x.dtype, device=x.device)
-        random_tensor = torch.floor(random_tensor + keep_prob) / keep_prob
-        return x * random_tensor
-
-
-class VSSBlock(nn.Module):
-    """Visual state-space block with 4-direction aggregation."""
-
-    def __init__(self, dim: int, d_state: int = 16, expand: float = 2.0, drop_path: float = 0.0) -> None:
-        super().__init__()
-        d_inner = int(dim * expand)
-        self.norm = EpisodicLayerNorm(dim)
-        self.in_proj = nn.Linear(dim, d_inner * 2, bias=False)
-        self.out_proj = nn.Linear(d_inner, dim, bias=False)
-        self.act = nn.SiLU()
-
-        self.ssm_h = SelectiveSSM(d_inner, d_state)
-        self.ssm_hr = SelectiveSSM(d_inner, d_state)
-        self.ssm_v = SelectiveSSM(d_inner, d_state)
-        self.ssm_vr = SelectiveSSM(d_inner, d_state)
-
-        self.dir_weights = nn.Parameter(torch.full((4,), 0.25))
-
-        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
-        self.norm2 = EpisodicLayerNorm(dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, dim),
-        )
-
-    def _scan_4dir(self, tokens: torch.Tensor, height: int, width: int) -> torch.Tensor:
-        batch_size, _, inner_dim = tokens.shape
-
-        y_h = self.ssm_h(tokens)
-        y_hr = self.ssm_hr(tokens.flip(1)).flip(1)
-
-        vertical_tokens = tokens.reshape(batch_size, height, width, inner_dim).transpose(1, 2).contiguous()
-        vertical_tokens = vertical_tokens.reshape(batch_size, width * height, inner_dim)
-        y_v = self.ssm_v(vertical_tokens)
-        y_v = y_v.reshape(batch_size, width, height, inner_dim).transpose(1, 2).contiguous()
-        y_v = y_v.reshape(batch_size, height * width, inner_dim)
-
-        vertical_tokens_rev = vertical_tokens.flip(1)
-        y_vr = self.ssm_vr(vertical_tokens_rev).flip(1)
-        y_vr = y_vr.reshape(batch_size, width, height, inner_dim).transpose(1, 2).contiguous()
-        y_vr = y_vr.reshape(batch_size, height * width, inner_dim)
-
-        weights = F.softmax(self.dir_weights, dim=0)
-        return weights[0] * y_h + weights[1] * y_hr + weights[2] * y_v + weights[3] * y_vr
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, height, width, channels = x.shape
-        shortcut = x
-        x_norm = self.norm(x)
-        xz = self.in_proj(x_norm)
-        x_in, z = xz.chunk(2, dim=-1)
-        x_in = x_in.reshape(batch_size, height * width, -1)
-
-        y = self._scan_4dir(x_in, height, width)
-        z = z.reshape(batch_size, height * width, -1)
-        y = y * self.act(z)
-        y = self.out_proj(y).reshape(batch_size, height, width, channels)
-
-        x = shortcut + self.drop_path(y)
-        x = x + self.drop_path(self.ffn(self.norm2(x)))
-        return x
+        y = self.block(x)
+        if y.shape != x.shape:
+            raise RuntimeError(
+                "Official VMamba VSSBlock returned an unexpected shape: "
+                f"input={tuple(x.shape)} output={tuple(y.shape)}"
+            )
+        return y
 
 
 class RFAM(nn.Module):
@@ -239,6 +236,7 @@ class MARSStage(nn.Module):
         downsample: bool = True,
         use_rfam: bool = True,
         drop_path_rates: list[float] | None = None,
+        vmamba_repo_root: str | None = None,
     ) -> None:
         super().__init__()
         drop_path_rates = drop_path_rates or [0.0] * depth
@@ -254,7 +252,14 @@ class MARSStage(nn.Module):
             self.downsample = nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=False)
 
         self.blocks = nn.ModuleList(
-            [VSSBlock(out_dim, drop_path=drop_path_rates[idx]) for idx in range(depth)]
+            [
+                OfficialVMambaVSSBlock(
+                    out_dim,
+                    drop_path=drop_path_rates[idx],
+                    vmamba_repo_root=vmamba_repo_root,
+                )
+                for idx in range(depth)
+            ]
         )
         self.rfam = RFAM(out_dim) if use_rfam else None
 
@@ -291,11 +296,13 @@ class MARSEncoder(nn.Module):
         output_dim: int = 640,
         drop_path: float = 0.1,
         perturb_sigma: float = 0.05,
+        vmamba_repo_root: str | None = None,
     ) -> None:
         super().__init__()
         self.pool_output = bool(pool_output)
         self.out_channels = int(output_dim)
         self.out_dim = int(output_dim)
+        self.vmamba_repo_root = vmamba_repo_root
 
         spatial = int(image_size)
         for _ in range(3):
@@ -321,6 +328,7 @@ class MARSEncoder(nn.Module):
             downsample=False,
             use_rfam=True,
             drop_path_rates=drop_path_rates[block_idx:block_idx + depths[0]],
+            vmamba_repo_root=vmamba_repo_root,
         )
         block_idx += depths[0]
         self.stage2 = MARSStage(
@@ -330,6 +338,7 @@ class MARSEncoder(nn.Module):
             downsample=True,
             use_rfam=True,
             drop_path_rates=drop_path_rates[block_idx:block_idx + depths[1]],
+            vmamba_repo_root=vmamba_repo_root,
         )
         block_idx += depths[1]
         self.stage3 = MARSStage(
@@ -339,6 +348,7 @@ class MARSEncoder(nn.Module):
             downsample=True,
             use_rfam=False,
             drop_path_rates=drop_path_rates[block_idx:block_idx + depths[2]],
+            vmamba_repo_root=vmamba_repo_root,
         )
         block_idx += depths[2]
         self.stage4 = MARSStage(
@@ -348,6 +358,7 @@ class MARSEncoder(nn.Module):
             downsample=True,
             use_rfam=True,
             drop_path_rates=drop_path_rates[block_idx:block_idx + depths[3]],
+            vmamba_repo_root=vmamba_repo_root,
         )
         self.cssf = CSSF([dims[0], dims[1], dims[2]], out_dim=dims[2], n_heads=4)
         self.perturb = FeaturePerturbation(perturb_sigma)

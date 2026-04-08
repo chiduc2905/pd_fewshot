@@ -95,6 +95,7 @@ def final_eval_mlfork_style(net, loader, args):
 
 def main():
     args = base.get_args()
+    args = base.apply_optional_env_overrides(args)
     args.device = base.resolve_runtime_device(args)
     args.fewshot_backbone = base.resolve_fewshot_backbone(args)
     model_meta = base.get_model_metadata(args.model)
@@ -112,6 +113,8 @@ def main():
     print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
     print(f"Architecture: {model_meta['architecture']}")
     print(f"Backbone    : {args.fewshot_backbone}")
+    if args.fewshot_backbone == "mars" and getattr(args, "vmamba_repo_root", None):
+        print(f"VMamba Root : {args.vmamba_repo_root}")
     print("Final Eval  : split=val, protocol=mlfork")
 
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"

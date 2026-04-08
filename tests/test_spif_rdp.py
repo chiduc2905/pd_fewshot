@@ -1,13 +1,42 @@
 from __future__ import annotations
 
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from net.model_factory import build_model_from_args
 from net.spif_rdp import ReliabilityCalibratedDistributionalHead, SPIFRDP
+
+
+class _FakeVMambaVSSBlock(nn.Module):
+    def __init__(self, hidden_dim=0, drop_path=0.0, channel_first=False, dim=None, **kwargs):
+        super().__init__()
+        hidden_dim = int(hidden_dim or dim or kwargs.get("d_model", 0))
+        self.channel_first = bool(channel_first)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x
+        if self.channel_first:
+            y = y.permute(0, 2, 3, 1).contiguous()
+        y = self.proj(self.norm(y))
+        if self.channel_first:
+            y = y.permute(0, 3, 1, 2).contiguous()
+        return y
+
+
+@pytest.fixture(autouse=True)
+def _stub_vmamba(monkeypatch):
+    fake_vmamba = types.ModuleType("vmamba")
+    fake_vmamba.VSSBlock = _FakeVMambaVSSBlock
+    monkeypatch.setitem(sys.modules, "vmamba", fake_vmamba)
+    monkeypatch.delenv("VMAMBA_REPO_ROOT", raising=False)
 
 
 def _build_model(**overrides) -> SPIFRDP:

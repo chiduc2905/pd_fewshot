@@ -24,20 +24,31 @@ def run_experiment(
     seed,
     gpu_id,
     fewshot_backbone,
+    vmamba_repo_root,
     num_workers,
     pin_memory,
     persistent_workers,
     prefetch_factor,
     spif_global_only,
     spif_local_only,
+    passthrough_args=None,
+    variant_args=None,
+    experiment_tag=None,
+    experiment_label=None,
 ):
     print(f"\n{'=' * 72}")
     print("Experiment")
     print("=" * 72)
     print(f"Model       : {model}")
+    if experiment_label:
+        print(f"Variant     : {experiment_label}")
+    if experiment_tag:
+        print(f"Tag         : {experiment_tag}")
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {fewshot_backbone}")
+    if fewshot_backbone == "mars" and vmamba_repo_root:
+        print(f"VMamba Root : {vmamba_repo_root}")
     if model.startswith("spif"):
         print(f"SPIF Ablate : global_only={spif_global_only}, local_only={spif_local_only}")
     print("Final Eval  : split=val, protocol=mlfork")
@@ -136,6 +147,8 @@ def run_experiment(
         cmd.extend(["--training_samples", str(samples)])
     if fewshot_backbone != "default":
         cmd.extend(["--fewshot_backbone", fewshot_backbone])
+    if vmamba_repo_root:
+        cmd.extend(["--vmamba_repo_root", vmamba_repo_root])
     if not use_external_smnet:
         cmd.extend(["--deepemd_fast_val", "false"])
         if model.startswith("spif"):
@@ -158,6 +171,12 @@ def run_experiment(
                     "true",
                 ]
             )
+    if passthrough_args:
+        cmd.extend(passthrough_args)
+    if variant_args:
+        cmd.extend(variant_args)
+    if experiment_tag:
+        cmd.extend(["--experiment_tag", experiment_tag])
 
     try:
         subprocess.run(cmd, check=True)
