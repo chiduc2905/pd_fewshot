@@ -84,16 +84,6 @@ def resolve_runtime_device(args):
 
 
 def apply_optional_env_overrides(args):
-    repo_root = getattr(args, "vmamba_repo_root", None)
-    if repo_root:
-        repo_root = os.path.abspath(os.path.expanduser(str(repo_root)))
-        os.environ["VMAMBA_REPO_ROOT"] = repo_root
-        args.vmamba_repo_root = repo_root
-        return args
-
-    env_root = os.environ.get("VMAMBA_REPO_ROOT")
-    if env_root:
-        args.vmamba_repo_root = env_root
     return args
 
 
@@ -125,12 +115,11 @@ def get_args():
         help="Use first-order MAML approximation for faster benchmarking.",
     )
     parser.set_defaults(maml_second_order=True)
-    parser.add_argument("--fewshot_backbone", type=str, default="resnet12", choices=["default", "resnet12", "conv64f", "mars"])
     parser.add_argument(
-        "--vmamba_repo_root",
+        "--fewshot_backbone",
         type=str,
-        default=None,
-        help="Path to the official VMamba repository root when using `--fewshot_backbone mars`.",
+        default="resnet12",
+        choices=["default", "resnet12", "conv64f", "slim_mamba"],
     )
 
     parser.add_argument("--way_num", type=int, default=4)
@@ -664,12 +653,12 @@ def get_args():
     parser.add_argument("--spif_rdp_consistency_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_decorr_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_sparse_weight", type=float, default=0.0)
-    parser.add_argument("--spif_rdp_mars_base_dim", type=int, default=64)
-    parser.add_argument("--spif_rdp_mars_output_dim", type=int, default=640)
-    parser.add_argument("--spif_rdp_mars_drop_path", type=float, default=0.1)
-    parser.add_argument("--spif_rdp_mars_perturb_sigma", type=float, default=0.05)
-    parser.add_argument("--spif_rdp_use_mars_global_prior", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--spif_rdp_mars_global_mix_init", type=float, default=0.35)
+    parser.add_argument("--spif_rdp_slim_mamba_base_dim", type=int, default=64)
+    parser.add_argument("--spif_rdp_slim_mamba_output_dim", type=int, default=640)
+    parser.add_argument("--spif_rdp_slim_mamba_drop_path", type=float, default=0.1)
+    parser.add_argument("--spif_rdp_slim_mamba_perturb_sigma", type=float, default=0.05)
+    parser.add_argument("--spif_rdp_use_slim_mamba_global_prior", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--spif_rdp_slim_mamba_global_mix_init", type=float, default=0.35)
     parser.add_argument("--spif_ota_transport_dim", type=int, default=None)
     parser.add_argument("--spif_ota_projector_hidden_dim", type=int, default=None)
     parser.add_argument("--spif_ota_mass_hidden_dim", type=int, default=None)
@@ -2715,8 +2704,6 @@ def main():
     print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
     print(f"Architecture: {model_meta['architecture']}")
     print(f"Backbone    : {args.fewshot_backbone}")
-    if args.fewshot_backbone == "mars" and getattr(args, "vmamba_repo_root", None):
-        print(f"VMamba Root : {args.vmamba_repo_root}")
 
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""

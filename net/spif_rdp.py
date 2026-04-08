@@ -367,12 +367,12 @@ class SPIFRDP(BaseConv64FewShotModel):
         image_size: int = 64,
         resnet12_drop_rate: float = 0.0,
         resnet12_dropblock_size: int = 5,
-        mars_base_dim: int = 64,
-        mars_output_dim: int = 640,
-        mars_drop_path: float = 0.1,
-        mars_perturb_sigma: float = 0.05,
-        rdp_use_mars_global_prior: bool = True,
-        rdp_mars_global_mix_init: float = 0.35,
+        slim_mamba_base_dim: int = 64,
+        slim_mamba_output_dim: int = 640,
+        slim_mamba_drop_path: float = 0.1,
+        slim_mamba_perturb_sigma: float = 0.05,
+        rdp_use_slim_mamba_global_prior: bool = True,
+        rdp_slim_mamba_global_mix_init: float = 0.35,
     ) -> None:
         super().__init__(
             in_channels=in_channels,
@@ -381,10 +381,10 @@ class SPIFRDP(BaseConv64FewShotModel):
             image_size=image_size,
             resnet12_drop_rate=resnet12_drop_rate,
             resnet12_dropblock_size=resnet12_dropblock_size,
-            mars_base_dim=mars_base_dim,
-            mars_output_dim=mars_output_dim,
-            mars_drop_path=mars_drop_path,
-            mars_perturb_sigma=mars_perturb_sigma,
+            slim_mamba_base_dim=slim_mamba_base_dim,
+            slim_mamba_output_dim=slim_mamba_output_dim,
+            slim_mamba_drop_path=slim_mamba_drop_path,
+            slim_mamba_perturb_sigma=slim_mamba_perturb_sigma,
         )
         if global_only and local_only:
             raise ValueError("global_only and local_only cannot both be true")
@@ -400,8 +400,8 @@ class SPIFRDP(BaseConv64FewShotModel):
             raise ValueError("rdp_beta_init must be positive")
         if float(rdp_rho_var_weight) < 0.0:
             raise ValueError("rdp_rho_var_weight must be non-negative")
-        if not (0.0 <= float(rdp_mars_global_mix_init) <= 1.0):
-            raise ValueError("rdp_mars_global_mix_init must be in [0, 1]")
+        if not (0.0 <= float(rdp_slim_mamba_global_mix_init) <= 1.0):
+            raise ValueError("rdp_slim_mamba_global_mix_init must be in [0, 1]")
 
         self.stable_dim = int(stable_dim)
         self.variant_dim = int(variant_dim)
@@ -421,7 +421,9 @@ class SPIFRDP(BaseConv64FewShotModel):
         self.rdp_eps = float(rdp_eps)
         self.rdp_rho_var_weight = float(rdp_rho_var_weight)
         self.use_bures_global = bool(use_bures_global)
-        self.rdp_use_mars_global_prior = bool(rdp_use_mars_global_prior) and self.backbone_name == "mars"
+        self.rdp_use_slim_mamba_global_prior = (
+            bool(rdp_use_slim_mamba_global_prior) and self.backbone_name == "slim_mamba"
+        )
 
         self.encoder_head = SPIFEncoder(
             input_dim=hidden_dim,
@@ -456,29 +458,29 @@ class SPIFRDP(BaseConv64FewShotModel):
             use_vhat_coupling=bool(local_use_vhat_coupling),
         )
         self.beta_raw = nn.Parameter(torch.tensor(_inverse_softplus(rdp_beta_init), dtype=torch.float32))
-        if self.backbone_name == "mars":
-            self.mars_global_adapter = nn.Sequential(
+        if self.backbone_name == "slim_mamba":
+            self.slim_mamba_global_adapter = nn.Sequential(
                 nn.LayerNorm(hidden_dim),
                 nn.Linear(hidden_dim, self.stable_dim),
             )
-            mix_init = min(max(float(rdp_mars_global_mix_init), 1e-4), 1.0 - 1e-4)
-            self.mars_global_mix_logit = nn.Parameter(
+            mix_init = min(max(float(rdp_slim_mamba_global_mix_init), 1e-4), 1.0 - 1e-4)
+            self.slim_mamba_global_mix_logit = nn.Parameter(
                 torch.tensor(math.log(mix_init / (1.0 - mix_init)), dtype=torch.float32)
             )
         else:
-            self.mars_global_adapter = None
-            self.register_parameter("mars_global_mix_logit", None)
+            self.slim_mamba_global_adapter = None
+            self.register_parameter("slim_mamba_global_mix_logit", None)
 
-    def _mars_global_mix(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        if self.mars_global_mix_logit is None:
+    def _slim_mamba_global_mix(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if self.slim_mamba_global_mix_logit is None:
             return torch.tensor(0.0, device=device, dtype=dtype)
-        return torch.sigmoid(self.mars_global_mix_logit).to(device=device, dtype=dtype)
+        return torch.sigmoid(self.slim_mamba_global_mix_logit).to(device=device, dtype=dtype)
 
     def _extract_backbone_tokens(
         self,
         images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.backbone_name == "mars" and hasattr(self.backbone, "forward_dual"):
+        if self.backbone_name == "slim_mamba" and hasattr(self.backbone, "forward_dual"):
             feature_map, local_tokens, global_feat = self.backbone.forward_dual(images)
             feature_map = self.backbone_adapter(feature_map)
             if not isinstance(self.backbone_adapter, nn.Identity):
@@ -493,10 +495,10 @@ class SPIFRDP(BaseConv64FewShotModel):
         tokens, backbone_global = self._extract_backbone_tokens(images)
         outputs = self.encoder_head(tokens, factorization_on=self.factorization_on, gate_on=self.gate_on)
 
-        if self.rdp_use_mars_global_prior and self.mars_global_adapter is not None:
-            prior = self.mars_global_adapter(F.normalize(backbone_global, p=2, dim=-1))
+        if self.rdp_use_slim_mamba_global_prior and self.slim_mamba_global_adapter is not None:
+            prior = self.slim_mamba_global_adapter(F.normalize(backbone_global, p=2, dim=-1))
             prior = F.normalize(prior, p=2, dim=-1)
-            mix = self._mars_global_mix(outputs.stable_global.device, outputs.stable_global.dtype)
+            mix = self._slim_mamba_global_mix(outputs.stable_global.device, outputs.stable_global.dtype)
             stable_global = F.normalize(
                 (1.0 - mix) * outputs.stable_global + mix * prior,
                 p=2,

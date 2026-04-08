@@ -113,8 +113,6 @@ def main():
     print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
     print(f"Architecture: {model_meta['architecture']}")
     print(f"Backbone    : {args.fewshot_backbone}")
-    if args.fewshot_backbone == "mars" and getattr(args, "vmamba_repo_root", None):
-        print(f"VMamba Root : {args.vmamba_repo_root}")
     print("Final Eval  : split=val, protocol=mlfork")
 
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"

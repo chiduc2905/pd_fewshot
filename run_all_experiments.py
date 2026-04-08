@@ -36,12 +36,11 @@ def get_args():
         default="covamnet,protonet,cosine,relationnet,matchingnet,dn4,feat,deepemd,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net",
         help="Comma-separated model registry names to run",
     )
-    parser.add_argument("--fewshot_backbone", type=str, default="default", choices=["default", "resnet12", "conv64f", "mars"])
     parser.add_argument(
-        "--vmamba_repo_root",
+        "--fewshot_backbone",
         type=str,
-        default=None,
-        help="Path to the official VMamba repository root when using `--fewshot_backbone mars`.",
+        default="default",
+        choices=["default", "resnet12", "conv64f", "slim_mamba"],
     )
     parser.add_argument("--gpu_id", type=int, default=0, help="CUDA device id to pass through")
     parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers to pass through to main.py")
@@ -80,6 +79,32 @@ EXTERNAL_SMNET_MODELS = {
     "transport_prior_replay_mamba_net",
     "transport_evidence_mamba_net",
 }
+
+SLIM_MAMBA_COMPATIBLE_MODELS = {
+    "hierarchical_episodic_ssm_net",
+    "hierarchical_consensus_slot_mamba_net",
+    "hierarchical_support_sw_net",
+    "sc_lfi",
+    "sc_lfi_v2",
+    "sc_lfi_v3",
+    "sc_lfi_v4",
+    "spifv3_cstn",
+    "spifv3_cstn_papersw",
+    "warn",
+    "pars_net",
+    "hrot_fsl",
+}
+
+
+def resolve_backbone_for_model(model: str, requested_backbone: str) -> str:
+    requested_backbone = str(requested_backbone).lower()
+    if requested_backbone != "slim_mamba":
+        return requested_backbone
+    if model in EXTERNAL_SMNET_MODELS:
+        return "default"
+    if model.startswith("spif") or model in SLIM_MAMBA_COMPATIBLE_MODELS:
+        return "slim_mamba"
+    return "default"
 
 
 def get_smnet_root():
@@ -278,7 +303,6 @@ def run_experiment(
     seed,
     gpu_id,
     fewshot_backbone,
-    vmamba_repo_root,
     num_workers,
     pin_memory,
     persistent_workers,
@@ -290,6 +314,8 @@ def run_experiment(
     experiment_tag=None,
     experiment_label=None,
 ):
+    applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
+
     print(f"\n{'=' * 72}")
     print("Experiment")
     print('=' * 72)
@@ -300,9 +326,9 @@ def run_experiment(
         print(f"Tag         : {experiment_tag}")
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
-    print(f"Backbone    : {fewshot_backbone}")
-    if fewshot_backbone == "mars" and vmamba_repo_root:
-        print(f"VMamba Root : {vmamba_repo_root}")
+    print(f"Backbone    : {applied_backbone}")
+    if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
+        print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
     if model.startswith("spif"):
         print(f"SPIF Ablate : global_only={spif_global_only}, local_only={spif_local_only}")
     print(
@@ -404,10 +430,8 @@ def run_experiment(
 
     if samples is not None:
         cmd.extend(["--training_samples", str(samples)])
-    if fewshot_backbone != "default":
-        cmd.extend(["--fewshot_backbone", fewshot_backbone])
-    if vmamba_repo_root:
-        cmd.extend(["--vmamba_repo_root", vmamba_repo_root])
+    if applied_backbone != "default":
+        cmd.extend(["--fewshot_backbone", applied_backbone])
     if not use_external_smnet:
         cmd.extend(["--deepemd_fast_val", "false"])
         if model.startswith("spif"):
@@ -539,8 +563,6 @@ def main():
         print(f"Models      : {', '.join(requested_models)}")
         print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
-        if args.fewshot_backbone == "mars" and args.vmamba_repo_root:
-            print(f"VMamba Root : {args.vmamba_repo_root}")
         print(f"Ablation    : {args.spifce_ablation_suite}")
         print("Variants    :")
         for variant in ablation_variants:
@@ -583,8 +605,6 @@ def main():
         print(f"Models      : {', '.join(requested_models)}")
         print(f"Shots       : {', '.join(map(str, shots))}")
         print(f"Backbone    : {args.fewshot_backbone}")
-        if args.fewshot_backbone == "mars" and args.vmamba_repo_root:
-            print(f"VMamba Root : {args.vmamba_repo_root}")
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
@@ -627,8 +647,6 @@ def main():
         print(f"Models      : {', '.join(requested_models)}")
         print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
-        if args.fewshot_backbone == "mars" and args.vmamba_repo_root:
-            print(f"VMamba Root : {args.vmamba_repo_root}")
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
@@ -667,7 +685,6 @@ def main():
             seed=args.seed,
             gpu_id=args.gpu_id,
             fewshot_backbone=args.fewshot_backbone,
-            vmamba_repo_root=args.vmamba_repo_root,
             num_workers=args.num_workers,
             pin_memory=args.pin_memory,
             persistent_workers=args.persistent_workers,

@@ -1,42 +1,13 @@
 from __future__ import annotations
 
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from net.model_factory import build_model_from_args
 from net.spif_rdp import ReliabilityCalibratedDistributionalHead, SPIFRDP
-
-
-class _FakeVMambaVSSBlock(nn.Module):
-    def __init__(self, hidden_dim=0, drop_path=0.0, channel_first=False, dim=None, **kwargs):
-        super().__init__()
-        hidden_dim = int(hidden_dim or dim or kwargs.get("d_model", 0))
-        self.channel_first = bool(channel_first)
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.proj = nn.Linear(hidden_dim, hidden_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = x
-        if self.channel_first:
-            y = y.permute(0, 2, 3, 1).contiguous()
-        y = self.proj(self.norm(y))
-        if self.channel_first:
-            y = y.permute(0, 3, 1, 2).contiguous()
-        return y
-
-
-@pytest.fixture(autouse=True)
-def _stub_vmamba(monkeypatch):
-    fake_vmamba = types.ModuleType("vmamba")
-    fake_vmamba.VSSBlock = _FakeVMambaVSSBlock
-    monkeypatch.setitem(sys.modules, "vmamba", fake_vmamba)
-    monkeypatch.delenv("VMAMBA_REPO_ROOT", raising=False)
 
 
 def _build_model(**overrides) -> SPIFRDP:
@@ -305,21 +276,21 @@ def test_spif_rdp_model_factory_builds_and_runs():
     assert outputs["total_distance"].shape == (2, 3)
 
 
-def test_spif_rdp_mars_backbone_runs_and_backpropagates():
+def test_spif_rdp_slim_mamba_backbone_runs_and_backpropagates():
     torch.manual_seed(11)
     model = _build_model(
-        backbone_name="mars",
+        backbone_name="slim_mamba",
         image_size=32,
         hidden_dim=64,
         stable_dim=24,
         variant_dim=24,
         gate_hidden=8,
-        mars_base_dim=16,
-        mars_output_dim=64,
-        mars_drop_path=0.0,
-        mars_perturb_sigma=0.0,
-        rdp_use_mars_global_prior=True,
-        rdp_mars_global_mix_init=0.4,
+        slim_mamba_base_dim=16,
+        slim_mamba_output_dim=64,
+        slim_mamba_drop_path=0.0,
+        slim_mamba_perturb_sigma=0.0,
+        rdp_use_slim_mamba_global_prior=True,
+        rdp_slim_mamba_global_mix_init=0.4,
     )
     model.train()
 
@@ -334,16 +305,16 @@ def test_spif_rdp_mars_backbone_runs_and_backpropagates():
     assert outputs["local_scores"].shape == (2, 3)
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["local_scores"]).all()
-    assert model.mars_global_adapter[1].weight.grad is not None
-    assert torch.isfinite(model.mars_global_adapter[1].weight.grad).all()
+    assert model.slim_mamba_global_adapter[1].weight.grad is not None
+    assert torch.isfinite(model.slim_mamba_global_adapter[1].weight.grad).all()
 
 
-def test_spif_rdp_model_factory_builds_and_runs_with_mars():
+def test_spif_rdp_model_factory_builds_and_runs_with_slim_mamba():
     args = SimpleNamespace(
         model="spif_rdp",
         device="cpu",
         image_size=32,
-        fewshot_backbone="mars",
+        fewshot_backbone="slim_mamba",
         spif_stable_dim=24,
         spif_variant_dim=24,
         spif_gate_hidden=8,
@@ -366,12 +337,12 @@ def test_spif_rdp_model_factory_builds_and_runs_with_mars():
         spif_rdp_decorr_weight=0.0,
         spif_rdp_sparse_weight=0.0,
         spif_rdp_beta_init=0.5,
-        spif_rdp_mars_base_dim=16,
-        spif_rdp_mars_output_dim=64,
-        spif_rdp_mars_drop_path=0.0,
-        spif_rdp_mars_perturb_sigma=0.0,
-        spif_rdp_use_mars_global_prior="true",
-        spif_rdp_mars_global_mix_init=0.4,
+        spif_rdp_slim_mamba_base_dim=16,
+        spif_rdp_slim_mamba_output_dim=64,
+        spif_rdp_slim_mamba_drop_path=0.0,
+        spif_rdp_slim_mamba_perturb_sigma=0.0,
+        spif_rdp_use_slim_mamba_global_prior="true",
+        spif_rdp_slim_mamba_global_mix_init=0.4,
     )
     model = build_model_from_args(args)
     model.eval()

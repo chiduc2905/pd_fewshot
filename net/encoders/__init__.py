@@ -3,8 +3,8 @@
 from .base_encoder import Conv64F_Encoder, get_norm_layer
 from .protonet_encoder import Conv64F_Paper_Encoder
 from .matchingnet_encoder import MatchingNetEncoder
-from .mars_encoder import MARSEncoder
 from .relationnet_encoder import RelationNetEncoder
+from .slim_mamba_encoder import SlimMambaEncoder
 from .smnet_conv64f_encoder import SMNetConv64FEncoder, build_resnet12_family_encoder
 
 try:
@@ -21,8 +21,8 @@ __all__ = [
     'Conv64F_Encoder',
     'Conv64F_Paper_Encoder',
     'MatchingNetEncoder',
-    'MARSEncoder',
     'RelationNetEncoder',
+    'SlimMambaEncoder',
     'SMNetConv64FEncoder',
     'ResNet12Encoder',
     'ResNet18Encoder',

@@ -1,6 +1,5 @@
 """Model registry and builders for pulse_fewshot benchmarks."""
 
-import os
 from importlib import import_module
 
 
@@ -332,11 +331,32 @@ def get_model_metadata(model_name):
     return MODEL_REGISTRY[model_name]
 
 
+PAPER_BASELINE_BACKBONE_MODELS = frozenset({"feat", "deepemd", "can", "frn", "deepbdc"})
+HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "slim_mamba"})
+
+
+def model_supports_fewshot_backbone(model_name, backbone_name):
+    model_name = str(model_name)
+    backbone_name = str(backbone_name).lower()
+    if backbone_name != "slim_mamba":
+        return True
+    return model_name not in PAPER_BASELINE_BACKBONE_MODELS
+
+
+def fewshot_backbone_output_dim(backbone_name, slim_mamba_output_dim=640):
+    backbone_name = str(backbone_name).lower()
+    if backbone_name == "slim_mamba":
+        return int(slim_mamba_output_dim)
+    if backbone_name in HIGH_DIM_FEWSHOT_BACKBONES:
+        return 640
+    return 64
+
+
 def resolve_fewshot_backbone(args):
     backbone = str(getattr(args, "fewshot_backbone", "resnet12")).lower()
     if backbone == "default":
         return "resnet12"
-    if backbone not in {"resnet12", "conv64f", "mars"}:
+    if backbone not in {"resnet12", "conv64f", "slim_mamba"}:
         raise ValueError(f"Unsupported fewshot_backbone: {backbone}")
     return backbone
 
@@ -359,9 +379,11 @@ def build_model_from_args(args):
     device = getattr(args, "device", "cuda")
     image_size = getattr(args, "image_size", 64)
     fewshot_backbone = resolve_fewshot_backbone(args)
-    vmamba_repo_root = getattr(args, "vmamba_repo_root", None)
-    if vmamba_repo_root:
-        os.environ["VMAMBA_REPO_ROOT"] = str(vmamba_repo_root)
+    if not model_supports_fewshot_backbone(args.model, fewshot_backbone):
+        raise ValueError(
+            f"fewshot_backbone={fewshot_backbone} is only supported for SPIF/new repository models, "
+            f"not the paper baseline `{args.model}`"
+        )
 
     if args.model == "protonet":
         ProtoNet = _load_symbol("net.protonet", "ProtoNet")
@@ -420,7 +442,7 @@ def build_model_from_args(args):
         return FRN(image_size=image_size, fewshot_backbone=fewshot_backbone, device=device)
     if args.model == "deepbdc":
         DeepBDC = _load_symbol("net.deepbdc", "DeepBDC")
-        reduce_dim = 640 if fewshot_backbone == "resnet12" else 64
+        reduce_dim = fewshot_backbone_output_dim(fewshot_backbone)
         return DeepBDC(
             image_size=image_size,
             reduce_dim=reduce_dim,
@@ -948,9 +970,9 @@ def build_model_from_args(args):
         variant_dim = int(getattr(args, "spif_variant_dim", stable_dim) or stable_dim)
         gate_hidden = int(getattr(args, "spif_gate_hidden", max(1, stable_dim // 4)) or max(1, stable_dim // 4))
         lambda_init = float(getattr(args, "spif_rdp_lambda_init", 1e-3))
-        mars_base_dim = int(getattr(args, "spif_rdp_mars_base_dim", 64) or 64)
-        mars_output_dim = int(getattr(args, "spif_rdp_mars_output_dim", 640) or 640)
-        hidden_dim = mars_output_dim if fewshot_backbone == "mars" else 64
+        slim_mamba_base_dim = int(getattr(args, "spif_rdp_slim_mamba_base_dim", 64) or 64)
+        slim_mamba_output_dim = int(getattr(args, "spif_rdp_slim_mamba_output_dim", 640) or 640)
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone, slim_mamba_output_dim=slim_mamba_output_dim)
         return SPIFRDP(
             in_channels=3,
             hidden_dim=hidden_dim,
@@ -987,15 +1009,17 @@ def build_model_from_args(args):
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
-            mars_base_dim=mars_base_dim,
-            mars_output_dim=mars_output_dim,
-            mars_drop_path=float(getattr(args, "spif_rdp_mars_drop_path", 0.1)),
-            mars_perturb_sigma=float(getattr(args, "spif_rdp_mars_perturb_sigma", 0.05)),
-            rdp_use_mars_global_prior=_bool_flag(
-                getattr(args, "spif_rdp_use_mars_global_prior", "true"),
+            slim_mamba_base_dim=slim_mamba_base_dim,
+            slim_mamba_output_dim=slim_mamba_output_dim,
+            slim_mamba_drop_path=float(getattr(args, "spif_rdp_slim_mamba_drop_path", 0.1)),
+            slim_mamba_perturb_sigma=float(getattr(args, "spif_rdp_slim_mamba_perturb_sigma", 0.05)),
+            rdp_use_slim_mamba_global_prior=_bool_flag(
+                getattr(args, "spif_rdp_use_slim_mamba_global_prior", "true"),
                 default=True,
             ),
-            rdp_mars_global_mix_init=float(getattr(args, "spif_rdp_mars_global_mix_init", 0.35)),
+            rdp_slim_mamba_global_mix_init=float(
+                getattr(args, "spif_rdp_slim_mamba_global_mix_init", 0.35)
+            ),
         )
     if args.model == "spif_ota":
         SPIFOTA = _load_symbol("net.spif_ota", "SPIFOTA")
@@ -1713,7 +1737,7 @@ def build_model_from_args(args):
         )
     if args.model == "hrot_fsl":
         HROTFSL = _load_symbol("net.hrot_fsl", "HROTFSL")
-        hidden_dim = 640 if fewshot_backbone == "resnet12" else 64
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
         return HROTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,

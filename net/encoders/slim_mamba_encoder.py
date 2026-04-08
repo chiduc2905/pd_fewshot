@@ -1,8 +1,4 @@
-"""Slim-Mamba few-shot encoder with dual local/global outputs.
-
-This module replaces the previous MARS backbone implementation while keeping
-the public encoder API used elsewhere in the repository.
-"""
+"""Slim-Mamba few-shot encoder with dual local/global outputs."""
 
 from __future__ import annotations
 
@@ -284,10 +280,8 @@ class SlimMambaEncoder(nn.Module):
         drop_path: float = 0.05,
         perturb_sigma: float = 0.05,
         window_size: int = 2,
-        vmamba_repo_root: str | None = None,
     ) -> None:
         super().__init__()
-        del vmamba_repo_root
 
         self.pool_output = bool(pool_output)
         self.out_channels = int(output_dim)
@@ -371,6 +365,3 @@ class SlimMambaEncoder(nn.Module):
         if not self.pool_output:
             return feature_map
         return global_feat
-
-
-MARSEncoder = SlimMambaEncoder

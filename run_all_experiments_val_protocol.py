@@ -24,7 +24,6 @@ def run_experiment(
     seed,
     gpu_id,
     fewshot_backbone,
-    vmamba_repo_root,
     num_workers,
     pin_memory,
     persistent_workers,
@@ -36,6 +35,8 @@ def run_experiment(
     experiment_tag=None,
     experiment_label=None,
 ):
+    applied_backbone = base_runner.resolve_backbone_for_model(model, fewshot_backbone)
+
     print(f"\n{'=' * 72}")
     print("Experiment")
     print("=" * 72)
@@ -46,9 +47,9 @@ def run_experiment(
         print(f"Tag         : {experiment_tag}")
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
-    print(f"Backbone    : {fewshot_backbone}")
-    if fewshot_backbone == "mars" and vmamba_repo_root:
-        print(f"VMamba Root : {vmamba_repo_root}")
+    print(f"Backbone    : {applied_backbone}")
+    if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
+        print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
     if model.startswith("spif"):
         print(f"SPIF Ablate : global_only={spif_global_only}, local_only={spif_local_only}")
     print("Final Eval  : split=val, protocol=mlfork")
@@ -82,7 +83,7 @@ def run_experiment(
         "--query_num_test",
         str(base_runner.EVAL_QUERY_NUM),
         "--image_size",
-        "64",
+        "84",
         "--mode",
         "train",
         "--project",
@@ -145,10 +146,8 @@ def run_experiment(
 
     if samples is not None:
         cmd.extend(["--training_samples", str(samples)])
-    if fewshot_backbone != "default":
-        cmd.extend(["--fewshot_backbone", fewshot_backbone])
-    if vmamba_repo_root:
-        cmd.extend(["--vmamba_repo_root", vmamba_repo_root])
+    if applied_backbone != "default":
+        cmd.extend(["--fewshot_backbone", applied_backbone])
     if not use_external_smnet:
         cmd.extend(["--deepemd_fast_val", "false"])
         if model.startswith("spif"):

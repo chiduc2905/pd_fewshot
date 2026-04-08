@@ -80,10 +80,10 @@ class BaseConv64FewShotModel(nn.Module):
         image_size: int = 64,
         resnet12_drop_rate: float = 0.0,
         resnet12_dropblock_size: int = 5,
-        mars_base_dim: int = 64,
-        mars_output_dim: int = 640,
-        mars_drop_path: float = 0.1,
-        mars_perturb_sigma: float = 0.05,
+        slim_mamba_base_dim: int = 64,
+        slim_mamba_output_dim: int = 640,
+        slim_mamba_drop_path: float = 0.1,
+        slim_mamba_perturb_sigma: float = 0.05,
     ) -> None:
         super().__init__()
         if in_channels != 3:
@@ -98,10 +98,10 @@ class BaseConv64FewShotModel(nn.Module):
             variant="fewshot",
             drop_rate=resnet12_drop_rate,
             dropblock_size=resnet12_dropblock_size,
-            mars_base_dim=mars_base_dim,
-            mars_output_dim=mars_output_dim,
-            mars_drop_path=mars_drop_path,
-            mars_perturb_sigma=mars_perturb_sigma,
+            slim_mamba_base_dim=slim_mamba_base_dim,
+            slim_mamba_output_dim=slim_mamba_output_dim,
+            slim_mamba_drop_path=slim_mamba_drop_path,
+            slim_mamba_perturb_sigma=slim_mamba_perturb_sigma,
         )
         backbone_out_dim = int(self.backbone.out_channels)
 
