@@ -655,7 +655,7 @@ def plot_model_comparison_bar(model_results, training_samples, save_path=None):
     return fig
 
 
-def plot_training_curves(history, save_path=None):
+def plot_training_curves(history, save_path=None, eval_label="Validation"):
     """
     Plot combined train/val accuracy and loss curves on same figure.
     
@@ -665,6 +665,7 @@ def plot_training_curves(history, save_path=None):
         history: dict with keys 'train_acc', 'val_acc', 'train_loss', 'val_loss'
                  each containing list of values per epoch
         save_path: Path to save the figure (without extension, will add .png)
+        eval_label: Label used for the evaluation split curve
     
     Returns:
         fig: matplotlib figure object
@@ -693,11 +694,11 @@ def plot_training_curves(history, save_path=None):
     ax1.plot(epochs, history['train_acc'], color=train_color, 
              linewidth=2, label='Train', marker='o', markersize=3)
     ax1.plot(epochs, history['val_acc'], color=val_color, 
-             linewidth=2, linestyle='--', label='Validation', marker='s', markersize=3)
+             linewidth=2, linestyle='--', label=eval_label, marker='s', markersize=3)
     
     ax1.set_xlabel('Epoch', fontsize=12)
     ax1.set_ylabel('Accuracy', fontsize=12)
-    ax1.set_title('Training & Validation Accuracy', fontsize=13, fontweight='bold')
+    ax1.set_title(f'Training & {eval_label} Accuracy', fontsize=13, fontweight='bold')
     ax1.legend(loc='lower right', fontsize=10)
     ax1.grid(True, alpha=0.3, linestyle='--')
     ax1.set_ylim(0, 1.05)
@@ -707,11 +708,11 @@ def plot_training_curves(history, save_path=None):
     ax2.plot(epochs, history['train_loss'], color=train_color, 
              linewidth=2, label='Train', marker='o', markersize=3)
     ax2.plot(epochs, history['val_loss'], color=val_color, 
-             linewidth=2, linestyle='--', label='Validation', marker='s', markersize=3)
+             linewidth=2, linestyle='--', label=eval_label, marker='s', markersize=3)
     
     ax2.set_xlabel('Epoch', fontsize=12)
     ax2.set_ylabel('Loss', fontsize=12)
-    ax2.set_title('Training & Validation Loss', fontsize=13, fontweight='bold')
+    ax2.set_title(f'Training & {eval_label} Loss', fontsize=13, fontweight='bold')
     ax2.legend(loc='upper right', fontsize=10)
     ax2.grid(True, alpha=0.3, linestyle='--')
     

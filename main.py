@@ -830,6 +830,45 @@ def get_args():
     parser.add_argument("--episode_num_train", type=int, default=200)
     parser.add_argument("--episode_num_val", type=int, default=300)
     parser.add_argument("--episode_num_test", type=int, default=400)
+    parser.add_argument(
+        "--model_selection_split",
+        type=str,
+        default="val",
+        choices=["val", "test"],
+        help="Split used for per-epoch model selection and best-checkpoint tracking.",
+    )
+    parser.add_argument(
+        "--merge_val_into_train",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="If true, concatenate the current val split into the train pool before episodic sampling.",
+    )
+    parser.add_argument(
+        "--train_episode_seed_offset",
+        type=int,
+        default=0,
+        help="Offset added to --seed before deriving epoch-specific train episode seeds.",
+    )
+    parser.add_argument(
+        "--selection_episode_seed_offset",
+        type=int,
+        default=1,
+        help="Offset added to --seed before deriving epoch-specific selection episode seeds.",
+    )
+    parser.add_argument(
+        "--selection_episode_seed_mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "per_epoch"],
+        help="Use one fixed selection seed for all epochs or advance it with epoch index.",
+    )
+    parser.add_argument(
+        "--final_test_episode_seed_offset",
+        type=int,
+        default=0,
+        help="Offset added to --seed for the final fixed test episode set.",
+    )
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -1482,6 +1521,45 @@ def get_last_checkpoint_path(args):
     return f"{get_checkpoint_stem(args)}_last.ckpt"
 
 
+def get_model_selection_split(args) -> str:
+    return str(getattr(args, "model_selection_split", "val")).lower()
+
+
+def build_episode_seed(args, split_name: str, epoch: int | None = None) -> int:
+    split_name = str(split_name).lower()
+    if split_name == "train":
+        offset = int(getattr(args, "train_episode_seed_offset", 0))
+        use_epoch = True
+    elif split_name in {"selection", "select", "eval", "val", "test"}:
+        offset = int(getattr(args, "selection_episode_seed_offset", 1))
+        use_epoch = str(getattr(args, "selection_episode_seed_mode", "fixed")).lower() == "per_epoch"
+    elif split_name in {"final_test", "final"}:
+        offset = int(getattr(args, "final_test_episode_seed_offset", 0))
+        use_epoch = False
+    else:
+        raise ValueError(f"Unsupported split_name={split_name}")
+
+    seed = int(getattr(args, "seed", 0)) + offset
+    if use_epoch and epoch is not None:
+        seed += int(epoch)
+    return seed
+
+
+def get_selection_protocol(args):
+    split = get_model_selection_split(args)
+    if split == "test":
+        return split, int(args.episode_num_test), int(args.query_num_test)
+    return split, int(args.episode_num_val), int(args.query_num_val)
+
+
+def concat_split_tensors(primary_X, primary_y, secondary_X, secondary_y):
+    if secondary_X is None or secondary_y is None or len(secondary_X) == 0:
+        return primary_X, primary_y
+    if primary_X is None or primary_y is None or len(primary_X) == 0:
+        return secondary_X, secondary_y
+    return torch.cat([primary_X, secondary_X], dim=0), torch.cat([primary_y, secondary_y], dim=0)
+
+
 def forward_scores(
     net,
     query,
@@ -2033,7 +2111,7 @@ def maybe_load_scheduler_state(scheduler, scheduler_state, checkpoint_path):
         print(f"Warning: failed to load scheduler state from {checkpoint_path}: {exc}")
 
 
-def train_loop(net, train_X, train_y, val_X, val_y, args):
+def train_loop(net, train_X, train_y, selection_X, selection_y, args):
     device = torch.device(args.device)
     relation_loss_fn = RelationLoss().to(device)
     contrastive_loss_fn = ContrastiveLoss().to(device)
@@ -2073,7 +2151,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         load_model_weights(net, args.weights, args.device)
         print(f"Initialized model weights from {args.weights}")
 
-    val_seed = args.seed + 1
+    selection_split, selection_episode_num, selection_query_num = get_selection_protocol(args)
     train_smoothing = effective_label_smoothing(args, train=True)
     smoothing_policy = "enabled for repo-new models only" if train_smoothing > 0 else "disabled for paper baselines"
 
@@ -2081,7 +2159,12 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         f"Training protocol: scheduler={describe_scheduler(args)}, "
         f"lr={args.lr:.2e}, classification_loss={args.classification_loss}, "
         f"label_smoothing=config={args.label_smoothing:.3f}, effective={train_smoothing:.3f} ({smoothing_policy}), "
-        f"train_augment={train_augment}, train_seed=args.seed+epoch, val_seed={val_seed}, "
+        f"train_augment={train_augment}, selection_split={selection_split}, "
+        f"train_seed=args.seed+train_episode_seed_offset+epoch, "
+        f"selection_seed=args.seed+selection_episode_seed_offset"
+        f"{'+epoch' if str(getattr(args, 'selection_episode_seed_mode', 'fixed')).lower() == 'per_epoch' else ''}, "
+        f"episodes(train/select)={args.episode_num_train}/{selection_episode_num}, "
+        f"query(train/select)={args.query_num_train}/{selection_query_num}, "
         f"num_workers={args.num_workers}, pin_memory={_pin_memory_enabled(args)}, "
         f"persistent_workers={_persistent_workers_enabled(args)}, "
         f"cudnn(deterministic={torch.backends.cudnn.deterministic}, benchmark={torch.backends.cudnn.benchmark})"
@@ -2096,7 +2179,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         return best_acc, history
 
     for epoch in range(start_epoch, args.num_epochs + 1):
-        train_seed = args.seed + epoch
+        train_seed = build_episode_seed(args, "train", epoch=epoch)
         train_ds = FewshotDataset(
             train_X,
             train_y,
@@ -2190,62 +2273,68 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         train_acc = train_correct / train_total if train_total > 0 else 0.0
         train_diag = finalize_diagnostics(train_diag_sums, train_total)
 
-        val_ds = FewshotDataset(
-            val_X,
-            val_y,
-            args.episode_num_val,
+        selection_seed = build_episode_seed(args, "selection", epoch=epoch)
+        selection_ds = FewshotDataset(
+            selection_X,
+            selection_y,
+            selection_episode_num,
             args.way_num,
             args.shot_num,
-            args.query_num_val,
-            seed=val_seed,
+            selection_query_num,
+            seed=selection_seed,
         )
-        val_loader = DataLoader(
-            val_ds,
+        selection_loader = DataLoader(
+            selection_ds,
             **_build_loader_kwargs(
                 args,
                 batch_size=1,
                 shuffle=False,
-                worker_seed=val_seed,
+                worker_seed=selection_seed,
             ),
         )
 
-        val_acc, val_loss, val_diag = evaluate(net, val_loader, args)
+        selection_acc, selection_loss, selection_diag = evaluate(
+            net,
+            selection_loader,
+            args,
+            phase=selection_split,
+        )
         avg_loss = total_loss / len(train_loader)
 
         history["train_acc"].append(train_acc)
-        history["val_acc"].append(val_acc)
+        history["val_acc"].append(selection_acc)
         history["train_loss"].append(avg_loss)
-        history["val_loss"].append(val_loss if val_loss else 0.0)
+        history["val_loss"].append(selection_loss if selection_loss else 0.0)
 
-        train_val_gap = train_acc - val_acc
+        train_selection_gap = train_acc - selection_acc
         print(
             f"Epoch {epoch}: Loss={avg_loss:.4f}, Train={train_acc:.4f}, "
-            f"Val={val_acc:.4f} (gap={train_val_gap:+.4f})"
+            f"{selection_split.title()}={selection_acc:.4f} (gap={train_selection_gap:+.4f})"
         )
         train_diag_summary = format_diagnostic_summary(train_diag)
         if train_diag_summary:
             print(f"  TrainDiag: {train_diag_summary}")
-        val_diag_summary = format_diagnostic_summary(val_diag)
-        if val_diag_summary:
-            print(f"  ValDiag: {val_diag_summary}")
+        selection_diag_summary = format_diagnostic_summary(selection_diag)
+        if selection_diag_summary:
+            print(f"  {selection_split.title()}Diag: {selection_diag_summary}")
 
         wandb_payload = {
             "epoch": epoch,
             "loss/train": avg_loss,
-            "loss/val": val_loss,
             "accuracy/train": train_acc,
-            "accuracy/val": val_acc,
-            "train_val_gap": train_val_gap,
             "lr": current_lr,
         }
+        wandb_payload[f"loss/{selection_split}"] = selection_loss
+        wandb_payload[f"accuracy/{selection_split}"] = selection_acc
+        wandb_payload[f"train_{selection_split}_gap"] = train_selection_gap
         wandb_payload.update(prefix_diagnostics(train_diag, "diag/train_"))
-        wandb_payload.update(prefix_diagnostics(val_diag, "diag/val_"))
+        wandb_payload.update(prefix_diagnostics(selection_diag, f"diag/{selection_split}_"))
         wandb.log(wandb_payload)
 
-        if val_acc > best_acc:
-            best_acc = val_acc
-            print(f"  -> New best val: {val_acc:.4f}")
-            wandb.run.summary["best_val_acc"] = best_acc
+        if selection_acc > best_acc:
+            best_acc = selection_acc
+            print(f"  -> New best {selection_split}: {selection_acc:.4f}")
+            wandb.run.summary[f"best_{selection_split}_acc"] = best_acc
 
             final_path = get_best_model_path(args)
             torch.save(net.state_dict(), final_path)
@@ -2271,17 +2360,17 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}",
     )
     try:
-        plot_training_curves(history, curves_path)
+        plot_training_curves(history, curves_path, eval_label=selection_split.title())
         if os.path.exists(f"{curves_path}_curves.png"):
             wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
     except RuntimeError as exc:
         print(f"Skipping training curves: {exc}")
 
-    print(f"Best Validation Accuracy: {best_acc:.4f}")
+    print(f"Best {selection_split.title()} Accuracy: {best_acc:.4f}")
     return best_acc, history
 
 
-def evaluate(net, loader, args):
+def evaluate(net, loader, args, phase="val"):
     device = torch.device(args.device)
     relation_loss_fn = RelationLoss().to(device)
     contrastive_loss_fn = ContrastiveLoss().to(device)
@@ -2312,7 +2401,7 @@ def evaluate(net, loader, args):
                 support,
                 args,
                 train=False,
-                phase="val",
+                phase=phase,
                 query_targets=targets,
                 support_targets=support_targets,
                 collect_diagnostics=True,
@@ -2498,6 +2587,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
     wandb.run.summary["test_accuracy_mean"] = acc_mean
     wandb.run.summary["test_accuracy_ci95"] = acc_ci95
+    wandb.run.summary["model_selection_split"] = get_model_selection_split(args)
+    wandb.run.summary["merge_val_into_train"] = _bool_flag(getattr(args, "merge_val_into_train", "false"), default=False)
 
     samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
@@ -2626,6 +2717,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         handle.write(f"Dataset: {args.dataset_name}\n")
         handle.write(f"Shot: {args.shot_num}\n")
         handle.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
+        handle.write(f"Model Selection Split: {get_model_selection_split(args)}\n")
+        handle.write(
+            f"Merged Val Into Train: {_bool_flag(getattr(args, 'merge_val_into_train', 'false'), default=False)}\n"
+        )
         handle.write("-" * 40 + "\n")
         handle.write(f"Accuracy : {acc_mean:.4f} +/- {acc_std:.4f}\n")
         handle.write(f"Worst-case : {acc_worst:.4f}\n")
@@ -2696,6 +2791,11 @@ def main():
         args.query_num_val = args.query_num
         args.query_num_test = args.query_num
 
+    selection_split = get_model_selection_split(args)
+    merge_val_into_train = _bool_flag(getattr(args, "merge_val_into_train", "false"), default=False)
+    if merge_val_into_train and selection_split == "val":
+        raise ValueError("merge_val_into_train=true is incompatible with model_selection_split=val.")
+
     print(f"\n{'=' * 72}")
     print(model_meta["display_name"])
     print("=" * 72)
@@ -2704,6 +2804,7 @@ def main():
     print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
     print(f"Architecture: {model_meta['architecture']}")
     print(f"Backbone    : {args.fewshot_backbone}")
+    print(f"Selection   : split={selection_split}, merge_val_into_train={merge_val_into_train}")
 
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
@@ -2711,6 +2812,8 @@ def main():
     config = vars(args).copy()
     config["architecture"] = model_meta["architecture"]
     config["distance_metric"] = model_meta["metric"]
+    config["selection_split"] = selection_split
+    config["merge_val_into_train"] = merge_val_into_train
 
     wandb.init(
         project=args.project,
@@ -2798,9 +2901,17 @@ def main():
             "query_num_train": args.query_num_train,
             "query_num_val": args.query_num_val,
             "query_num_test": args.query_num_test,
+            "selection_split": selection_split,
+            "merge_val_into_train": merge_val_into_train,
         },
         allow_val_change=True,
     )
+
+    if merge_val_into_train:
+        train_X, train_y = concat_split_tensors(train_X, train_y, val_X, val_y)
+        if train_file_paths is not None or val_file_paths is not None:
+            train_file_paths = list(train_file_paths or []) + list(val_file_paths or [])
+        print(f"Merged validation data into training pool: Train={len(train_X)}, Test={len(test_X)}")
 
     if args.training_samples:
         if args.training_samples % args.way_num != 0:
@@ -2822,6 +2933,7 @@ def main():
         train_y = torch.cat(sample_labels)
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
 
+    final_test_seed = build_episode_seed(args, "final_test")
     test_ds = FewshotDataset(
         test_X,
         test_y,
@@ -2829,7 +2941,7 @@ def main():
         args.way_num,
         args.shot_num,
         args.query_num_test,
-        args.seed,
+        final_test_seed,
         return_indices=args.save_misclf_report,
     )
     test_loader = DataLoader(
@@ -2838,15 +2950,20 @@ def main():
             args,
             batch_size=1,
             shuffle=False,
-            worker_seed=args.seed,
+            worker_seed=final_test_seed,
         ),
     )
+
+    if selection_split == "test":
+        selection_X, selection_y = test_X, test_y
+    else:
+        selection_X, selection_y = val_X, val_y
 
     net = get_model(args)
     log_model_parameters(net, args.model, device=args.device, image_size=args.image_size)
 
     if args.mode == "train":
-        train_loop(net, train_X, train_y, val_X, val_y, args)
+        train_loop(net, train_X, train_y, selection_X, selection_y, args)
         if not _bool_flag(args.skip_final_test, default=False):
             path = get_best_model_path(args)
             print(f"Testing with best checkpoint: {path}")

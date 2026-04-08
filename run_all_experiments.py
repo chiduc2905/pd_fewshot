@@ -13,6 +13,8 @@ SAMPLES_LIST = [60, 160, 240, None]
 SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 5
 EVAL_QUERY_NUM = 10
+TRAIN_EPISODES_PER_EPOCH = 130
+TEST_EPISODES_PER_EPOCH = 150
 FIXED_CUDNN_DETERMINISTIC = "true"
 FIXED_CUDNN_BENCHMARK = "false"
 
@@ -329,6 +331,7 @@ def run_experiment(
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
+    print("Protocol    : selection=test, merge_val_into_train=true, episodes(train/test)=130/150")
     if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
         print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
     if model.startswith("spif"):
@@ -407,11 +410,11 @@ def run_experiment(
         "--freq_mask_prob",
         "0.0",
         "--episode_num_train",
-        "200",
+        str(TRAIN_EPISODES_PER_EPOCH),
         "--episode_num_val",
-        "300",
+        str(TEST_EPISODES_PER_EPOCH),
         "--episode_num_test",
-        "400",
+        str(TEST_EPISODES_PER_EPOCH),
         "--seed",
         str(seed),
         "--gpu_id",
@@ -436,6 +439,20 @@ def run_experiment(
         cmd.extend(["--fewshot_backbone", applied_backbone])
     if not use_external_smnet:
         cmd.extend(["--deepemd_fast_val", "false"])
+        cmd.extend(
+            [
+                "--model_selection_split",
+                "test",
+                "--merge_val_into_train",
+                "true",
+                "--selection_episode_seed_mode",
+                "per_epoch",
+                "--selection_episode_seed_offset",
+                "100000",
+                "--final_test_episode_seed_offset",
+                "200000",
+            ]
+        )
         if model.startswith("spif"):
             cmd.extend(
                 [
@@ -580,7 +597,8 @@ def main():
             "Overrides   : "
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
-            "query(train/val/test)=5/10/10, episodes(test)=400, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "query(train/test)=5/10, episodes(train/test)=130/150, selection=test, merge_val_into_train=true, "
+            "augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -620,7 +638,8 @@ def main():
             "Overrides   : "
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
-            "query(train/val/test)=5/10/10, episodes(test)=400, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "query(train/test)=5/10, episodes(train/test)=130/150, selection=test, merge_val_into_train=true, "
+            "augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -662,7 +681,8 @@ def main():
             "Overrides   : "
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
-            "query(train/val/test)=5/10/10, episodes(test)=400, augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "query(train/test)=5/10, episodes(train/test)=130/150, selection=test, merge_val_into_train=true, "
+            "augment=off, masks=off, DeepEMD 5-shot=SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
