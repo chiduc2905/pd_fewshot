@@ -332,21 +332,21 @@ def get_model_metadata(model_name):
 
 
 PAPER_BASELINE_BACKBONE_MODELS = frozenset({"feat", "deepemd", "can", "frn", "deepbdc"})
-HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "slim_mamba"})
+HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
 
 
 def model_supports_fewshot_backbone(model_name, backbone_name):
     model_name = str(model_name)
     backbone_name = str(backbone_name).lower()
-    if backbone_name != "slim_mamba":
+    if backbone_name != "fsl_mamba":
         return True
     return model_name not in PAPER_BASELINE_BACKBONE_MODELS
 
 
-def fewshot_backbone_output_dim(backbone_name, slim_mamba_output_dim=640):
+def fewshot_backbone_output_dim(backbone_name, fsl_mamba_output_dim=320):
     backbone_name = str(backbone_name).lower()
-    if backbone_name == "slim_mamba":
-        return int(slim_mamba_output_dim)
+    if backbone_name == "fsl_mamba":
+        return int(fsl_mamba_output_dim)
     if backbone_name in HIGH_DIM_FEWSHOT_BACKBONES:
         return 640
     return 64
@@ -356,7 +356,9 @@ def resolve_fewshot_backbone(args):
     backbone = str(getattr(args, "fewshot_backbone", "resnet12")).lower()
     if backbone == "default":
         return "resnet12"
-    if backbone not in {"resnet12", "conv64f", "slim_mamba"}:
+    if backbone == "slim_mamba":
+        return "fsl_mamba"
+    if backbone not in {"resnet12", "conv64f", "fsl_mamba"}:
         raise ValueError(f"Unsupported fewshot_backbone: {backbone}")
     return backbone
 
@@ -970,9 +972,9 @@ def build_model_from_args(args):
         variant_dim = int(getattr(args, "spif_variant_dim", stable_dim) or stable_dim)
         gate_hidden = int(getattr(args, "spif_gate_hidden", max(1, stable_dim // 4)) or max(1, stable_dim // 4))
         lambda_init = float(getattr(args, "spif_rdp_lambda_init", 1e-3))
-        slim_mamba_base_dim = int(getattr(args, "spif_rdp_slim_mamba_base_dim", 64) or 64)
-        slim_mamba_output_dim = int(getattr(args, "spif_rdp_slim_mamba_output_dim", 640) or 640)
-        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone, slim_mamba_output_dim=slim_mamba_output_dim)
+        fsl_mamba_base_dim = int(getattr(args, "spif_rdp_fsl_mamba_base_dim", 48) or 48)
+        fsl_mamba_output_dim = int(getattr(args, "spif_rdp_fsl_mamba_output_dim", 320) or 320)
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone, fsl_mamba_output_dim=fsl_mamba_output_dim)
         return SPIFRDP(
             in_channels=3,
             hidden_dim=hidden_dim,
@@ -1009,16 +1011,16 @@ def build_model_from_args(args):
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
-            slim_mamba_base_dim=slim_mamba_base_dim,
-            slim_mamba_output_dim=slim_mamba_output_dim,
-            slim_mamba_drop_path=float(getattr(args, "spif_rdp_slim_mamba_drop_path", 0.1)),
-            slim_mamba_perturb_sigma=float(getattr(args, "spif_rdp_slim_mamba_perturb_sigma", 0.05)),
-            rdp_use_slim_mamba_global_prior=_bool_flag(
-                getattr(args, "spif_rdp_use_slim_mamba_global_prior", "true"),
+            fsl_mamba_base_dim=fsl_mamba_base_dim,
+            fsl_mamba_output_dim=fsl_mamba_output_dim,
+            fsl_mamba_drop_path=float(getattr(args, "spif_rdp_fsl_mamba_drop_path", 0.02)),
+            fsl_mamba_perturb_sigma=float(getattr(args, "spif_rdp_fsl_mamba_perturb_sigma", 0.0)),
+            rdp_use_fsl_mamba_global_prior=_bool_flag(
+                getattr(args, "spif_rdp_use_fsl_mamba_global_prior", "true"),
                 default=True,
             ),
-            rdp_slim_mamba_global_mix_init=float(
-                getattr(args, "spif_rdp_slim_mamba_global_mix_init", 0.35)
+            rdp_fsl_mamba_global_mix_init=float(
+                getattr(args, "spif_rdp_fsl_mamba_global_mix_init", 0.35)
             ),
         )
     if args.model == "spif_ota":

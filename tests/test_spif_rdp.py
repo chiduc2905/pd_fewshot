@@ -276,21 +276,21 @@ def test_spif_rdp_model_factory_builds_and_runs():
     assert outputs["total_distance"].shape == (2, 3)
 
 
-def test_spif_rdp_slim_mamba_backbone_runs_and_backpropagates():
+def test_spif_rdp_fsl_mamba_backbone_runs_and_backpropagates():
     torch.manual_seed(11)
     model = _build_model(
-        backbone_name="slim_mamba",
+        backbone_name="fsl_mamba",
         image_size=32,
         hidden_dim=64,
         stable_dim=24,
         variant_dim=24,
         gate_hidden=8,
-        slim_mamba_base_dim=16,
-        slim_mamba_output_dim=64,
-        slim_mamba_drop_path=0.0,
-        slim_mamba_perturb_sigma=0.0,
-        rdp_use_slim_mamba_global_prior=True,
-        rdp_slim_mamba_global_mix_init=0.4,
+        fsl_mamba_base_dim=16,
+        fsl_mamba_output_dim=64,
+        fsl_mamba_drop_path=0.0,
+        fsl_mamba_perturb_sigma=0.0,
+        rdp_use_fsl_mamba_global_prior=True,
+        rdp_fsl_mamba_global_mix_init=0.4,
     )
     model.train()
 
@@ -305,16 +305,16 @@ def test_spif_rdp_slim_mamba_backbone_runs_and_backpropagates():
     assert outputs["local_scores"].shape == (2, 3)
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["local_scores"]).all()
-    assert model.slim_mamba_global_adapter[1].weight.grad is not None
-    assert torch.isfinite(model.slim_mamba_global_adapter[1].weight.grad).all()
+    assert model.fsl_mamba_global_adapter[1].weight.grad is not None
+    assert torch.isfinite(model.fsl_mamba_global_adapter[1].weight.grad).all()
 
 
-def test_spif_rdp_model_factory_builds_and_runs_with_slim_mamba():
+def test_spif_rdp_model_factory_builds_and_runs_with_fsl_mamba():
     args = SimpleNamespace(
         model="spif_rdp",
         device="cpu",
         image_size=32,
-        fewshot_backbone="slim_mamba",
+        fewshot_backbone="fsl_mamba",
         spif_stable_dim=24,
         spif_variant_dim=24,
         spif_gate_hidden=8,
@@ -337,12 +337,12 @@ def test_spif_rdp_model_factory_builds_and_runs_with_slim_mamba():
         spif_rdp_decorr_weight=0.0,
         spif_rdp_sparse_weight=0.0,
         spif_rdp_beta_init=0.5,
-        spif_rdp_slim_mamba_base_dim=16,
-        spif_rdp_slim_mamba_output_dim=64,
-        spif_rdp_slim_mamba_drop_path=0.0,
-        spif_rdp_slim_mamba_perturb_sigma=0.0,
-        spif_rdp_use_slim_mamba_global_prior="true",
-        spif_rdp_slim_mamba_global_mix_init=0.4,
+        spif_rdp_fsl_mamba_base_dim=16,
+        spif_rdp_fsl_mamba_output_dim=64,
+        spif_rdp_fsl_mamba_drop_path=0.0,
+        spif_rdp_fsl_mamba_perturb_sigma=0.0,
+        spif_rdp_use_fsl_mamba_global_prior="true",
+        spif_rdp_fsl_mamba_global_mix_init=0.4,
     )
     model = build_model_from_args(args)
     model.eval()

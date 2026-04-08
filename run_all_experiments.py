@@ -40,7 +40,7 @@ def get_args():
         "--fewshot_backbone",
         type=str,
         default="default",
-        choices=["default", "resnet12", "conv64f", "slim_mamba"],
+        choices=["default", "resnet12", "conv64f", "fsl_mamba", "slim_mamba"],
     )
     parser.add_argument("--gpu_id", type=int, default=0, help="CUDA device id to pass through")
     parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers to pass through to main.py")
@@ -80,7 +80,7 @@ EXTERNAL_SMNET_MODELS = {
     "transport_evidence_mamba_net",
 }
 
-SLIM_MAMBA_COMPATIBLE_MODELS = {
+FSL_MAMBA_COMPATIBLE_MODELS = {
     "hierarchical_episodic_ssm_net",
     "hierarchical_consensus_slot_mamba_net",
     "hierarchical_support_sw_net",
@@ -98,12 +98,14 @@ SLIM_MAMBA_COMPATIBLE_MODELS = {
 
 def resolve_backbone_for_model(model: str, requested_backbone: str) -> str:
     requested_backbone = str(requested_backbone).lower()
-    if requested_backbone != "slim_mamba":
+    if requested_backbone == "slim_mamba":
+        requested_backbone = "fsl_mamba"
+    if requested_backbone != "fsl_mamba":
         return requested_backbone
     if model in EXTERNAL_SMNET_MODELS:
         return "default"
-    if model.startswith("spif") or model in SLIM_MAMBA_COMPATIBLE_MODELS:
-        return "slim_mamba"
+    if model.startswith("spif") or model in FSL_MAMBA_COMPATIBLE_MODELS:
+        return "fsl_mamba"
     return "default"
 
 

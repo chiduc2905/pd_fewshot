@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from net.encoders.fsl_mamba_encoder import FSLMambaEncoder
 from net.encoders.resnet12_encoder import ResNet12Encoder
-from net.encoders.slim_mamba_encoder import SlimMambaEncoder
 
 
 class Conv64FBlock(nn.Module):
@@ -74,10 +74,10 @@ def build_resnet12_family_encoder(
     variant: str = "fewshot",
     drop_rate: float = 0.0,
     dropblock_size: int = 5,
-    slim_mamba_base_dim: int = 64,
-    slim_mamba_output_dim: int = 640,
-    slim_mamba_drop_path: float = 0.1,
-    slim_mamba_perturb_sigma: float = 0.05,
+    fsl_mamba_base_dim: int = 48,
+    fsl_mamba_output_dim: int = 320,
+    fsl_mamba_drop_path: float = 0.02,
+    fsl_mamba_perturb_sigma: float = 0.0,
 ) -> nn.Module:
     """Build the legacy ResNet12 encoder or the additive smnet Conv64F option."""
 
@@ -97,13 +97,13 @@ def build_resnet12_family_encoder(
             pool_output=pool_output,
             pool_last=pool_last,
         )
-    if backbone_name == "slim_mamba":
-        return SlimMambaEncoder(
+    if backbone_name in {"fsl_mamba", "slim_mamba"}:
+        return FSLMambaEncoder(
             image_size=image_size,
             pool_output=pool_output,
-            base_dim=slim_mamba_base_dim,
-            output_dim=slim_mamba_output_dim,
-            drop_path=slim_mamba_drop_path,
-            perturb_sigma=slim_mamba_perturb_sigma,
+            base_dim=fsl_mamba_base_dim,
+            output_dim=fsl_mamba_output_dim,
+            drop_path=fsl_mamba_drop_path,
+            perturb_sigma=fsl_mamba_perturb_sigma,
         )
     raise ValueError(f"Unsupported fewshot_backbone: {backbone_name}")

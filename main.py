@@ -119,7 +119,7 @@ def get_args():
         "--fewshot_backbone",
         type=str,
         default="resnet12",
-        choices=["default", "resnet12", "conv64f", "slim_mamba"],
+        choices=["default", "resnet12", "conv64f", "fsl_mamba", "slim_mamba"],
     )
 
     parser.add_argument("--way_num", type=int, default=4)
@@ -653,12 +653,12 @@ def get_args():
     parser.add_argument("--spif_rdp_consistency_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_decorr_weight", type=float, default=0.0)
     parser.add_argument("--spif_rdp_sparse_weight", type=float, default=0.0)
-    parser.add_argument("--spif_rdp_slim_mamba_base_dim", type=int, default=64)
-    parser.add_argument("--spif_rdp_slim_mamba_output_dim", type=int, default=640)
-    parser.add_argument("--spif_rdp_slim_mamba_drop_path", type=float, default=0.1)
-    parser.add_argument("--spif_rdp_slim_mamba_perturb_sigma", type=float, default=0.05)
-    parser.add_argument("--spif_rdp_use_slim_mamba_global_prior", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--spif_rdp_slim_mamba_global_mix_init", type=float, default=0.35)
+    parser.add_argument("--spif_rdp_fsl_mamba_base_dim", type=int, default=48)
+    parser.add_argument("--spif_rdp_fsl_mamba_output_dim", type=int, default=320)
+    parser.add_argument("--spif_rdp_fsl_mamba_drop_path", type=float, default=0.02)
+    parser.add_argument("--spif_rdp_fsl_mamba_perturb_sigma", type=float, default=0.0)
+    parser.add_argument("--spif_rdp_use_fsl_mamba_global_prior", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--spif_rdp_fsl_mamba_global_mix_init", type=float, default=0.35)
     parser.add_argument("--spif_ota_transport_dim", type=int, default=None)
     parser.add_argument("--spif_ota_projector_hidden_dim", type=int, default=None)
     parser.add_argument("--spif_ota_mass_hidden_dim", type=int, default=None)
