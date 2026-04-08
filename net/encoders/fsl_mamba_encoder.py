@@ -8,6 +8,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from net.ssm.intra_image_mamba import build_2d_position_grid
+
+try:
+    from mamba_ssm import Mamba
+except ImportError as exc:  # pragma: no cover - optional in some local shells
+    Mamba = None
+    MAMBA_IMPORT_ERROR = exc
+else:
+    MAMBA_IMPORT_ERROR = None
+
 
 def _hw_to_tokens(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(2).transpose(1, 2).contiguous()
@@ -122,8 +132,8 @@ class TransitionDown(nn.Module):
         return F.gelu(main + skip)
 
 
-class StableSelectiveScan1D(nn.Module):
-    """Mamba-inspired 1D selective scan with bounded decay and local prefiltering."""
+class ReferenceSelectiveScan1D(nn.Module):
+    """Reference 1D selective scan used when fused Mamba kernels are unavailable."""
 
     def __init__(
         self,
@@ -215,6 +225,116 @@ class StableSelectiveScan1D(nn.Module):
         return self.out_proj(torch.cat([y, z_branch], dim=-1))
 
 
+class OfficialMambaScan1D(nn.Module):
+    """CUDA-friendly bidirectional scan that delegates the sequence core to mamba-ssm."""
+
+    def __init__(
+        self,
+        dim: int,
+        d_state: int = 8,
+        kernel_size: int = 3,
+        expand: int = 1,
+    ) -> None:
+        super().__init__()
+        if Mamba is None:
+            raise ImportError("OfficialMambaScan1D requires mamba-ssm") from MAMBA_IMPORT_ERROR
+
+        self.input_norm = EpisodicLayerNorm(dim)
+        pos_hidden = max(dim // 4, 16)
+        self.position_proj = nn.Sequential(
+            nn.Linear(6, pos_hidden),
+            nn.GELU(),
+            nn.Linear(pos_hidden, dim),
+        )
+        d_conv = max(int(kernel_size), 4)
+        self.forward_mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.backward_mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mix_proj = nn.Linear(dim * 3, dim, bias=False)
+        self.output_norm = EpisodicLayerNorm(dim)
+
+        for branch in (self.forward_mamba, self.backward_mamba):
+            for module in branch.modules():
+                module._fsl_mamba_skip_init = True
+
+    def forward(self, x: torch.Tensor, position: torch.Tensor) -> torch.Tensor:
+        if position.shape[:2] != x.shape[:2]:
+            raise ValueError(
+                "position must have the same batch/token dimensions as x: "
+                f"x={tuple(x.shape)} position={tuple(position.shape)}"
+            )
+        scan_inputs = self.input_norm(x) + self.position_proj(position)
+        forward_outputs = self.forward_mamba(scan_inputs)
+        backward_outputs = torch.flip(
+            self.backward_mamba(torch.flip(scan_inputs, dims=[1]).contiguous()),
+            dims=[1],
+        ).contiguous()
+        mixed = self.mix_proj(torch.cat([forward_outputs, backward_outputs, scan_inputs], dim=-1))
+        return self.output_norm(mixed)
+
+
+class StableBidirectionalScan1D(nn.Module):
+    """Position-aware fallback scan that mirrors the official Mamba path."""
+
+    def __init__(
+        self,
+        dim: int,
+        d_state: int = 8,
+        kernel_size: int = 3,
+    ) -> None:
+        super().__init__()
+        self.input_norm = EpisodicLayerNorm(dim)
+        pos_hidden = max(dim // 4, 16)
+        self.position_proj = nn.Sequential(
+            nn.Linear(6, pos_hidden),
+            nn.GELU(),
+            nn.Linear(pos_hidden, dim),
+        )
+        self.forward_scan = ReferenceSelectiveScan1D(dim, d_state=d_state, kernel_size=kernel_size)
+        self.backward_scan = ReferenceSelectiveScan1D(dim, d_state=d_state, kernel_size=kernel_size)
+        self.mix_proj = nn.Linear(dim * 3, dim, bias=False)
+        self.output_norm = EpisodicLayerNorm(dim)
+
+    def forward(self, x: torch.Tensor, position: torch.Tensor) -> torch.Tensor:
+        if position.shape[:2] != x.shape[:2]:
+            raise ValueError(
+                "position must have the same batch/token dimensions as x: "
+                f"x={tuple(x.shape)} position={tuple(position.shape)}"
+            )
+        scan_inputs = self.input_norm(x) + self.position_proj(position)
+        forward_outputs = self.forward_scan(scan_inputs)
+        backward_outputs = torch.flip(
+            self.backward_scan(torch.flip(scan_inputs, dims=[1]).contiguous()),
+            dims=[1],
+        ).contiguous()
+        mixed = self.mix_proj(torch.cat([forward_outputs, backward_outputs, scan_inputs], dim=-1))
+        return self.output_norm(mixed)
+
+
+class AxialMambaSequenceMixer1D(nn.Module):
+    """Select the best available sequence backend while preserving one public interface."""
+
+    def __init__(self, dim: int, d_state: int = 8, kernel_size: int = 3) -> None:
+        super().__init__()
+        if Mamba is not None:
+            self.backend = OfficialMambaScan1D(
+                dim=dim,
+                d_state=d_state,
+                kernel_size=kernel_size,
+                expand=1,
+            )
+            self.backend_name = "mamba_ssm"
+        else:
+            self.backend = StableBidirectionalScan1D(
+                dim=dim,
+                d_state=d_state,
+                kernel_size=kernel_size,
+            )
+            self.backend_name = "reference"
+
+    def forward(self, x: torch.Tensor, position: torch.Tensor) -> torch.Tensor:
+        return self.backend(x, position=position)
+
+
 class ConvFeedForward(nn.Module):
     """Small conv feed-forward used after the scan fusion."""
 
@@ -236,7 +356,7 @@ class ConvFeedForward(nn.Module):
 
 
 class CrossScaleOrthogonalMambaBlock(nn.Module):
-    """Few-shot Mamba block with row/column scan plus a pooled proxy scan."""
+    """Few-shot Mamba block with axial CUDA-friendly scan plus a pooled proxy scan."""
 
     def __init__(
         self,
@@ -254,11 +374,10 @@ class CrossScaleOrthogonalMambaBlock(nn.Module):
             nn.GELU(),
             nn.Conv2d(dim, dim, kernel_size=1, bias=False),
         )
-        self.row_scan = StableSelectiveScan1D(dim, d_state=d_state, kernel_size=scan_kernel_size)
-        self.col_scan = StableSelectiveScan1D(dim, d_state=d_state, kernel_size=scan_kernel_size)
+        self.row_scan = AxialMambaSequenceMixer1D(dim, d_state=d_state, kernel_size=scan_kernel_size)
+        self.col_scan = AxialMambaSequenceMixer1D(dim, d_state=d_state, kernel_size=scan_kernel_size)
         gate_hidden = max(dim // 8, 8)
         self.branch_gate = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(dim, gate_hidden, kernel_size=1, bias=True),
             nn.GELU(),
             nn.Conv2d(gate_hidden, 3, kernel_size=1, bias=True),
@@ -272,24 +391,38 @@ class CrossScaleOrthogonalMambaBlock(nn.Module):
         self.ls1 = LayerScale(dim, init_value=layer_scale_init)
         self.ls2 = LayerScale(dim, init_value=layer_scale_init)
         self.drop_path = DropPath(drop_path)
+        self.scan_backend = self.row_scan.backend_name
+
+    def _position_map(
+        self,
+        batch_size: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        position = build_2d_position_grid(height, width, device, dtype)
+        return position.reshape(1, height, width, 6).expand(batch_size, -1, -1, -1)
 
     def _scan_rows(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, channels, height, width = x.shape
+        position = self._position_map(batch_size, height, width, x.device, x.dtype)
         tokens = x.permute(0, 2, 3, 1).reshape(batch_size * height, width, channels)
-        mixed = self.row_scan(tokens)
+        pos_tokens = position.reshape(batch_size * height, width, 6)
+        mixed = self.row_scan(tokens, position=pos_tokens)
         return mixed.reshape(batch_size, height, width, channels).permute(0, 3, 1, 2).contiguous()
 
     def _scan_cols(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, channels, height, width = x.shape
+        position = self._position_map(batch_size, height, width, x.device, x.dtype)
         tokens = x.permute(0, 3, 2, 1).reshape(batch_size * width, height, channels)
-        mixed = self.col_scan(tokens)
+        pos_tokens = position.permute(0, 2, 1, 3).reshape(batch_size * width, height, 6)
+        mixed = self.col_scan(tokens, position=pos_tokens)
         return mixed.reshape(batch_size, width, height, channels).permute(0, 3, 2, 1).contiguous()
 
     def _proxy_scan(self, x: torch.Tensor) -> torch.Tensor:
         _, _, height, width = x.shape
-        proxy_h = max(2, (height + 1) // 2)
-        proxy_w = max(2, (width + 1) // 2)
-        proxy = F.adaptive_avg_pool2d(x, output_size=(proxy_h, proxy_w))
+        proxy = F.avg_pool2d(x, kernel_size=2, stride=2, ceil_mode=True)
         proxy = 0.5 * (self._scan_rows(proxy) + self._scan_cols(proxy))
         return F.interpolate(proxy, size=(height, width), mode="bilinear", align_corners=False)
 
@@ -381,6 +514,8 @@ class FSLMambaEncoder(nn.Module):
 
     def _init_weights(self) -> None:
         for module in self.modules():
+            if getattr(module, "_fsl_mamba_skip_init", False):
+                continue
             if isinstance(module, nn.Conv2d):
                 if getattr(module, "_fsl_mamba_zero_init", False):
                     nn.init.zeros_(module.weight)
