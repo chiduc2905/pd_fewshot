@@ -1072,6 +1072,8 @@ def build_model_from_args(args):
             entropy_loss_weight=float(getattr(args, "spif_otccls_entropy_loss_weight", 0.01)),
             global_only=_bool_flag(getattr(args, "spif_global_only", "false"), default=False),
             local_only=_bool_flag(getattr(args, "spif_local_only", "false"), default=False),
+            shot_agg=str(getattr(args, "spif_otccls_shot_agg", "softmax")),
+            shot_softmax_beta=float(getattr(args, "spif_otccls_shot_softmax_beta", 10.0)),
             swd_backend=str(getattr(args, "spif_otccls_swd_backend", "pot")),
             eps=float(getattr(args, "spif_otccls_eps", 1e-6)),
             backbone_name=fewshot_backbone,

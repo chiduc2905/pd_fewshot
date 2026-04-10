@@ -304,7 +304,7 @@ class DeepEMD(nn.Module):
                     selected_id = rand_id[start : min(start + self.sfc_bs, way_num * shot_num)]
                     batch_shot = support_flat[selected_id]
                     batch_label = label_shot[selected_id]
-                    optimizer.zero_grad()
+                    optimizer.zero_grad(set_to_none=True)
                     logits = self.emd_forward(sfc, batch_shot.detach(), solver=solver)
                     loss = F.cross_entropy(logits, batch_label)
                     loss.backward()

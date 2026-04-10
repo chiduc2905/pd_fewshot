@@ -59,6 +59,8 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
         entropy_loss_weight: float = 0.01,
         global_only: bool = False,
         local_only: bool = False,
+        shot_agg: str = "softmax",
+        shot_softmax_beta: float = 10.0,
         swd_backend: str = "pot",
         eps: float = 1e-6,
         backbone_name: str = "resnet12",
@@ -98,6 +100,10 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
             raise ValueError("decorr_loss_weight must be non-negative")
         if float(entropy_loss_weight) < 0.0:
             raise ValueError("entropy_loss_weight must be non-negative")
+        if str(shot_agg).lower() not in {"pooled", "mean", "softmax"}:
+            raise ValueError("shot_agg must be one of {'pooled', 'mean', 'softmax'}")
+        if float(shot_softmax_beta) <= 0.0:
+            raise ValueError("shot_softmax_beta must be positive")
         if float(eps) <= 0.0:
             raise ValueError("eps must be positive")
 
@@ -112,6 +118,8 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
         self.compact_loss_weight = float(compact_loss_weight)
         self.decorr_loss_weight = float(decorr_loss_weight)
         self.entropy_loss_weight = float(entropy_loss_weight)
+        self.shot_agg = str(shot_agg).lower()
+        self.shot_softmax_beta = float(shot_softmax_beta)
         if self.swd_backend not in {"pot", "quantile", "auto"}:
             raise ValueError("swd_backend must be one of {'pot', 'quantile', 'auto'}")
         if self.swd_backend == "pot" and ot is None:
@@ -351,6 +359,77 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
         local_scores = (a_ct.unsqueeze(0) * cosine_scores).sum(dim=-1)
         return local_scores, a_ct, tau_l
 
+    def _compute_local_shot_scores(
+        self,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        way_num, shot_num = support_tokens.shape[:2]
+        mu_ct = support_tokens.mean(dim=1)
+
+        mu_i = mu_ct.unsqueeze(1)
+        mu_j = mu_ct.unsqueeze(0)
+        pair_dist = (mu_i - mu_j).norm(dim=-1)
+        diag_mask = torch.eye(way_num, device=pair_dist.device, dtype=torch.bool).unsqueeze(-1)
+        pair_dist = pair_dist.masked_fill(diag_mask, float("inf"))
+        delta_ct = pair_dist.min(dim=1).values
+
+        tau_l = self.tau_l_value(query_tokens.device, query_tokens.dtype)
+        inv_delta = 1.0 / (delta_ct + self.eps)
+        a_ct = F.softmax(inv_delta / tau_l, dim=1)
+
+        cosine_scores = F.cosine_similarity(
+            query_tokens.unsqueeze(1).unsqueeze(2),
+            support_tokens.unsqueeze(0),
+            dim=-1,
+        )
+        per_shot_scores = (a_ct.unsqueeze(0).unsqueeze(2) * cosine_scores).sum(dim=-1)
+        local_scores, shot_weights = self._aggregate_shot_scores(per_shot_scores)
+        if shot_weights.shape != (query_tokens.shape[0], way_num, shot_num):
+            raise RuntimeError(
+                "Unexpected local shot weight shape: "
+                f"weights={tuple(shot_weights.shape)} scores={tuple(per_shot_scores.shape)}"
+            )
+        return local_scores, per_shot_scores, shot_weights, a_ct, tau_l
+
+    def _aggregate_shot_scores(self, per_shot_scores: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if per_shot_scores.dim() != 3:
+            raise ValueError(
+                "per_shot_scores must have shape (NumQuery, Way, Shot), "
+                f"got {tuple(per_shot_scores.shape)}"
+            )
+        shot_num = per_shot_scores.shape[-1]
+        if self.shot_agg == "mean":
+            shot_weights = torch.full_like(per_shot_scores, 1.0 / float(max(shot_num, 1)))
+        elif self.shot_agg == "softmax":
+            shot_weights = torch.softmax(float(self.shot_softmax_beta) * per_shot_scores, dim=-1)
+        else:
+            raise ValueError(f"_aggregate_shot_scores does not support shot_agg={self.shot_agg!r}")
+        return torch.sum(shot_weights * per_shot_scores, dim=-1), shot_weights
+
+    def _compute_global_shot_scores(
+        self,
+        query_tokens: torch.Tensor,
+        query_weights: torch.Tensor,
+        support_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        way_num, shot_num, num_tokens, dim = support_tokens.shape
+        flat_tokens = support_tokens.reshape(way_num * shot_num, num_tokens, dim)
+        shot_energy = support_tokens.square().sum(dim=-1)
+        flat_weights = shot_energy.reshape(way_num * shot_num, num_tokens)
+        flat_weights = flat_weights / flat_weights.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        per_shot_swd = self._compute_sliced_wasserstein(
+            query_tokens=query_tokens,
+            query_weights=query_weights,
+            prototype_tokens=flat_tokens,
+            prototype_weights=flat_weights,
+        ).reshape(query_tokens.shape[0], way_num, shot_num)
+        tau_g = self.tau_g_value(query_tokens.device, query_tokens.dtype)
+        per_shot_scores = -per_shot_swd / tau_g
+        global_scores, shot_weights = self._aggregate_shot_scores(per_shot_scores)
+        return global_scores, per_shot_scores, shot_weights, tau_g
+
     @staticmethod
     def _decorrelation_loss(stable_global: torch.Tensor, variant_global: torch.Tensor) -> torch.Tensor:
         stable_norm = F.normalize(stable_global, p=2, dim=-1)
@@ -372,21 +451,43 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
         way_num, shot_num, num_tokens, _ = support_tokens.shape
         num_query = query_tokens.shape[0]
 
+        query_weights = query_tokens.new_full((num_query, num_tokens), 1.0 / float(num_tokens))
+
         energy = support_tokens.square().sum(dim=-1).reshape(way_num, shot_num * num_tokens)
         support_weights = energy / energy.sum(dim=1, keepdim=True).clamp_min(self.eps)
         prototype_tokens = support_tokens.reshape(way_num, shot_num * num_tokens, self.feature_dim)
-        query_weights = query_tokens.new_full((num_query, num_tokens), 1.0 / float(num_tokens))
+        per_shot_global_scores = None
+        per_shot_local_scores = None
+        global_shot_weights = None
+        local_shot_weights = None
 
-        swd = self._compute_sliced_wasserstein(
-            query_tokens=query_tokens,
-            query_weights=query_weights,
-            prototype_tokens=prototype_tokens,
-            prototype_weights=support_weights,
-        )
-        tau_g = self.tau_g_value(query_tokens.device, query_tokens.dtype)
-        global_scores = -swd / tau_g
-
-        local_scores, conf_attention, tau_l = self._compute_local_scores(query_tokens, support_tokens)
+        if self.shot_agg == "pooled":
+            swd = self._compute_sliced_wasserstein(
+                query_tokens=query_tokens,
+                query_weights=query_weights,
+                prototype_tokens=prototype_tokens,
+                prototype_weights=support_weights,
+            )
+            tau_g = self.tau_g_value(query_tokens.device, query_tokens.dtype)
+            global_scores = -swd / tau_g
+            local_scores, conf_attention, tau_l = self._compute_local_scores(query_tokens, support_tokens)
+        else:
+            global_scores, per_shot_global_scores, global_shot_weights, tau_g = self._compute_global_shot_scores(
+                query_tokens=query_tokens,
+                query_weights=query_weights,
+                support_tokens=support_tokens,
+            )
+            swd = -global_scores * tau_g
+            (
+                local_scores,
+                per_shot_local_scores,
+                local_shot_weights,
+                conf_attention,
+                tau_l,
+            ) = self._compute_local_shot_scores(
+                query_tokens=query_tokens,
+                support_tokens=support_tokens,
+            )
 
         support_proto = support_global.mean(dim=1)
         scatter = ((support_global - support_proto.unsqueeze(1)).square().sum(dim=-1)).mean()
@@ -434,7 +535,7 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
         support_energy_entropy = -(support_weights * support_weights.clamp_min(self.eps).log()).sum(dim=1).mean()
         attention_entropy = entropy.mean()
 
-        return {
+        outputs = {
             "logits": logits,
             "aux_loss": aux_loss,
             "global_scores": global_scores.detach(),
@@ -461,6 +562,16 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
             "support_energy_entropy": support_energy_entropy.detach(),
             "mean_attention_entropy": attention_entropy.detach(),
         }
+        if per_shot_global_scores is not None:
+            outputs["per_shot_global_scores"] = per_shot_global_scores.detach()
+            outputs["global_shot_weights"] = global_shot_weights.detach()
+        if per_shot_local_scores is not None:
+            outputs["per_shot_local_scores"] = per_shot_local_scores.detach()
+            outputs["local_shot_weights"] = local_shot_weights.detach()
+            outputs["shot_aggregation_weights"] = (
+                0.5 * (global_shot_weights.detach() + local_shot_weights.detach())
+            )
+        return outputs
 
     def forward(
         self,
@@ -491,45 +602,53 @@ class SPIFOTCCLS(BaseConv64FewShotModel):
         if diagnostics and diagnostics[0]["local_scores"] is not None:
             local_scores = torch.cat([item["local_scores"] for item in diagnostics], dim=0)
 
-        return SPIFOTCCLSOutput(
-            {
-                "logits": logits,
-                "aux_loss": aux_loss,
-                "global_scores": torch.cat([item["global_scores"] for item in diagnostics], dim=0),
-                "local_scores": local_scores,
-                "total_distance": torch.cat([item["total_distance"] for item in diagnostics], dim=0),
-                "support_weights": torch.stack([item["support_weights"] for item in diagnostics], dim=0),
-                "confusability_attention": torch.stack(
-                    [item["confusability_attention"] for item in diagnostics],
-                    dim=0,
-                ),
-                "prototype_tokens": torch.stack([item["prototype_tokens"] for item in diagnostics], dim=0),
-                "stable_global_embeddings": torch.cat(
-                    [item["stable_global_embeddings"] for item in diagnostics],
-                    dim=0,
-                ),
-                "variant_global_embeddings": torch.cat(
-                    [item["variant_global_embeddings"] for item in diagnostics],
-                    dim=0,
-                ),
-                "mean_gate": torch.stack([item["mean_gate"] for item in diagnostics]).mean(),
-                "mean_reliability": torch.stack([item["mean_reliability"] for item in diagnostics]).mean(),
-                "rho_bar": torch.stack([item["rho_bar"] for item in diagnostics]).mean(),
-                "beta_eff": torch.stack([item["beta_eff"] for item in diagnostics]).mean(),
-                "beta0": torch.stack([item["beta0"] for item in diagnostics]).mean(),
-                "alpha_value": torch.stack([item["alpha_value"] for item in diagnostics]).mean(),
-                "tau_value": torch.stack([item["tau_value"] for item in diagnostics]).mean(),
-                "tau_local_value": torch.stack([item["tau_local_value"] for item in diagnostics]).mean(),
-                "compact_loss": torch.stack([item["compact_loss"] for item in diagnostics]).mean(),
-                "decorr_loss": torch.stack([item["decorr_loss"] for item in diagnostics]).mean(),
-                "entropy_loss": torch.stack([item["entropy_loss"] for item in diagnostics]).mean(),
-                "global_margin": torch.stack([item["global_margin"] for item in diagnostics]).mean(),
-                "local_margin": torch.stack([item["local_margin"] for item in diagnostics]).mean(),
-                "support_energy_entropy": torch.stack(
-                    [item["support_energy_entropy"] for item in diagnostics]
-                ).mean(),
-                "mean_attention_entropy": torch.stack(
-                    [item["mean_attention_entropy"] for item in diagnostics]
-                ).mean(),
-            }
-        )
+        payload = {
+            "logits": logits,
+            "aux_loss": aux_loss,
+            "global_scores": torch.cat([item["global_scores"] for item in diagnostics], dim=0),
+            "local_scores": local_scores,
+            "total_distance": torch.cat([item["total_distance"] for item in diagnostics], dim=0),
+            "support_weights": torch.stack([item["support_weights"] for item in diagnostics], dim=0),
+            "confusability_attention": torch.stack(
+                [item["confusability_attention"] for item in diagnostics],
+                dim=0,
+            ),
+            "prototype_tokens": torch.stack([item["prototype_tokens"] for item in diagnostics], dim=0),
+            "stable_global_embeddings": torch.cat(
+                [item["stable_global_embeddings"] for item in diagnostics],
+                dim=0,
+            ),
+            "variant_global_embeddings": torch.cat(
+                [item["variant_global_embeddings"] for item in diagnostics],
+                dim=0,
+            ),
+            "mean_gate": torch.stack([item["mean_gate"] for item in diagnostics]).mean(),
+            "mean_reliability": torch.stack([item["mean_reliability"] for item in diagnostics]).mean(),
+            "rho_bar": torch.stack([item["rho_bar"] for item in diagnostics]).mean(),
+            "beta_eff": torch.stack([item["beta_eff"] for item in diagnostics]).mean(),
+            "beta0": torch.stack([item["beta0"] for item in diagnostics]).mean(),
+            "alpha_value": torch.stack([item["alpha_value"] for item in diagnostics]).mean(),
+            "tau_value": torch.stack([item["tau_value"] for item in diagnostics]).mean(),
+            "tau_local_value": torch.stack([item["tau_local_value"] for item in diagnostics]).mean(),
+            "compact_loss": torch.stack([item["compact_loss"] for item in diagnostics]).mean(),
+            "decorr_loss": torch.stack([item["decorr_loss"] for item in diagnostics]).mean(),
+            "entropy_loss": torch.stack([item["entropy_loss"] for item in diagnostics]).mean(),
+            "global_margin": torch.stack([item["global_margin"] for item in diagnostics]).mean(),
+            "local_margin": torch.stack([item["local_margin"] for item in diagnostics]).mean(),
+            "support_energy_entropy": torch.stack(
+                [item["support_energy_entropy"] for item in diagnostics]
+            ).mean(),
+            "mean_attention_entropy": torch.stack(
+                [item["mean_attention_entropy"] for item in diagnostics]
+            ).mean(),
+        }
+        for key in (
+            "per_shot_global_scores",
+            "global_shot_weights",
+            "per_shot_local_scores",
+            "local_shot_weights",
+            "shot_aggregation_weights",
+        ):
+            if key in diagnostics[0]:
+                payload[key] = torch.cat([item[key] for item in diagnostics], dim=0)
+        return SPIFOTCCLSOutput(payload)

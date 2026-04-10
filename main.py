@@ -125,9 +125,9 @@ def get_args():
     parser.add_argument("--way_num", type=int, default=4)
     parser.add_argument("--shot_num", type=int, default=1)
     parser.add_argument("--query_num", type=int, default=None, help="Legacy: same queries for all splits")
-    parser.add_argument("--query_num_train", type=int, default=5)
-    parser.add_argument("--query_num_val", type=int, default=10)
-    parser.add_argument("--query_num_test", type=int, default=10)
+    parser.add_argument("--query_num_train", type=int, default=1)
+    parser.add_argument("--query_num_val", type=int, default=1)
+    parser.add_argument("--query_num_test", type=int, default=1)
     parser.add_argument(
         "--selected_classes",
         type=str,
@@ -688,6 +688,8 @@ def get_args():
     parser.add_argument("--spif_otccls_compact_loss_weight", type=float, default=0.1)
     parser.add_argument("--spif_otccls_decorr_loss_weight", type=float, default=0.05)
     parser.add_argument("--spif_otccls_entropy_loss_weight", type=float, default=0.01)
+    parser.add_argument("--spif_otccls_shot_agg", type=str, default="softmax", choices=["pooled", "mean", "softmax"])
+    parser.add_argument("--spif_otccls_shot_softmax_beta", type=float, default=10.0)
     parser.add_argument("--spif_otccls_swd_backend", type=str, default="pot", choices=["pot", "quantile", "auto"])
     parser.add_argument("--spif_otccls_eps", type=float, default=1e-6)
     parser.add_argument("--spif_otccls_backbone_drop_rate", type=float, default=0.05)
@@ -859,7 +861,7 @@ def get_args():
     parser.add_argument(
         "--selection_episode_seed_mode",
         type=str,
-        default="fixed",
+        default="per_epoch",
         choices=["fixed", "per_epoch"],
         help="Use one fixed selection seed for all epochs or advance it with epoch index.",
     )
@@ -1129,6 +1131,8 @@ def get_model(args):
             f"compact_loss_weight={getattr(args, 'spif_otccls_compact_loss_weight', 0.1)}, "
             f"decorr_loss_weight={getattr(args, 'spif_otccls_decorr_loss_weight', 0.05)}, "
             f"entropy_loss_weight={getattr(args, 'spif_otccls_entropy_loss_weight', 0.01)}, "
+            f"shot_agg={getattr(args, 'spif_otccls_shot_agg', 'softmax')}, "
+            f"shot_softmax_beta={getattr(args, 'spif_otccls_shot_softmax_beta', 10.0)}, "
             f"swd_backend={getattr(args, 'spif_otccls_swd_backend', 'pot')}, "
             f"backbone_drop_rate={getattr(args, 'spif_otccls_backbone_drop_rate', 0.05)}, "
             f"global_only={getattr(args, 'spif_global_only', 'false')}, "
@@ -2213,7 +2217,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for query, q_labels, support, support_labels in pbar:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             current_lr = optimizer.param_groups[0]["lr"]
 
             batch_size = query.shape[0]
