@@ -290,19 +290,19 @@ class DeepEMD(nn.Module):
 
     def get_sfc(self, support: torch.Tensor, solver: str) -> torch.Tensor:
         way_num, shot_num = support.shape[:2]
-        support = support.reshape(way_num * shot_num, self.feat_dim, support.shape[-2], support.shape[-1])
-        sfc = support.reshape(shot_num, way_num, self.feat_dim, support.shape[-2], support.shape[-1]).mean(dim=0).clone().detach()
+        support_flat = support.reshape(way_num * shot_num, self.feat_dim, support.shape[-2], support.shape[-1])
+        sfc = support.mean(dim=1).clone().detach()
         sfc = nn.Parameter(sfc.detach(), requires_grad=True)
 
         optimizer = torch.optim.SGD([sfc], lr=self.sfc_lr, momentum=0.9, dampening=0.9, weight_decay=0.0)
-        label_shot = torch.arange(way_num, device=support.device).repeat(shot_num)
+        label_shot = torch.arange(way_num, device=support.device).repeat_interleave(shot_num)
 
         with torch.enable_grad():
             for _ in range(self.sfc_update_step):
                 rand_id = torch.randperm(way_num * shot_num, device=support.device)
                 for start in range(0, way_num * shot_num, self.sfc_bs):
                     selected_id = rand_id[start : min(start + self.sfc_bs, way_num * shot_num)]
-                    batch_shot = support[selected_id]
+                    batch_shot = support_flat[selected_id]
                     batch_label = label_shot[selected_id]
                     optimizer.zero_grad()
                     logits = self.emd_forward(sfc, batch_shot.detach(), solver=solver)
