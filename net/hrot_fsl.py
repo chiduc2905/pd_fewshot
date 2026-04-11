@@ -45,7 +45,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-E."""
+    """Vectorized HROT few-shot model with ablation variants A-F."""
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = str(variant).upper()
-        if variant not in {"A", "B", "C", "D", "E"}:
+        if variant not in {"A", "B", "C", "D", "E", "F"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
@@ -103,8 +103,8 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E"}
-        self.uses_learned_mass = variant == "E"
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F"}
+        self.uses_learned_mass = variant in {"E", "F"}
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.eval_use_float64 = bool(eval_use_float64)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)

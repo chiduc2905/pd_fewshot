@@ -135,7 +135,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -162,6 +162,29 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     else:
         assert torch.all(outputs["rho"] >= 0.1)
         assert torch.all(outputs["rho"] <= 1.0)
+
+
+def test_hrot_fsl_variant_f_uses_euclidean_cost_with_learned_hyperbolic_mass():
+    torch.manual_seed(13)
+    model = _build_model(variant="F")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    expected_cost = model._euclidean_cost(
+        outputs["query_euclidean_tokens"],
+        outputs["support_euclidean_tokens"].squeeze(0),
+    )
+
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert not model.uses_hyperbolic_geometry
+    assert model.uses_unbalanced_transport
+    assert model.uses_learned_mass
+    assert outputs["rho_regularization"].item() >= 0.0
 
 
 def test_hrot_fsl_is_support_shot_permutation_invariant():
