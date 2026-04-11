@@ -45,7 +45,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-F."""
+    """Vectorized HROT few-shot model with ablation variants A-H."""
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = str(variant).upper()
-        if variant not in {"A", "B", "C", "D", "E", "F"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
@@ -103,8 +103,11 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F"}
-        self.uses_learned_mass = variant in {"E", "F"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H"}
+        self.uses_geodesic_eam = variant == "H"
+        self.uses_mass_normalized_score = variant == "H"
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.eval_use_float64 = bool(eval_use_float64)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)
@@ -138,6 +141,7 @@ class HROTFSL(BaseConv64FewShotModel):
             hidden_dim=eam_hidden_dim,
             min_mass=min_mass,
             default_mass=fixed_mass,
+            input_dim=4 if self.uses_geodesic_eam else None,
         )
         self.mass_bonus = nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
 
@@ -237,6 +241,42 @@ class HROTFSL(BaseConv64FewShotModel):
         query_stats = summarize_hyperbolic_tokens(query_cast, ball)
         class_stats = summarize_hyperbolic_tokens(class_cast, ball)
         rho = self.eam.forward_from_stats(query_stats, class_stats)
+        return rho.to(dtype=query_tokens_hyp.dtype)
+
+    def _build_geodesic_rho_per_shot(
+        self,
+        query_tokens_hyp: torch.Tensor,
+        support_tokens_hyp: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.uses_unbalanced_transport:
+            return query_tokens_hyp.new_ones(query_tokens_hyp.shape[0], *support_tokens_hyp.shape[:2])
+        if not self.uses_learned_mass:
+            return query_tokens_hyp.new_full(
+                (query_tokens_hyp.shape[0], *support_tokens_hyp.shape[:2]),
+                self.fixed_mass,
+            )
+
+        calc_dtype = torch.float64 if (self.eval_use_float64 and not self.training) else query_tokens_hyp.dtype
+        query_cast = query_tokens_hyp.to(dtype=calc_dtype)
+        support_cast = support_tokens_hyp.to(dtype=calc_dtype)
+        way_num, shot_num = support_cast.shape[:2]
+        ball = self._build_ball(query_cast)
+
+        query_stats = summarize_hyperbolic_tokens(query_cast, ball)
+        flat_support = support_cast.reshape(way_num * shot_num, support_cast.shape[-2], support_cast.shape[-1])
+        shot_stats = summarize_hyperbolic_tokens(flat_support, ball)
+        shot_means = shot_stats.mean_hyp.reshape(way_num, shot_num, -1)
+        shot_variance = shot_stats.variance.reshape(way_num, shot_num)
+
+        mean_distance = ball.dist(
+            query_stats.mean_hyp[:, None, None, :],
+            shot_means[None, :, :, :],
+        )
+        shot_spread = torch.zeros_like(mean_distance)
+        query_variance = query_stats.variance[:, None, None].expand_as(mean_distance)
+        support_variance = shot_variance[None, :, :].expand_as(mean_distance)
+        features = torch.stack([mean_distance, shot_spread, query_variance, support_variance], dim=-1)
+        rho = self.eam.forward_features(features)
         return rho.to(dtype=query_tokens_hyp.dtype)
 
     def _transport_match(
@@ -339,17 +379,63 @@ class HROTFSL(BaseConv64FewShotModel):
         class_euclidean = merge_support_tokens(support_euclidean, merge_mode="concat")
         class_hyperbolic = merge_support_tokens(support_hyperbolic, merge_mode="concat")
 
-        if self.uses_hyperbolic_geometry:
-            cost = self._hyperbolic_cost(query_hyperbolic, class_hyperbolic)
+        shot_transport_cost = None
+        shot_transport_mass = None
+        shot_rho = None
+        if self.uses_shot_decomposed_transport:
+            flat_support_euclidean = support_euclidean.reshape(
+                way_num * shot_num,
+                support_euclidean.shape[-2],
+                support_euclidean.shape[-1],
+            )
+            flat_support_hyperbolic = support_hyperbolic.reshape(
+                way_num * shot_num,
+                support_hyperbolic.shape[-2],
+                support_hyperbolic.shape[-1],
+            )
+            flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+            if self.uses_geodesic_eam:
+                shot_rho = self._build_geodesic_rho_per_shot(query_hyperbolic, support_hyperbolic)
+                flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+            else:
+                flat_rho = self._build_pairwise_rho(query_hyperbolic, flat_support_hyperbolic)
+            flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match(flat_cost, flat_rho)
+
+            shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
+            shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
+            if shot_rho is None:
+                shot_rho = flat_rho.reshape(query.shape[0], way_num, shot_num)
+            if self.uses_mass_normalized_score:
+                normalized_shot_cost = shot_transport_cost / shot_transport_mass.clamp_min(self.eps)
+                shot_logits = -self.score_scale * normalized_shot_cost
+            else:
+                normalized_shot_cost = None
+                shot_logits = -self.score_scale * shot_transport_cost
+            if self.uses_unbalanced_transport and not self.uses_mass_normalized_score:
+                shot_logits = shot_logits + self.mass_bonus.to(dtype=shot_logits.dtype) * shot_transport_mass
+
+            logits = shot_logits.mean(dim=-1)
+            transport_cost = (
+                normalized_shot_cost.mean(dim=-1)
+                if normalized_shot_cost is not None
+                else shot_transport_cost.mean(dim=-1)
+            )
+            transport_mass = shot_transport_mass.mean(dim=-1)
+            rho = shot_rho
+            cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
+            plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
         else:
-            cost = self._euclidean_cost(query_euclidean, class_euclidean)
+            if self.uses_hyperbolic_geometry:
+                cost = self._hyperbolic_cost(query_hyperbolic, class_hyperbolic)
+            else:
+                cost = self._euclidean_cost(query_euclidean, class_euclidean)
 
-        rho = self._build_pairwise_rho(query_hyperbolic, class_hyperbolic)
-        plan, transport_cost, transport_mass = self._transport_match(cost, rho)
+            rho = self._build_pairwise_rho(query_hyperbolic, class_hyperbolic)
+            plan, transport_cost, transport_mass = self._transport_match(cost, rho)
 
-        logits = -self.score_scale * transport_cost
-        if self.uses_unbalanced_transport:
-            logits = logits + self.mass_bonus.to(dtype=logits.dtype) * transport_mass
+            logits = -self.score_scale * transport_cost
+            if self.uses_unbalanced_transport:
+                logits = logits + self.mass_bonus.to(dtype=logits.dtype) * transport_mass
 
         rho_regularization = logits.new_zeros(())
         if self.uses_learned_mass and self.lambda_rho > 0.0:
@@ -379,15 +465,25 @@ class HROTFSL(BaseConv64FewShotModel):
             "hyperbolic_backend": logits.new_tensor(0.0 if self.hyperbolic_backend == "native" else 1.0),
             "ot_backend": logits.new_tensor(0.0 if self.ot_backend == "native" else 1.0),
         }
+        if self.uses_shot_decomposed_transport:
+            outputs.update(
+                {
+                    "shot_transport_cost": shot_transport_cost,
+                    "shot_transported_mass": shot_transport_mass,
+                    "shot_rho": shot_rho,
+                }
+            )
         if return_aux:
+            payload_support_euclidean = support_euclidean if self.uses_shot_decomposed_transport else class_euclidean
+            payload_support_hyperbolic = support_hyperbolic if self.uses_shot_decomposed_transport else class_hyperbolic
             outputs.update(
                 {
                     "transport_plan": plan,
                     "cost_matrix": cost,
                     "query_euclidean_tokens": query_euclidean,
-                    "support_euclidean_tokens": class_euclidean,
+                    "support_euclidean_tokens": payload_support_euclidean,
                     "query_hyperbolic_tokens": query_hyperbolic,
-                    "support_hyperbolic_tokens": class_hyperbolic,
+                    "support_hyperbolic_tokens": payload_support_hyperbolic,
                 }
             )
         return outputs
@@ -409,6 +505,13 @@ class HROTFSL(BaseConv64FewShotModel):
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),
             "ot_backend": torch.stack([item["ot_backend"] for item in batch_outputs]).mean(),
         }
+        if "shot_transport_cost" in batch_outputs[0]:
+            stacked["shot_transport_cost"] = torch.cat([item["shot_transport_cost"] for item in batch_outputs], dim=0)
+            stacked["shot_transported_mass"] = torch.cat(
+                [item["shot_transported_mass"] for item in batch_outputs],
+                dim=0,
+            )
+            stacked["shot_rho"] = torch.cat([item["shot_rho"] for item in batch_outputs], dim=0)
         if "transport_plan" in batch_outputs[0]:
             stacked["transport_plan"] = torch.cat([item["transport_plan"] for item in batch_outputs], dim=0)
             stacked["cost_matrix"] = torch.cat([item["cost_matrix"] for item in batch_outputs], dim=0)

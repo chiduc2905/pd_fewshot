@@ -40,21 +40,24 @@ class EpisodeAdaptiveMass(nn.Module):
         hidden_dim: int = 256,
         min_mass: float = 0.1,
         default_mass: float = 0.8,
+        input_dim: int | None = None,
     ) -> None:
         super().__init__()
         if embed_dim <= 0:
             raise ValueError("embed_dim must be positive")
         if hidden_dim <= 0:
             raise ValueError("hidden_dim must be positive")
+        if input_dim is not None and input_dim <= 0:
+            raise ValueError("input_dim must be positive")
         if not 0.0 < min_mass <= 1.0:
             raise ValueError("min_mass must be in (0, 1]")
         if not min_mass <= default_mass < 1.0:
             raise ValueError("default_mass must be in [min_mass, 1)")
 
         self.min_mass = float(min_mass)
-        input_dim = 2 * int(embed_dim) + 3
+        self.input_dim = int(input_dim) if input_dim is not None else 2 * int(embed_dim) + 3
         self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(self.input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, max(1, hidden_dim // 2)),
@@ -69,6 +72,13 @@ class EpisodeAdaptiveMass(nn.Module):
             raise TypeError("EpisodeAdaptiveMass expects the penultimate layer to be nn.Linear")
         nn.init.zeros_(final_linear.weight)
         nn.init.constant_(final_linear.bias, math.log(default_mass / (1.0 - default_mass)))
+
+    def forward_features(self, features: torch.Tensor) -> torch.Tensor:
+        if features.shape[-1] != self.input_dim:
+            raise ValueError(f"features last dim must be {self.input_dim}, got {features.shape[-1]}")
+        network_dtype = self.network[0].weight.dtype
+        rho = self.network(features.to(dtype=network_dtype)).squeeze(-1)
+        return rho.clamp(min=self.min_mass, max=1.0)
 
     def forward_from_stats(
         self,
@@ -96,9 +106,7 @@ class EpisodeAdaptiveMass(nn.Module):
             ],
             dim=-1,
         )
-        network_dtype = self.network[0].weight.dtype
-        rho = self.network(features.to(dtype=network_dtype)).squeeze(-1)
-        return rho.clamp(min=self.min_mass, max=1.0)
+        return self.forward_features(features)
 
     def forward(
         self,
