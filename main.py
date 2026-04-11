@@ -915,6 +915,8 @@ def get_args():
     parser.add_argument("--save_last_checkpoint", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--skip_final_test", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_train_sfc", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--deepemd_train_sfc_update_step", type=int, default=None)
+    parser.add_argument("--deepemd_train_sfc_bs", type=int, default=None)
     parser.add_argument("--deepemd_fast_val", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_test_exact", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--deepemd_test_sfc", type=str, default="true", choices=["true", "false"])
@@ -944,13 +946,23 @@ def get_model(args):
     if args.model == "maml":
         print(f"  maml: inner_lr=0.01, inner_steps=5, second_order={args.maml_second_order}")
     if args.model == "deepemd":
+        train_sfc_steps = getattr(args, "deepemd_train_sfc_update_step", None)
+        train_sfc_bs = getattr(args, "deepemd_train_sfc_bs", None)
+        train_sfc_overrides = []
+        if train_sfc_steps is not None:
+            train_sfc_overrides.append(f"train_sfc_steps={train_sfc_steps}")
+        if train_sfc_bs is not None:
+            train_sfc_overrides.append(f"train_sfc_bs={train_sfc_bs}")
+        override_suffix = ""
+        if train_sfc_overrides:
+            override_suffix = ", " + ", ".join(train_sfc_overrides)
         print(
             "  deepemd: official-style EMD/SFC "
             f"(solver={getattr(args, 'deepemd_solver', 'opencv')}, "
             f"qpth_form={getattr(args, 'deepemd_qpth_form', 'L2')}, "
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
             f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 100)}, "
-            f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)})"
+            f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)}{override_suffix})"
         )
     if args.model == "hierarchical_episodic_ssm_net":
         print(
@@ -1582,7 +1594,14 @@ def forward_scores(
     if args.model == "deepemd":
         if phase == "train":
             refine_proto = _bool_flag(args.deepemd_train_sfc, default=True)
-            return net(query, support, refine_proto=refine_proto, exact=False)
+            return net(
+                query,
+                support,
+                refine_proto=refine_proto,
+                exact=False,
+                sfc_update_step_override=getattr(args, "deepemd_train_sfc_update_step", None),
+                sfc_bs_override=getattr(args, "deepemd_train_sfc_bs", None),
+            )
         if phase == "val":
             fast_val = _bool_flag(args.deepemd_fast_val, default=False)
             return net(query, support, refine_proto=not fast_val, exact=not fast_val)

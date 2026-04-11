@@ -288,8 +288,16 @@ class DeepEMD(nn.Module):
         similarity_map = self.get_similarity_map(proto, query)
         return self.get_emd_distance(similarity_map, weight1, weight2, solver=solver)
 
-    def get_sfc(self, support: torch.Tensor, solver: str) -> torch.Tensor:
+    def get_sfc(
+        self,
+        support: torch.Tensor,
+        solver: str,
+        sfc_update_step: int | None = None,
+        sfc_bs: int | None = None,
+    ) -> torch.Tensor:
         way_num, shot_num = support.shape[:2]
+        sfc_update_step = max(1, int(self.sfc_update_step if sfc_update_step is None else sfc_update_step))
+        sfc_bs = max(1, int(self.sfc_bs if sfc_bs is None else sfc_bs))
         support_flat = support.reshape(way_num * shot_num, self.feat_dim, support.shape[-2], support.shape[-1])
         sfc = support.mean(dim=1).clone().detach()
         sfc = nn.Parameter(sfc.detach(), requires_grad=True)
@@ -298,10 +306,10 @@ class DeepEMD(nn.Module):
         label_shot = torch.arange(way_num, device=support.device).repeat_interleave(shot_num)
 
         with torch.enable_grad():
-            for _ in range(self.sfc_update_step):
+            for _ in range(sfc_update_step):
                 rand_id = torch.randperm(way_num * shot_num, device=support.device)
-                for start in range(0, way_num * shot_num, self.sfc_bs):
-                    selected_id = rand_id[start : min(start + self.sfc_bs, way_num * shot_num)]
+                for start in range(0, way_num * shot_num, sfc_bs):
+                    selected_id = rand_id[start : min(start + sfc_bs, way_num * shot_num)]
                     batch_shot = support_flat[selected_id]
                     batch_label = label_shot[selected_id]
                     optimizer.zero_grad(set_to_none=True)
@@ -311,7 +319,15 @@ class DeepEMD(nn.Module):
                     optimizer.step()
         return sfc.detach()
 
-    def forward(self, query: torch.Tensor, support: torch.Tensor, refine_proto: bool | None = None, exact: bool | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        support: torch.Tensor,
+        refine_proto: bool | None = None,
+        exact: bool | None = None,
+        sfc_update_step_override: int | None = None,
+        sfc_bs_override: int | None = None,
+    ) -> torch.Tensor:
         batch_size, num_query, channels, height, width = query.size()
         _, way_num, shot_num, _, _, _ = support.size()
         solver = self._resolve_solver(exact=exact)
@@ -328,7 +344,12 @@ class DeepEMD(nn.Module):
         for batch_idx in range(batch_size):
             proto = support_feat[batch_idx].mean(dim=1)
             if refine_proto and shot_num > 1:
-                proto = self.get_sfc(support_feat[batch_idx], solver=solver)
+                proto = self.get_sfc(
+                    support_feat[batch_idx],
+                    solver=solver,
+                    sfc_update_step=sfc_update_step_override,
+                    sfc_bs=sfc_bs_override,
+                )
             logits = self.emd_forward(proto, query_feat[batch_idx], solver=solver)
             outputs.append(logits)
 

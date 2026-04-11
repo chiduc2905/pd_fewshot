@@ -162,8 +162,14 @@ def run_experiment(
         if model == "deepemd" and shot > 1:
             cmd.extend(
                 [
+                    "--deepemd_solver",
+                    base_runner.DEEPEMD_5SHOT_TRAIN_SOLVER,
                     "--deepemd_train_sfc",
                     "true",
+                    "--deepemd_train_sfc_update_step",
+                    str(base_runner.DEEPEMD_5SHOT_TRAIN_SFC_STEPS),
+                    "--deepemd_train_sfc_bs",
+                    str(base_runner.DEEPEMD_5SHOT_TRAIN_SFC_BS),
                     "--deepemd_test_sfc",
                     "true",
                     "--deepemd_test_exact",

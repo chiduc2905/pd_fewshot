@@ -17,6 +17,9 @@ TRAIN_EPISODES_PER_EPOCH = 130
 TEST_EPISODES_PER_EPOCH = 150
 FIXED_CUDNN_DETERMINISTIC = "true"
 FIXED_CUDNN_BENCHMARK = "false"
+DEEPEMD_5SHOT_TRAIN_SOLVER = "sinkhorn"
+DEEPEMD_5SHOT_TRAIN_SFC_STEPS = 15
+DEEPEMD_5SHOT_TRAIN_SFC_BS = 20
 
 
 def get_args():
@@ -465,8 +468,14 @@ def run_experiment(
         if model == "deepemd" and shot > 1:
             cmd.extend(
                 [
+                    "--deepemd_solver",
+                    DEEPEMD_5SHOT_TRAIN_SOLVER,
                     "--deepemd_train_sfc",
                     "true",
+                    "--deepemd_train_sfc_update_step",
+                    str(DEEPEMD_5SHOT_TRAIN_SFC_STEPS),
+                    "--deepemd_train_sfc_bs",
+                    str(DEEPEMD_5SHOT_TRAIN_SFC_BS),
                     "--deepemd_test_sfc",
                     "true",
                     "--deepemd_test_exact",
@@ -598,7 +607,10 @@ def main():
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
             "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
-            "augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "augment=off, masks=off, "
+            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
+            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
+            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, test exact/SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -639,7 +651,10 @@ def main():
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
             "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
-            "augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "augment=off, masks=off, "
+            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
+            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
+            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, test exact/SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -682,7 +697,10 @@ def main():
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.1(new models only), "
             "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
-            "augment=off, masks=off, DeepEMD 5-shot=SFC on"
+            "augment=off, masks=off, "
+            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
+            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
+            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, test exact/SFC on"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
