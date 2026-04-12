@@ -813,6 +813,7 @@ def get_args():
     parser.add_argument("--hrot_fixed_mass", type=float, default=0.8)
     parser.add_argument("--hrot_min_mass", type=float, default=0.1)
     parser.add_argument("--hrot_mass_bonus_init", type=float, default=1.0)
+    parser.add_argument("--hrot_transport_cost_threshold_init", type=float, default=None)
     parser.add_argument("--hrot_lambda_rho", type=float, default=0.01)
     parser.add_argument("--hrot_rho_target", type=float, default=0.8)
     parser.add_argument("--hrot_lambda_curvature", type=float, default=0.0)
@@ -1423,6 +1424,7 @@ def get_model(args):
             f"hyp_backend={getattr(args, 'hrot_hyperbolic_backend', 'auto')}, "
             f"ot_backend={getattr(args, 'hrot_ot_backend', 'native')}, "
             f"fixed_mass={getattr(args, 'hrot_fixed_mass', 0.8)}, "
+            f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)})"
         )
     return model

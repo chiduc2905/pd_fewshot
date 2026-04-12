@@ -221,10 +221,19 @@ def test_hrot_fsl_variant_g_uses_shot_decomposed_euclidean_ot():
     assert outputs["cost_matrix"].shape == outputs["transport_plan"].shape
 
 
-def test_hrot_fsl_variant_h_adds_geodesic_eam_and_normalized_score():
+def test_hrot_fsl_variant_h_uses_geodesic_eam_with_shot_decomposed_score():
     torch.manual_seed(15)
     model = _build_model(variant="H")
     model.eval()
+    captured_features = []
+
+    original_forward_features = model.eam.forward_features
+
+    def capture_forward_features(features):
+        captured_features.append(features.detach().clone())
+        return original_forward_features(features)
+
+    model.eam.forward_features = capture_forward_features
 
     query = torch.randn(1, 2, 3, 64, 64)
     support = torch.randn(1, 3, 2, 3, 64, 64)
@@ -235,22 +244,68 @@ def test_hrot_fsl_variant_h_adds_geodesic_eam_and_normalized_score():
     flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
     expected_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
     expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
-    normalized_shot_cost = outputs["shot_transport_cost"] / outputs["shot_transported_mass"].clamp_min(model.eps)
-    expected_logits = -model.score_scale * normalized_shot_cost.mean(dim=-1)
+    mass_reward = (model.score_scale * model.transport_cost_threshold.detach()).to(
+        dtype=outputs["shot_transported_mass"].dtype
+    )
+    expected_logits = (
+        -model.score_scale * outputs["shot_transport_cost"]
+        + mass_reward * outputs["shot_transported_mass"]
+    ).mean(dim=-1)
 
     assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(outputs["transport_cost"], normalized_shot_cost.mean(dim=-1), atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        outputs["transport_cost"],
+        outputs["shot_transport_cost"].mean(dim=-1),
+        atol=1e-5,
+        rtol=1e-5,
+    )
     assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
     assert not model.uses_hyperbolic_geometry
     assert model.uses_unbalanced_transport
     assert model.uses_learned_mass
     assert model.uses_shot_decomposed_transport
     assert model.uses_geodesic_eam
-    assert model.uses_mass_normalized_score
+    assert model.uses_cost_threshold_score
+    assert model.mass_bonus is None
+    assert model.raw_transport_cost_threshold is not None
+    assert torch.allclose(outputs["mass_bonus"], mass_reward, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        outputs["transport_cost_threshold"],
+        model.transport_cost_threshold.detach(),
+        atol=1e-6,
+        rtol=1e-6,
+    )
     assert model.eam.network[0].in_features == 4
+    assert len(captured_features) == 1
+    assert captured_features[0].shape == (2, 3, 2, 4)
+    assert torch.isfinite(captured_features[0]).all()
+    assert torch.any(captured_features[0][..., 1] > 0.0)
     assert outputs["rho"].shape == (2, 3, 2)
     assert outputs["transport_plan"].shape[:3] == (2, 3, 2)
     assert outputs["cost_matrix"].shape == outputs["transport_plan"].shape
+
+
+def test_hrot_fsl_variant_h_backpropagates_cost_threshold_and_geodesic_eam():
+    torch.manual_seed(16)
+    model = _build_model(variant="H", lambda_rho=0.1)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    assert model.mass_bonus is None
+    assert model.raw_transport_cost_threshold is not None
+    assert model.raw_transport_cost_threshold.grad is not None
+    assert model.eam.network[-2].weight.grad is not None
+    assert torch.isfinite(model.raw_transport_cost_threshold.grad).all()
+    assert torch.isfinite(model.eam.network[-2].weight.grad).all()
+    assert model.eam.network[-2].weight.grad.norm().item() > 0.0
 
 
 def test_hrot_fsl_is_support_shot_permutation_invariant():

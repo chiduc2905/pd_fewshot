@@ -1763,6 +1763,7 @@ def build_model_from_args(args):
             fixed_mass=float(getattr(args, "hrot_fixed_mass", 0.8)),
             min_mass=float(getattr(args, "hrot_min_mass", 0.1)),
             mass_bonus_init=float(getattr(args, "hrot_mass_bonus_init", 1.0)),
+            transport_cost_threshold_init=getattr(args, "hrot_transport_cost_threshold_init", None),
             lambda_rho=float(getattr(args, "hrot_lambda_rho", 0.01)),
             rho_target=float(getattr(args, "hrot_rho_target", 0.8)),
             lambda_curvature=float(getattr(args, "hrot_lambda_curvature", 0.0)),

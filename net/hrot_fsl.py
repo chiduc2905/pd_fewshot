@@ -69,6 +69,7 @@ class HROTFSL(BaseConv64FewShotModel):
         fixed_mass: float = 0.8,
         min_mass: float = 0.1,
         mass_bonus_init: float = 1.0,
+        transport_cost_threshold_init: float | None = None,
         lambda_rho: float = 0.01,
         rho_target: float = 0.8,
         lambda_curvature: float = 0.0,
@@ -107,7 +108,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_learned_mass = variant in {"E", "F", "G", "H"}
         self.uses_shot_decomposed_transport = variant in {"G", "H"}
         self.uses_geodesic_eam = variant == "H"
-        self.uses_mass_normalized_score = variant == "H"
+        self.uses_cost_threshold_score = variant == "H"
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.eval_use_float64 = bool(eval_use_float64)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)
@@ -143,7 +144,21 @@ class HROTFSL(BaseConv64FewShotModel):
             default_mass=fixed_mass,
             input_dim=4 if self.uses_geodesic_eam else None,
         )
-        self.mass_bonus = nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
+        if self.uses_cost_threshold_score:
+            threshold_init = (
+                float(transport_cost_threshold_init)
+                if transport_cost_threshold_init is not None
+                else float(mass_bonus_init) / self.score_scale
+            )
+            if threshold_init <= 0.0:
+                raise ValueError("transport_cost_threshold_init must be positive for H cost-threshold scoring")
+            self.raw_transport_cost_threshold = nn.Parameter(
+                torch.tensor(_inverse_softplus(threshold_init), dtype=torch.float32)
+            )
+            self.mass_bonus = None
+        else:
+            self.raw_transport_cost_threshold = None
+            self.mass_bonus = nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
 
     @property
     def curvature(self) -> torch.Tensor:
@@ -164,6 +179,18 @@ class HROTFSL(BaseConv64FewShotModel):
             self.curvature.to(device=reference.device, dtype=reference.dtype),
             backend="native",
         )
+
+    @property
+    def transport_cost_threshold(self) -> torch.Tensor:
+        if self.raw_transport_cost_threshold is not None:
+            return F.softplus(self.raw_transport_cost_threshold).clamp_min(self.eps)
+        return self.mass_bonus / self.score_scale
+
+    def _mass_reward_weight(self, reference: torch.Tensor) -> torch.Tensor:
+        if self.raw_transport_cost_threshold is not None:
+            threshold = self.transport_cost_threshold.to(device=reference.device, dtype=reference.dtype)
+            return self.score_scale * threshold
+        return self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
 
     def _reshape_query_targets(
         self,
@@ -267,12 +294,17 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_stats = summarize_hyperbolic_tokens(flat_support, ball)
         shot_means = shot_stats.mean_hyp.reshape(way_num, shot_num, -1)
         shot_variance = shot_stats.variance.reshape(way_num, shot_num)
+        class_support = support_cast.reshape(way_num, shot_num * support_cast.shape[-2], support_cast.shape[-1])
+        class_stats = summarize_hyperbolic_tokens(class_support, ball)
 
         mean_distance = ball.dist(
             query_stats.mean_hyp[:, None, None, :],
             shot_means[None, :, :, :],
         )
-        shot_spread = torch.zeros_like(mean_distance)
+        shot_spread = ball.dist(
+            shot_means,
+            class_stats.mean_hyp[:, None, :],
+        )[None, :, :].expand_as(mean_distance)
         query_variance = query_stats.variance[:, None, None].expand_as(mean_distance)
         support_variance = shot_variance[None, :, :].expand_as(mean_distance)
         features = torch.stack([mean_distance, shot_spread, query_variance, support_variance], dim=-1)
@@ -405,21 +437,12 @@ class HROTFSL(BaseConv64FewShotModel):
             shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
             if shot_rho is None:
                 shot_rho = flat_rho.reshape(query.shape[0], way_num, shot_num)
-            if self.uses_mass_normalized_score:
-                normalized_shot_cost = shot_transport_cost / shot_transport_mass.clamp_min(self.eps)
-                shot_logits = -self.score_scale * normalized_shot_cost
-            else:
-                normalized_shot_cost = None
-                shot_logits = -self.score_scale * shot_transport_cost
-            if self.uses_unbalanced_transport and not self.uses_mass_normalized_score:
-                shot_logits = shot_logits + self.mass_bonus.to(dtype=shot_logits.dtype) * shot_transport_mass
+            shot_logits = -self.score_scale * shot_transport_cost
+            if self.uses_unbalanced_transport:
+                shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
 
             logits = shot_logits.mean(dim=-1)
-            transport_cost = (
-                normalized_shot_cost.mean(dim=-1)
-                if normalized_shot_cost is not None
-                else shot_transport_cost.mean(dim=-1)
-            )
+            transport_cost = shot_transport_cost.mean(dim=-1)
             transport_mass = shot_transport_mass.mean(dim=-1)
             rho = shot_rho
             cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
@@ -435,7 +458,7 @@ class HROTFSL(BaseConv64FewShotModel):
 
             logits = -self.score_scale * transport_cost
             if self.uses_unbalanced_transport:
-                logits = logits + self.mass_bonus.to(dtype=logits.dtype) * transport_mass
+                logits = logits + self._mass_reward_weight(logits) * transport_mass
 
         rho_regularization = logits.new_zeros(())
         if self.uses_learned_mass and self.lambda_rho > 0.0:
@@ -461,7 +484,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho_regularization": rho_regularization,
             "curvature_regularization": curvature_regularization,
             "curvature": self.curvature.detach().to(dtype=logits.dtype),
-            "mass_bonus": self.mass_bonus.detach().to(dtype=logits.dtype),
+            "mass_bonus": self._mass_reward_weight(logits).detach().to(dtype=logits.dtype),
+            "transport_cost_threshold": self.transport_cost_threshold.detach().to(
+                device=logits.device,
+                dtype=logits.dtype,
+            ),
             "hyperbolic_backend": logits.new_tensor(0.0 if self.hyperbolic_backend == "native" else 1.0),
             "ot_backend": logits.new_tensor(0.0 if self.ot_backend == "native" else 1.0),
         }
@@ -502,6 +529,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "curvature_regularization": torch.stack([item["curvature_regularization"] for item in batch_outputs]).mean(),
             "curvature": torch.stack([item["curvature"] for item in batch_outputs]).mean(),
             "mass_bonus": torch.stack([item["mass_bonus"] for item in batch_outputs]).mean(),
+            "transport_cost_threshold": torch.stack(
+                [item["transport_cost_threshold"] for item in batch_outputs]
+            ).mean(),
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),
             "ot_backend": torch.stack([item["ot_backend"] for item in batch_outputs]).mean(),
         }
