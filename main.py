@@ -800,7 +800,12 @@ def get_args():
     parser.add_argument("--warn_diversity_weight", type=float, default=0.0)
     parser.add_argument("--warn_recon_lambda_init", type=float, default=0.1)
     parser.add_argument("--hrot_token_dim", type=int, default=None)
-    parser.add_argument("--hrot_variant", type=str, default="E", choices=["A", "B", "C", "D", "E", "F", "G", "H"])
+    parser.add_argument(
+        "--hrot_variant",
+        type=str,
+        default="E",
+        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"],
+    )
     parser.add_argument("--hrot_eam_hidden_dim", type=int, default=256)
     parser.add_argument("--hrot_curvature_init", type=float, default=1.0)
     parser.add_argument("--hrot_projection_scale", type=float, default=0.1)

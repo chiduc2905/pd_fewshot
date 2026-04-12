@@ -45,7 +45,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-H."""
+    """Vectorized HROT few-shot model with ablation variants A-L."""
 
     def __init__(
         self,
@@ -89,7 +89,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = str(variant).upper()
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
@@ -104,11 +104,13 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H"}
-        self.uses_geodesic_eam = variant == "H"
-        self.uses_cost_threshold_score = variant == "H"
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L"}
+        self.uses_geodesic_eam = variant in {"H", "K", "L"}
+        self.uses_euclidean_geometric_eam = variant == "I"
+        self.uses_reduced_geodesic_eam = variant == "L"
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L"}
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.eval_use_float64 = bool(eval_use_float64)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)
@@ -142,7 +144,13 @@ class HROTFSL(BaseConv64FewShotModel):
             hidden_dim=eam_hidden_dim,
             min_mass=min_mass,
             default_mass=fixed_mass,
-            input_dim=4 if self.uses_geodesic_eam else None,
+            input_dim=(
+                3
+                if self.uses_reduced_geodesic_eam
+                else 4
+                if (self.uses_geodesic_eam or self.uses_euclidean_geometric_eam)
+                else None
+            ),
         )
         if self.uses_cost_threshold_score:
             threshold_init = (
@@ -151,7 +159,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 else float(mass_bonus_init) / self.score_scale
             )
             if threshold_init <= 0.0:
-                raise ValueError("transport_cost_threshold_init must be positive for H cost-threshold scoring")
+                raise ValueError("transport_cost_threshold_init must be positive for cost-threshold scoring")
             self.raw_transport_cost_threshold = nn.Parameter(
                 torch.tensor(_inverse_softplus(threshold_init), dtype=torch.float32)
             )
@@ -283,6 +291,15 @@ class HROTFSL(BaseConv64FewShotModel):
                 self.fixed_mass,
             )
 
+        features = self._build_geodesic_eam_features(query_tokens_hyp, support_tokens_hyp)
+        rho = self.eam.forward_features(features)
+        return rho.to(dtype=query_tokens_hyp.dtype)
+
+    def _build_geodesic_eam_features(
+        self,
+        query_tokens_hyp: torch.Tensor,
+        support_tokens_hyp: torch.Tensor,
+    ) -> torch.Tensor:
         calc_dtype = torch.float64 if (self.eval_use_float64 and not self.training) else query_tokens_hyp.dtype
         query_cast = query_tokens_hyp.to(dtype=calc_dtype)
         support_cast = support_tokens_hyp.to(dtype=calc_dtype)
@@ -307,9 +324,55 @@ class HROTFSL(BaseConv64FewShotModel):
         )[None, :, :].expand_as(mean_distance)
         query_variance = query_stats.variance[:, None, None].expand_as(mean_distance)
         support_variance = shot_variance[None, :, :].expand_as(mean_distance)
-        features = torch.stack([mean_distance, shot_spread, query_variance, support_variance], dim=-1)
+        if self.uses_reduced_geodesic_eam:
+            return torch.stack([mean_distance, query_variance, support_variance], dim=-1)
+        return torch.stack([mean_distance, shot_spread, query_variance, support_variance], dim=-1)
+
+    def _build_euclidean_rho_per_shot(
+        self,
+        query_tokens_euc: torch.Tensor,
+        support_tokens_euc: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.uses_unbalanced_transport:
+            return query_tokens_euc.new_ones(query_tokens_euc.shape[0], *support_tokens_euc.shape[:2])
+        if not self.uses_learned_mass:
+            return query_tokens_euc.new_full(
+                (query_tokens_euc.shape[0], *support_tokens_euc.shape[:2]),
+                self.fixed_mass,
+            )
+
+        features = self._build_euclidean_eam_features(query_tokens_euc, support_tokens_euc)
         rho = self.eam.forward_features(features)
-        return rho.to(dtype=query_tokens_hyp.dtype)
+        return rho.to(dtype=query_tokens_euc.dtype)
+
+    def _build_euclidean_eam_features(
+        self,
+        query_tokens_euc: torch.Tensor,
+        support_tokens_euc: torch.Tensor,
+    ) -> torch.Tensor:
+        query_mean = query_tokens_euc.mean(dim=-2)
+        way_num, shot_num = support_tokens_euc.shape[:2]
+        flat_support = support_tokens_euc.reshape(way_num * shot_num, support_tokens_euc.shape[-2], support_tokens_euc.shape[-1])
+        shot_mean = flat_support.mean(dim=-2).reshape(way_num, shot_num, -1)
+        class_support = support_tokens_euc.reshape(way_num, shot_num * support_tokens_euc.shape[-2], support_tokens_euc.shape[-1])
+        class_mean = class_support.mean(dim=-2)
+
+        query_variance = (query_tokens_euc - query_mean[:, None, :]).pow(2).sum(dim=-1).mean(dim=-1)
+        flat_shot_mean = shot_mean.reshape(way_num * shot_num, -1)
+        shot_variance = (flat_support - flat_shot_mean[:, None, :]).pow(2).sum(dim=-1).mean(dim=-1)
+        shot_variance = shot_variance.reshape(way_num, shot_num)
+
+        mean_distance = torch.linalg.vector_norm(
+            query_mean[:, None, None, :] - shot_mean[None, :, :, :],
+            dim=-1,
+        )
+        shot_spread = torch.linalg.vector_norm(
+            shot_mean - class_mean[:, None, :],
+            dim=-1,
+        )[None, :, :].expand_as(mean_distance)
+        query_variance = query_variance[:, None, None].expand_as(mean_distance)
+        support_variance = shot_variance[None, :, :].expand_as(mean_distance)
+        return torch.stack([mean_distance, shot_spread, query_variance, support_variance], dim=-1)
 
     def _transport_match(
         self,
@@ -426,7 +489,10 @@ class HROTFSL(BaseConv64FewShotModel):
                 support_hyperbolic.shape[-1],
             )
             flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
-            if self.uses_geodesic_eam:
+            if self.uses_euclidean_geometric_eam:
+                shot_rho = self._build_euclidean_rho_per_shot(query_euclidean, support_euclidean)
+                flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+            elif self.uses_geodesic_eam:
                 shot_rho = self._build_geodesic_rho_per_shot(query_hyperbolic, support_hyperbolic)
                 flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
             else:
