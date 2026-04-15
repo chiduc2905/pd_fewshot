@@ -32,6 +32,13 @@ def get_args():
         help="Path to dataset",
     )
     parser.add_argument("--dataset_name", type=str, default="knee_aug_split", help="Dataset name for logging")
+    parser.add_argument(
+        "--test_protocol",
+        type=str,
+        default="auto",
+        choices=["auto", "clean", "robust"],
+        help="Final-test protocol. auto uses robust test pools when the dataset provides them.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--shot_num", type=int, default=None, choices=[1, 5], help="Optional fixed shot number")
     parser.add_argument("--mode_id", type=int, default=None, choices=[1, 2, 3, 4], help="Optional sample mode")
@@ -120,6 +127,31 @@ def get_smnet_root():
 
 def get_pulse_fewshot_root():
     return Path(__file__).resolve().parent
+
+
+def dataset_has_hrot_robust_layout(dataset_path):
+    root = Path(dataset_path)
+    required = [
+        "train",
+        "val",
+        "test_clean",
+        "test_1shot_support_snr10",
+        "test_1shot_query_snr10",
+        "test_5shot_support_outlier_snr0",
+        "test_5shot_query_snr10",
+    ]
+    return all((root / name).is_dir() for name in required)
+
+
+def resolve_test_protocol(requested_protocol, dataset_path):
+    requested_protocol = str(requested_protocol).lower()
+    if requested_protocol == "auto":
+        return "robust" if dataset_has_hrot_robust_layout(dataset_path) else "clean"
+    return requested_protocol
+
+
+def result_protocol_suffix(test_protocol):
+    return "_robust" if str(test_protocol).lower() == "robust" else ""
 
 
 def build_spifce_ablation_variants(suite_name):
@@ -316,6 +348,7 @@ def run_experiment(
     prefetch_factor,
     spif_global_only,
     spif_local_only,
+    test_protocol,
     passthrough_args=None,
     variant_args=None,
     experiment_tag=None,
@@ -334,6 +367,7 @@ def run_experiment(
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
+    print(f"Test Proto  : {test_protocol}")
     print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
     if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
         print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
@@ -441,6 +475,7 @@ def run_experiment(
     if applied_backbone != "default":
         cmd.extend(["--fewshot_backbone", applied_backbone])
     if not use_external_smnet:
+        cmd.extend(["--test_protocol", test_protocol])
         cmd.extend(["--deepemd_fast_val", "false"])
         cmd.extend(
             [
@@ -497,7 +532,7 @@ def run_experiment(
         return False
 
 
-def generate_comparison_charts(dataset_name, shots, models):
+def generate_comparison_charts(dataset_name, shots, models, test_protocol="clean"):
     import re
 
     try:
@@ -508,6 +543,7 @@ def generate_comparison_charts(dataset_name, shots, models):
 
     results_dir = "results/"
     model_display_names = {model_name: get_model_metadata(model_name)["display_name"] for model_name in models}
+    protocol_suffix = result_protocol_suffix(test_protocol)
 
     for samples in SAMPLES_LIST:
         samples_str = f"{samples}samples" if samples is not None else "allsamples"
@@ -520,7 +556,7 @@ def generate_comparison_charts(dataset_name, shots, models):
             for shot in shots:
                 result_file = os.path.join(
                     results_dir,
-                    f"results_{dataset_name}_{model}_{samples_str}_{shot}shot.txt",
+                    f"results_{dataset_name}_{model}_{samples_str}_{shot}shot{protocol_suffix}.txt",
                 )
                 if os.path.exists(result_file):
                     with open(result_file, "r") as handle:
@@ -538,7 +574,7 @@ def generate_comparison_charts(dataset_name, shots, models):
             continue
 
         training_samples = samples if samples is not None else "All"
-        save_path = os.path.join(results_dir, f"model_comparison_{dataset_name}_{samples_str}.png")
+        save_path = os.path.join(results_dir, f"model_comparison_{dataset_name}_{samples_str}{protocol_suffix}.png")
         plot_model_comparison_bar(model_results, training_samples, save_path)
         print(f"Model comparison chart saved to {save_path}")
 
@@ -547,6 +583,11 @@ def main():
     args = get_args()
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
+    effective_test_protocol = resolve_test_protocol(args.test_protocol, args.dataset_path)
+    if effective_test_protocol == "robust" and not dataset_has_hrot_robust_layout(args.dataset_path):
+        raise ValueError(
+            "--test_protocol robust requires train/val/test_clean and all HROT robust test pools."
+        )
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
     requested_models = [model.strip() for model in args.models.split(",") if model.strip()]
     valid_models = set(get_model_choices())
@@ -614,6 +655,7 @@ def main():
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Test Proto  : {effective_test_protocol}")
         print(f"Total       : {len(experiments)} ablation experiment(s)")
         print("=" * 72)
     elif args.mode_id is not None:
@@ -640,6 +682,7 @@ def main():
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"Test Proto  : {effective_test_protocol}")
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -686,6 +729,7 @@ def main():
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"Test Proto  : {effective_test_protocol}")
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -731,6 +775,7 @@ def main():
             prefetch_factor=args.prefetch_factor,
             spif_global_only=args.spif_global_only,
             spif_local_only=args.spif_local_only,
+            test_protocol=effective_test_protocol,
             passthrough_args=args.passthrough_args,
             variant_args=experiment["variant_args"],
             experiment_tag=experiment["experiment_tag"],
@@ -757,7 +802,7 @@ def main():
         print("\n" + "=" * 60)
         print("Generating comparison charts...")
         print("=" * 60)
-        generate_comparison_charts(args.dataset_name, shots, requested_models)
+        generate_comparison_charts(args.dataset_name, shots, requested_models, effective_test_protocol)
     else:
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")

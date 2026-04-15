@@ -480,6 +480,8 @@ The post-H ablations isolate the H-specific claims:
 | J | use fixed `rho` with the same shot-decomposed threshold score | Is learned mass necessary beyond threshold scoring? |
 | K | keep geodesic EAM but replace threshold reward with free `beta m` | Is the learned cost threshold better than an unconstrained mass bonus? |
 | L | keep geodesic EAM + threshold but remove shot-to-class spread | Is `d(mu_ck, mu_c)` useful as shot outlierness / reliability evidence? |
+| M | average H/I/L/fixed-rho mass and use threshold reward plus free bonus | Can the post-H ablation improvements be combined into a stronger exploratory hybrid? |
+| N | keep H-style geodesic EAM + threshold and add label-free geodesic order consistency for `rho` during training | Can structural geometry-consistency make learned mass more useful without changing inference? |
 
 The cleanest reviewer claim is supported if:
 
@@ -493,6 +495,73 @@ Then the conclusion is not just "H has more components"; it is:
 - `H > J`: adaptive mass matters beyond fixed partial transport;
 - `H > K`: threshold-calibrated mass reward is better than free mass reward;
 - `H > L`: shot-to-class geodesic spread contributes useful support-shot reliability information.
+
+Variant M should be treated differently from I/J/K/L. It is not a clean ablation of H; it is a hybrid candidate:
+
+```math
+\rho_M
+=
+\frac{1}{4}
+\left(
+  \rho_H
+  + \rho_I
+  + \rho_L
+  + \rho_0
+\right)
+```
+
+and:
+
+```math
+\ell^M_{q,c,k}
+=
+-sD_{q,c,k}
++ (sT + \beta)m_{q,c,k}
+```
+
+If M outperforms H consistently, the correct conclusion is that an ensemble-style reliability controller may be beneficial. If M is similar to H, H remains the cleaner main contribution.
+
+Variant N is a training-objective variant for EAM. It preserves the H inference path and adds a label-free geodesic order-consistency regularizer:
+
+```math
+d_i < d_j
+\Rightarrow
+\rho_i \gtrsim \rho_j
+```
+
+```math
+\mathcal{L}_{rank}
+=
+\frac{1}{Z}
+\sum_{i,j}
+\left[
+\tilde d_j - \tilde d_i
+\right]_+
+\tau
+\log
+\left(
+1 + \exp
+\frac{\gamma - (\rho_i - \rho_j)}{\tau}
+\right)
+```
+
+where `i` and `j` index support shots for the same query across the episode, `d` is the query-shot geodesic mean distance feature used by EAM, and `d` is normalized per query before weighting.
+
+```math
+Z = \sum_{i,j} [\tilde d_j - \tilde d_i]_+
+```
+
+The auxiliary objective becomes:
+
+```math
+\mathcal{L}_{aux}
+=
+\lambda_\rho\mathcal{L}_\rho
++ \lambda_{rank}\mathcal{L}_{rank}
++ \lambda_c\mathcal{L}_c
+```
+
+This is still episodic/few-shot compatible and benchmark-friendly because it uses no query label, no extra annotation, and no inference-time information; it only enforces the architectural claim that geodesic compatibility should order the learned transport budget.
 
 ## 13. Reviewer-Safe Paragraph
 

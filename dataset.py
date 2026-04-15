@@ -4,7 +4,8 @@
 - Normalization: Auto-computed from dataset
 - Supports both:
   1. Pre-split folders (train/val/test subfolders)
-  2. Auto-split from a single folder
+  2. HROT robust folders (train/val/test_clean plus robust test pools)
+  3. Auto-split from a single folder
 """
 import os
 import random
@@ -66,6 +67,13 @@ CLASS_DISPLAY_NAMES = {
     'corona': 'Corona',
     'notpd': 'NotPD',
 }
+
+HROT_ROBUST_TEST_SPLITS = [
+    'test_1shot_support_snr10',
+    'test_1shot_query_snr10',
+    'test_5shot_support_outlier_snr0',
+    'test_5shot_query_snr10',
+]
 
 
 def canonicalize_class_name(name):
@@ -129,7 +137,7 @@ class PDScalogramPreSplit:
                 notpd/  (or nopd legacy alias)
     """
     
-    def __init__(self, data_path, image_size=64):
+    def __init__(self, data_path, image_size=64, test_split='test', extra_splits=None):
         """
         Args:
             data_path: Path to dataset directory containing train/val/test subfolders
@@ -137,6 +145,8 @@ class PDScalogramPreSplit:
         """
         self.data_path = os.path.abspath(data_path)
         self.image_size = image_size
+        self.test_split = test_split
+        self.extra_split_names = list(extra_splits or [])
         self.classes = list(CLASS_ORDER)
         
         # Placeholders
@@ -149,6 +159,7 @@ class PDScalogramPreSplit:
         self.train_files = []
         self.val_files = []
         self.test_files = []
+        self.extra_split_files = {split_name: [] for split_name in self.extra_split_names}
         
         # Base transform (no normalization yet)
         self._base_transform = transforms.Compose([
@@ -157,6 +168,8 @@ class PDScalogramPreSplit:
         ])
         
         print(f'Dataset (Pre-split): {self.data_path}')
+        if self.test_split != 'test':
+            print(f'Using {self.test_split}/ as clean test split')
         
         # 1. Scan pre-split folders
         self._scan_presplit_folders()
@@ -171,16 +184,20 @@ class PDScalogramPreSplit:
     
     def _scan_presplit_folders(self):
         """Scan train/val/test subfolders and collect file paths."""
-        splits = {
-            'train': self.train_files,
-            'val': self.val_files, 
-            'test': self.test_files
-        }
+        splits = [
+            ('train', 'train', self.train_files),
+            ('val', 'val', self.val_files),
+            ('test', self.test_split, self.test_files),
+        ]
+        splits.extend(
+            (split_name, split_name, self.extra_split_files[split_name])
+            for split_name in self.extra_split_names
+        )
         
-        for split_name, file_list in splits.items():
-            split_path = os.path.join(self.data_path, split_name)
+        for role_name, folder_name, file_list in splits:
+            split_path = os.path.join(self.data_path, folder_name)
             if not os.path.exists(split_path):
-                print(f"Warning: {split_name} folder not found at {split_path}")
+                print(f"Warning: {folder_name} folder not found at {split_path}")
                 continue
 
             class_dirs = resolve_class_dirs(split_path)
@@ -195,6 +212,8 @@ class PDScalogramPreSplit:
                 file_list.extend([(os.path.join(class_path, f), label) for f in files])
         
         print(f'Found: Train={len(self.train_files)}, Val={len(self.val_files)}, Test={len(self.test_files)}')
+        for split_name in self.extra_split_names:
+            print(f'Found {split_name}: {len(self.extra_split_files[split_name])}')
     
     def _compute_stats(self):
         """Compute per-channel mean and std using ONLY training data."""
@@ -224,35 +243,31 @@ class PDScalogramPreSplit:
             transforms.Normalize(self.mean, self.std),
         ])
     
+    def _load_file_list(self, file_list):
+        images, labels = [], []
+        for fpath, label in file_list:
+            img = Image.open(fpath).convert('RGB')
+            images.append(self.transform(img).numpy())
+            labels.append(label)
+        images = np.array(images) if images else np.array([])
+        labels = np.array(labels) if labels else np.array([])
+        return images, labels
+
     def _load_images(self):
         """Load images using the pre-computed splits and normalization."""
-        # Load Train
-        for fpath, label in self.train_files:
-            img = Image.open(fpath).convert('RGB')
-            self.X_train.append(self.transform(img).numpy())
-            self.y_train.append(label)
-            
-        # Load Val
-        for fpath, label in self.val_files:
-            img = Image.open(fpath).convert('RGB')
-            self.X_val.append(self.transform(img).numpy())
-            self.y_val.append(label)
-            
-        # Load Test
-        for fpath, label in self.test_files:
-            img = Image.open(fpath).convert('RGB')
-            self.X_test.append(self.transform(img).numpy())
-            self.y_test.append(label)
-        
-        # Convert to arrays
-        self.X_train = np.array(self.X_train) if self.X_train else np.array([])
-        self.y_train = np.array(self.y_train) if self.y_train else np.array([])
-        self.X_val = np.array(self.X_val) if self.X_val else np.array([])
-        self.y_val = np.array(self.y_val) if self.y_val else np.array([])
-        self.X_test = np.array(self.X_test) if self.X_test else np.array([])
-        self.y_test = np.array(self.y_test) if self.y_test else np.array([])
+        self.X_train, self.y_train = self._load_file_list(self.train_files)
+        self.X_val, self.y_val = self._load_file_list(self.val_files)
+        self.X_test, self.y_test = self._load_file_list(self.test_files)
+
+        for split_name in self.extra_split_names:
+            images, labels = self._load_file_list(self.extra_split_files[split_name])
+            setattr(self, f'X_{split_name}', images)
+            setattr(self, f'y_{split_name}', labels)
+            setattr(self, f'{split_name}_files', self.extra_split_files[split_name])
         
         print(f'Loaded: Train={len(self.X_train)}, Val={len(self.X_val)}, Test={len(self.X_test)}')
+        for split_name in self.extra_split_names:
+            print(f'Loaded {split_name}: {len(getattr(self, f"X_{split_name}"))}')
     
     def _shuffle_all(self):
         """Shuffle all splits with fixed seed."""
@@ -280,11 +295,48 @@ class PDScalogramPreSplit:
             if len(self.test_files) == len(idx):
                 self.test_files = [self.test_files[i] for i in idx]
 
+        for split_offset, split_name in enumerate(self.extra_split_names, start=3):
+            images = getattr(self, f'X_{split_name}', np.array([]))
+            labels = getattr(self, f'y_{split_name}', np.array([]))
+            files = getattr(self, f'{split_name}_files', [])
+            if len(images) == 0:
+                continue
+            idx = np.arange(len(images))
+            np.random.default_rng(split_offset).shuffle(idx)
+            setattr(self, f'X_{split_name}', images[idx])
+            setattr(self, f'y_{split_name}', labels[idx])
+            if len(files) == len(idx):
+                setattr(self, f'{split_name}_files', [files[i] for i in idx])
+
+
+class PDScalogramHROTRobust(PDScalogramPreSplit):
+    """Pre-split dataset with clean train/val and protocol-controlled robust test pools."""
+
+    def __init__(self, data_path, image_size=64):
+        available_extra_splits = [
+            split_name
+            for split_name in HROT_ROBUST_TEST_SPLITS
+            if os.path.isdir(os.path.join(data_path, split_name))
+        ]
+        super().__init__(
+            data_path,
+            image_size=image_size,
+            test_split='test_clean',
+            extra_splits=available_extra_splits,
+        )
+        self.has_hrot_robust_protocol = all(
+            os.path.isdir(os.path.join(self.data_path, split_name))
+            for split_name in HROT_ROBUST_TEST_SPLITS
+        )
+        self.robust_test_splits = available_extra_splits
+
 
 def load_dataset(data_path, image_size=64, val_per_class=60, test_per_class=60):
     """Auto-detect dataset structure and load appropriately.
     
     If data_path contains train/val/test subfolders, use PDScalogramPreSplit.
+    If data_path contains train/val/test_clean and robust test pools, use
+    PDScalogramHROTRobust with test_clean as the clean test split.
     Otherwise, use PDScalogram (auto-split).
     
     Args:
@@ -300,10 +352,14 @@ def load_dataset(data_path, image_size=64, val_per_class=60, test_per_class=60):
     train_path = os.path.join(data_path, 'train')
     val_path = os.path.join(data_path, 'val')
     test_path = os.path.join(data_path, 'test')
+    test_clean_path = os.path.join(data_path, 'test_clean')
     
     if os.path.isdir(train_path) and os.path.isdir(val_path) and os.path.isdir(test_path):
         print("Detected pre-split dataset structure (train/val/test folders)")
         return PDScalogramPreSplit(data_path, image_size=image_size)
+    elif os.path.isdir(train_path) and os.path.isdir(val_path) and os.path.isdir(test_clean_path):
+        print("Detected HROT robust dataset structure (train/val/test_clean + robust test pools)")
+        return PDScalogramHROTRobust(data_path, image_size=image_size)
     else:
         print("Using auto-split dataset structure")
         return PDScalogram(data_path, val_per_class=val_per_class, 

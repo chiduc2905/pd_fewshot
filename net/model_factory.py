@@ -1766,6 +1766,9 @@ def build_model_from_args(args):
             transport_cost_threshold_init=getattr(args, "hrot_transport_cost_threshold_init", None),
             lambda_rho=float(getattr(args, "hrot_lambda_rho", 0.01)),
             rho_target=float(getattr(args, "hrot_rho_target", 0.8)),
+            lambda_rho_rank=float(getattr(args, "hrot_lambda_rho_rank", 0.05)),
+            rho_rank_margin=float(getattr(args, "hrot_rho_rank_margin", 0.05)),
+            rho_rank_temperature=float(getattr(args, "hrot_rho_rank_temperature", 0.05)),
             lambda_curvature=float(getattr(args, "hrot_lambda_curvature", 0.0)),
             min_curvature=float(getattr(args, "hrot_min_curvature", 0.05)),
             normalize_euclidean_tokens=_bool_flag(

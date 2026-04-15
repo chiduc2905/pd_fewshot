@@ -41,6 +41,9 @@ def _build_model(**overrides) -> HROTFSL:
         mass_bonus_init=1.0,
         lambda_rho=0.05,
         rho_target=0.8,
+        lambda_rho_rank=0.05,
+        rho_rank_margin=0.05,
+        rho_rank_temperature=0.05,
         lambda_curvature=0.01,
         min_curvature=0.05,
         normalize_euclidean_tokens=True,
@@ -135,7 +138,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -152,7 +155,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["total_distance"].shape == (2, 3)
     assert outputs["transport_cost"].shape == (2, 3)
     assert outputs["transported_mass"].shape == (2, 3)
-    if variant in {"G", "H", "I", "J", "K", "L"}:
+    if variant in {"G", "H", "I", "J", "K", "L", "M", "N"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -422,6 +425,119 @@ def test_hrot_fsl_variant_i_euclidean_eam_features_match_l2_summary():
     assert torch.allclose(features, expected, atol=1e-6, rtol=0.0)
 
 
+def test_hrot_fsl_variant_m_blends_post_h_ablation_paths():
+    torch.manual_seed(19)
+    model = _build_model(variant="M")
+    model.eval()
+    captured_geodesic = []
+    captured_euclidean = []
+    captured_reduced = []
+
+    original_geodesic = model.eam.forward_features
+    original_euclidean = model.euclidean_eam.forward_features
+    original_reduced = model.reduced_geodesic_eam.forward_features
+
+    def capture_geodesic(features):
+        captured_geodesic.append(features.detach().clone())
+        return original_geodesic(features)
+
+    def capture_euclidean(features):
+        captured_euclidean.append(features.detach().clone())
+        return original_euclidean(features)
+
+    def capture_reduced(features):
+        captured_reduced.append(features.detach().clone())
+        return original_reduced(features)
+
+    model.eam.forward_features = capture_geodesic
+    model.euclidean_eam.forward_features = capture_euclidean
+    model.reduced_geodesic_eam.forward_features = capture_reduced
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
+    reward_weight = (
+        model.score_scale * model.transport_cost_threshold.detach() + model.mass_bonus.detach()
+    ).to(dtype=outputs["shot_transported_mass"].dtype)
+    expected_logits = (
+        -model.score_scale * outputs["shot_transport_cost"]
+        + reward_weight * outputs["shot_transported_mass"]
+    ).mean(dim=-1)
+
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+    assert model.uses_hybrid_ablation_eam
+    assert model.uses_hybrid_mass_reward
+    assert model.uses_cost_threshold_score
+    assert model.uses_geodesic_eam
+    assert model.mass_bonus is not None
+    assert model.raw_transport_cost_threshold is not None
+    assert model.euclidean_eam is not None
+    assert model.reduced_geodesic_eam is not None
+    assert torch.allclose(outputs["mass_bonus"], reward_weight, atol=1e-6, rtol=1e-6)
+
+    assert model.eam.network[0].in_features == 4
+    assert model.euclidean_eam.network[0].in_features == 4
+    assert model.reduced_geodesic_eam.network[0].in_features == 3
+    assert len(captured_geodesic) == 1
+    assert len(captured_euclidean) == 1
+    assert len(captured_reduced) == 1
+    assert captured_geodesic[0].shape == (2, 3, 2, 4)
+    assert captured_euclidean[0].shape == (2, 3, 2, 4)
+    assert captured_reduced[0].shape == (2, 3, 2, 3)
+    assert torch.allclose(captured_reduced[0], captured_geodesic[0][..., [0, 2, 3]], atol=1e-6, rtol=0.0)
+    assert torch.all(outputs["rho"] >= 0.1)
+    assert torch.all(outputs["rho"] <= 1.0)
+
+
+def test_hrot_fsl_variant_n_adds_geodesic_order_rho_rank_loss():
+    torch.manual_seed(20)
+    model = _build_model(
+        variant="N",
+        lambda_rho=0.03,
+        lambda_rho_rank=0.07,
+        rho_rank_margin=0.02,
+        rho_rank_temperature=0.05,
+    )
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    outputs = model(query, support, return_aux=True)
+    geodesic_features = model._build_geodesic_eam_features(
+        outputs["query_hyperbolic_tokens"],
+        outputs["support_hyperbolic_tokens"].squeeze(0),
+    )
+    expected_rank_loss = model._rho_rank_loss(outputs["rho"], geodesic_features[..., 0])
+    expected_aux_loss = (
+        model.lambda_rho * outputs["rho_regularization"]
+        + model.lambda_rho_rank * expected_rank_loss
+        + model.lambda_curvature * outputs["curvature_regularization"]
+    )
+
+    assert model.uses_rho_rank_loss
+    assert model.uses_geodesic_eam
+    assert model.uses_cost_threshold_score
+    assert model.uses_shot_decomposed_transport
+    assert expected_rank_loss.item() > 0.0
+    assert torch.allclose(outputs["rho_rank_loss"], expected_rank_loss, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(outputs["aux_loss"], expected_aux_loss, atol=1e-6, rtol=1e-6)
+
+    model.zero_grad(set_to_none=True)
+    outputs["aux_loss"].backward()
+
+    assert model.eam.network[-2].weight.grad is not None
+    assert torch.isfinite(model.eam.network[-2].weight.grad).all()
+    assert model.eam.network[-2].weight.grad.norm().item() > 0.0
+
+
 def test_hrot_fsl_is_support_shot_permutation_invariant():
     torch.manual_seed(4)
     model = _build_model(variant="E")
@@ -504,6 +620,9 @@ def test_hrot_fsl_model_factory_builds_and_runs():
         hrot_mass_bonus_init=1.0,
         hrot_lambda_rho=0.05,
         hrot_rho_target=0.8,
+        hrot_lambda_rho_rank=0.05,
+        hrot_rho_rank_margin=0.05,
+        hrot_rho_rank_temperature=0.05,
         hrot_lambda_curvature=0.01,
         hrot_min_curvature=0.05,
         hrot_normalize_euclidean_tokens="true",

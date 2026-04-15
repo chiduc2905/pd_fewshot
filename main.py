@@ -23,7 +23,7 @@ except ImportError:
     print("Warning: thop not installed. Run 'pip install thop' for FLOPs calculation.")
 
 from dataset import load_dataset
-from dataloader.dataloader import FewshotDataset
+from dataloader.dataloader import FewshotDataset, RobustFewshotDataset
 from function.function import (
     ContrastiveLoss,
     RelationLoss,
@@ -804,7 +804,7 @@ def get_args():
         "--hrot_variant",
         type=str,
         default="E",
-        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"],
+        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"],
     )
     parser.add_argument("--hrot_eam_hidden_dim", type=int, default=256)
     parser.add_argument("--hrot_curvature_init", type=float, default=1.0)
@@ -821,6 +821,9 @@ def get_args():
     parser.add_argument("--hrot_transport_cost_threshold_init", type=float, default=None)
     parser.add_argument("--hrot_lambda_rho", type=float, default=0.01)
     parser.add_argument("--hrot_rho_target", type=float, default=0.8)
+    parser.add_argument("--hrot_lambda_rho_rank", type=float, default=0.05)
+    parser.add_argument("--hrot_rho_rank_margin", type=float, default=0.05)
+    parser.add_argument("--hrot_rho_rank_temperature", type=float, default=0.05)
     parser.add_argument("--hrot_lambda_curvature", type=float, default=0.0)
     parser.add_argument("--hrot_min_curvature", type=float, default=0.05)
     parser.add_argument("--hrot_normalize_euclidean_tokens", type=str, default="true", choices=["true", "false"])
@@ -838,6 +841,13 @@ def get_args():
     parser.add_argument("--episode_num_train", type=int, default=200)
     parser.add_argument("--episode_num_val", type=int, default=300)
     parser.add_argument("--episode_num_test", type=int, default=400)
+    parser.add_argument(
+        "--test_protocol",
+        type=str,
+        default="auto",
+        choices=["auto", "clean", "robust"],
+        help="Final-test protocol. auto uses robust test pools when the dataset provides them.",
+    )
     parser.add_argument(
         "--model_selection_split",
         type=str,
@@ -1430,7 +1440,10 @@ def get_model(args):
             f"ot_backend={getattr(args, 'hrot_ot_backend', 'native')}, "
             f"fixed_mass={getattr(args, 'hrot_fixed_mass', 0.8)}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
-            f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)})"
+            f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
+            f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
+            f"rho_rank_margin={getattr(args, 'hrot_rho_rank_margin', 0.05)}, "
+            f"rho_rank_temperature={getattr(args, 'hrot_rho_rank_temperature', 0.05)})"
         )
     return model
 
@@ -1581,6 +1594,92 @@ def concat_split_tensors(primary_X, primary_y, secondary_X, secondary_y):
     if primary_X is None or primary_y is None or len(primary_X) == 0:
         return secondary_X, secondary_y
     return torch.cat([primary_X, secondary_X], dim=0), torch.cat([primary_y, secondary_y], dim=0)
+
+
+def infer_source_ids(file_paths):
+    if file_paths is None:
+        return None
+    return [os.path.splitext(os.path.basename(path))[0] for path in file_paths]
+
+
+def get_dataset_split_arrays(dataset, split_name):
+    images = getattr(dataset, f"X_{split_name}", None)
+    labels = getattr(dataset, f"y_{split_name}", None)
+    files = getattr(dataset, f"{split_name}_files", None)
+    if images is None or labels is None:
+        return None
+    return {
+        "images": images,
+        "labels": labels,
+        "files": [path for path, _ in files] if files is not None else None,
+    }
+
+
+def get_effective_test_protocol(args, dataset):
+    requested = str(getattr(args, "test_protocol", "auto")).lower()
+    has_robust = bool(getattr(dataset, "has_hrot_robust_protocol", False))
+    if requested == "auto":
+        return "robust" if has_robust else "clean"
+    if requested == "robust" and not has_robust:
+        raise ValueError(
+            "--test_protocol robust requires an HROT robust dataset with "
+            "test_1shot_support_snr10, test_1shot_query_snr10, "
+            "test_5shot_support_outlier_snr0, and test_5shot_query_snr10."
+        )
+    return requested
+
+
+def get_test_protocol_suffix(args):
+    protocol = str(getattr(args, "effective_test_protocol", getattr(args, "test_protocol", "clean"))).lower()
+    return "_robust" if protocol == "robust" else ""
+
+
+def build_robust_test_dataset(args, clean_X, clean_y, clean_file_paths, robust_pools, return_indices=False):
+    query_pool_name = "test_1shot_query_snr10" if args.shot_num == 1 else "test_5shot_query_snr10"
+    query_pool = robust_pools.get(query_pool_name)
+    if query_pool is None:
+        raise ValueError(f"Missing robust query pool: {query_pool_name}")
+
+    common_kwargs = {
+        "episode_num": args.episode_num_test,
+        "way_num": args.way_num,
+        "shot_num": args.shot_num,
+        "query_num": args.query_num_test,
+        "seed": build_episode_seed(args, "final_test"),
+        "query_data": query_pool["images"],
+        "query_labels": query_pool["labels"],
+        "query_source_ids": infer_source_ids(query_pool["files"]),
+        "return_indices": return_indices,
+    }
+
+    if args.shot_num == 1:
+        support_pool_name = "test_1shot_support_snr10"
+        support_pool = robust_pools.get(support_pool_name)
+        if support_pool is None:
+            raise ValueError(f"Missing robust support pool: {support_pool_name}")
+        return RobustFewshotDataset(
+            support_data=support_pool["images"],
+            support_labels=support_pool["labels"],
+            support_source_ids=infer_source_ids(support_pool["files"]),
+            **common_kwargs,
+        )
+
+    if args.shot_num == 5:
+        outlier_pool_name = "test_5shot_support_outlier_snr0"
+        outlier_pool = robust_pools.get(outlier_pool_name)
+        if outlier_pool is None:
+            raise ValueError(f"Missing robust support-outlier pool: {outlier_pool_name}")
+        return RobustFewshotDataset(
+            clean_data=clean_X,
+            clean_labels=clean_y,
+            clean_source_ids=infer_source_ids(clean_file_paths),
+            outlier_data=outlier_pool["images"],
+            outlier_labels=outlier_pool["labels"],
+            outlier_source_ids=infer_source_ids(outlier_pool["files"]),
+            **common_kwargs,
+        )
+
+    raise ValueError(f"HROT robust test supports only 1-shot and 5-shot, got {args.shot_num}-shot.")
 
 
 def forward_scores(
@@ -1930,6 +2029,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "global_branch_ce",
         "local_branch_ce",
         "budget_rank_loss",
+        "rho_rank_loss",
         "budget_residual_reg_loss",
         "anchor_consistency_loss",
         "local_anchor_mix",
@@ -2619,12 +2719,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     wandb.run.summary["test_accuracy_ci95"] = acc_ci95
     wandb.run.summary["model_selection_split"] = get_model_selection_split(args)
     wandb.run.summary["merge_val_into_train"] = _bool_flag(getattr(args, "merge_val_into_train", "false"), default=False)
+    wandb.run.summary["test_protocol"] = getattr(args, "effective_test_protocol", getattr(args, "test_protocol", "clean"))
 
     samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
+    protocol_suffix = get_test_protocol_suffix(args)
     cm_base = os.path.join(
         args.path_results,
-        f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}",
+        f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}",
     )
     try:
         plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base, class_names=args.class_names)
@@ -2643,7 +2745,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
         pair_path = os.path.join(
             args.path_results,
-            f"misclass_pairs_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}.txt",
+            f"misclass_pairs_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt",
         )
         with open(pair_path, "w") as handle:
             handle.write("Most common confusion pairs (True -> Pred)\n")
@@ -2685,7 +2787,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
         mis_path = os.path.join(
             args.path_results,
-            f"misclassified_files_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot.csv",
+            f"misclassified_files_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.csv",
         )
         with open(mis_path, "w", newline="") as handle:
             writer = csv.DictWriter(
@@ -2729,7 +2831,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
             tsne_path = os.path.join(
                 args.path_results,
-                f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}",
+                f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}",
             )
             try:
                 plot_tsne(features, test_y_np, args.way_num, tsne_path, class_names=args.class_names)
@@ -2740,13 +2842,16 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
     txt_path = os.path.join(
         args.path_results,
-        f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}.txt",
+        f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt",
     )
     with open(txt_path, "w") as handle:
         handle.write(f"Model: {meta['display_name']} ({args.model})\n")
         handle.write(f"Dataset: {args.dataset_name}\n")
         handle.write(f"Shot: {args.shot_num}\n")
         handle.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
+        handle.write(
+            f"Test Protocol: {getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
         handle.write(f"Model Selection Split: {get_model_selection_split(args)}\n")
         handle.write(
             f"Merged Val Into Train: {_bool_flag(getattr(args, 'merge_val_into_train', 'false'), default=False)}\n"
@@ -2865,6 +2970,8 @@ def main():
     os.makedirs(args.path_results, exist_ok=True)
 
     dataset = load_dataset(args.dataset_path, image_size=args.image_size)
+    args.effective_test_protocol = get_effective_test_protocol(args, dataset)
+    print(f"Final Test  : protocol={args.effective_test_protocol}")
 
     def to_tensor(images, labels):
         return torch.from_numpy(images.astype(np.float32)), torch.from_numpy(labels).long()
@@ -2875,6 +2982,17 @@ def main():
     train_file_paths = [path for path, _ in getattr(dataset, "train_files", [])] if hasattr(dataset, "train_files") else None
     val_file_paths = [path for path, _ in getattr(dataset, "val_files", [])] if hasattr(dataset, "val_files") else None
     test_file_paths = [path for path, _ in getattr(dataset, "test_files", [])] if hasattr(dataset, "test_files") else None
+    robust_pools = {}
+    for split_name in getattr(dataset, "robust_test_splits", []):
+        split_arrays = get_dataset_split_arrays(dataset, split_name)
+        if split_arrays is None:
+            continue
+        split_X, split_y = to_tensor(split_arrays["images"], split_arrays["labels"])
+        robust_pools[split_name] = {
+            "images": split_X,
+            "labels": split_y,
+            "files": split_arrays["files"],
+        }
 
     pretty_map = {
         "surface": "Surface",
@@ -2915,6 +3033,18 @@ def main():
         train_X, train_y, train_file_paths = filter_classes(train_X, train_y, selected, train_file_paths)
         val_X, val_y, val_file_paths = filter_classes(val_X, val_y, selected, val_file_paths)
         test_X, test_y, test_file_paths = filter_classes(test_X, test_y, selected, test_file_paths)
+        for split_name, pool in robust_pools.items():
+            pool_X, pool_y, pool_files = filter_classes(
+                pool["images"],
+                pool["labels"],
+                selected,
+                pool["files"],
+            )
+            robust_pools[split_name] = {
+                "images": pool_X,
+                "labels": pool_y,
+                "files": pool_files,
+            }
         print(f"Train: {len(train_X)}, Val: {len(val_X)}, Test: {len(test_X)}")
     else:
         args.class_names = all_class_names
@@ -2931,6 +3061,7 @@ def main():
             "query_num_train": args.query_num_train,
             "query_num_val": args.query_num_val,
             "query_num_test": args.query_num_test,
+            "test_protocol": args.effective_test_protocol,
             "selection_split": selection_split,
             "merge_val_into_train": merge_val_into_train,
         },
@@ -2964,16 +3095,39 @@ def main():
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
 
     final_test_seed = build_episode_seed(args, "final_test")
-    test_ds = FewshotDataset(
-        test_X,
-        test_y,
-        args.episode_num_test,
-        args.way_num,
-        args.shot_num,
-        args.query_num_test,
-        final_test_seed,
-        return_indices=args.save_misclf_report,
-    )
+    final_test_X, final_test_y, final_test_file_paths = test_X, test_y, test_file_paths
+    if args.effective_test_protocol == "robust":
+        query_pool_name = "test_1shot_query_snr10" if args.shot_num == 1 else "test_5shot_query_snr10"
+        query_pool = robust_pools.get(query_pool_name)
+        if query_pool is None:
+            raise ValueError(f"Missing robust query pool: {query_pool_name}")
+        final_test_X = query_pool["images"]
+        final_test_y = query_pool["labels"]
+        final_test_file_paths = query_pool["files"]
+        test_ds = build_robust_test_dataset(
+            args,
+            clean_X=test_X,
+            clean_y=test_y,
+            clean_file_paths=test_file_paths,
+            robust_pools=robust_pools,
+            return_indices=args.save_misclf_report,
+        )
+        print(
+            "Robust final test: "
+            f"{args.shot_num}-shot, query_pool={query_pool_name}, "
+            f"query_samples={len(final_test_X)}"
+        )
+    else:
+        test_ds = FewshotDataset(
+            test_X,
+            test_y,
+            args.episode_num_test,
+            args.way_num,
+            args.shot_num,
+            args.query_num_test,
+            final_test_seed,
+            return_indices=args.save_misclf_report,
+        )
     test_loader = DataLoader(
         test_ds,
         **_build_loader_kwargs(
@@ -2998,11 +3152,25 @@ def main():
             path = get_best_model_path(args)
             print(f"Testing with best checkpoint: {path}")
             load_model_weights(net, path, args.device)
-            test_final(net, test_loader, args, test_X=test_X, test_y=test_y, test_file_paths=test_file_paths)
+            test_final(
+                net,
+                test_loader,
+                args,
+                test_X=final_test_X,
+                test_y=final_test_y,
+                test_file_paths=final_test_file_paths,
+            )
     else:
         if args.weights:
             load_model_weights(net, args.weights, args.device)
-            test_final(net, test_loader, args, test_X=test_X, test_y=test_y, test_file_paths=test_file_paths)
+            test_final(
+                net,
+                test_loader,
+                args,
+                test_X=final_test_X,
+                test_y=final_test_y,
+                test_file_paths=final_test_file_paths,
+            )
         else:
             print("Error: Please specify --weights for test mode")
 

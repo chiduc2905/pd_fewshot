@@ -45,7 +45,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-L."""
+    """Vectorized HROT few-shot model with ablation variants A-N."""
 
     def __init__(
         self,
@@ -72,6 +72,9 @@ class HROTFSL(BaseConv64FewShotModel):
         transport_cost_threshold_init: float | None = None,
         lambda_rho: float = 0.01,
         rho_target: float = 0.8,
+        lambda_rho_rank: float = 0.05,
+        rho_rank_margin: float = 0.05,
+        rho_rank_temperature: float = 0.05,
         lambda_curvature: float = 0.0,
         min_curvature: float = 0.05,
         normalize_euclidean_tokens: bool = True,
@@ -89,7 +92,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = str(variant).upper()
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
@@ -101,16 +104,25 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("sinkhorn_iterations must be positive")
         if not 0.0 < fixed_mass <= 1.0:
             raise ValueError("fixed_mass must be in (0, 1]")
+        if lambda_rho_rank < 0.0:
+            raise ValueError("lambda_rho_rank must be non-negative")
+        if rho_rank_margin < 0.0:
+            raise ValueError("rho_rank_margin must be non-negative")
+        if rho_rank_temperature <= 0.0:
+            raise ValueError("rho_rank_temperature must be positive")
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L"}
-        self.uses_geodesic_eam = variant in {"H", "K", "L"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N"}
+        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L"}
+        self.uses_hybrid_ablation_eam = variant == "M"
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N"}
+        self.uses_hybrid_mass_reward = variant == "M"
+        self.uses_rho_rank_loss = variant == "N"
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.eval_use_float64 = bool(eval_use_float64)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)
@@ -125,6 +137,9 @@ class HROTFSL(BaseConv64FewShotModel):
         self.fixed_mass = float(fixed_mass)
         self.lambda_rho = float(lambda_rho)
         self.rho_target = float(rho_target)
+        self.lambda_rho_rank = float(lambda_rho_rank)
+        self.rho_rank_margin = float(rho_rank_margin)
+        self.rho_rank_temperature = float(rho_rank_temperature)
         self.lambda_curvature = float(lambda_curvature)
         self.min_curvature = float(min_curvature)
         self.eps = float(eps)
@@ -152,6 +167,24 @@ class HROTFSL(BaseConv64FewShotModel):
                 else None
             ),
         )
+        if self.uses_hybrid_ablation_eam:
+            self.euclidean_eam = EpisodeAdaptiveMass(
+                embed_dim=token_dim,
+                hidden_dim=eam_hidden_dim,
+                min_mass=min_mass,
+                default_mass=fixed_mass,
+                input_dim=4,
+            )
+            self.reduced_geodesic_eam = EpisodeAdaptiveMass(
+                embed_dim=token_dim,
+                hidden_dim=eam_hidden_dim,
+                min_mass=min_mass,
+                default_mass=fixed_mass,
+                input_dim=3,
+            )
+        else:
+            self.euclidean_eam = None
+            self.reduced_geodesic_eam = None
         if self.uses_cost_threshold_score:
             threshold_init = (
                 float(transport_cost_threshold_init)
@@ -163,7 +196,11 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_transport_cost_threshold = nn.Parameter(
                 torch.tensor(_inverse_softplus(threshold_init), dtype=torch.float32)
             )
-            self.mass_bonus = None
+            self.mass_bonus = (
+                nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
+                if self.uses_hybrid_mass_reward
+                else None
+            )
         else:
             self.raw_transport_cost_threshold = None
             self.mass_bonus = nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
@@ -197,7 +234,10 @@ class HROTFSL(BaseConv64FewShotModel):
     def _mass_reward_weight(self, reference: torch.Tensor) -> torch.Tensor:
         if self.raw_transport_cost_threshold is not None:
             threshold = self.transport_cost_threshold.to(device=reference.device, dtype=reference.dtype)
-            return self.score_scale * threshold
+            reward = self.score_scale * threshold
+            if self.uses_hybrid_mass_reward:
+                reward = reward + self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
+            return reward
         return self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
 
     def _reshape_query_targets(
@@ -345,6 +385,33 @@ class HROTFSL(BaseConv64FewShotModel):
         rho = self.eam.forward_features(features)
         return rho.to(dtype=query_tokens_euc.dtype)
 
+    def _build_hybrid_rho_per_shot(
+        self,
+        query_tokens_hyp: torch.Tensor,
+        support_tokens_hyp: torch.Tensor,
+        query_tokens_euc: torch.Tensor,
+        support_tokens_euc: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.uses_unbalanced_transport:
+            return query_tokens_euc.new_ones(query_tokens_euc.shape[0], *support_tokens_euc.shape[:2])
+        if not self.uses_learned_mass:
+            return query_tokens_euc.new_full(
+                (query_tokens_euc.shape[0], *support_tokens_euc.shape[:2]),
+                self.fixed_mass,
+            )
+        if self.euclidean_eam is None or self.reduced_geodesic_eam is None:
+            raise RuntimeError("Hybrid HROT variant requires Euclidean and reduced-geodesic EAM heads")
+
+        geodesic_features = self._build_geodesic_eam_features(query_tokens_hyp, support_tokens_hyp)
+        euclidean_features = self._build_euclidean_eam_features(query_tokens_euc, support_tokens_euc)
+        reduced_geodesic_features = geodesic_features[..., [0, 2, 3]]
+        rho_geodesic = self.eam.forward_features(geodesic_features)
+        rho_euclidean = self.euclidean_eam.forward_features(euclidean_features)
+        rho_reduced = self.reduced_geodesic_eam.forward_features(reduced_geodesic_features)
+        rho_fixed = torch.full_like(rho_geodesic, self.fixed_mass)
+        rho = torch.stack([rho_geodesic, rho_euclidean, rho_reduced, rho_fixed], dim=0).mean(dim=0)
+        return rho.to(dtype=query_tokens_euc.dtype)
+
     def _build_euclidean_eam_features(
         self,
         query_tokens_euc: torch.Tensor,
@@ -443,6 +510,38 @@ class HROTFSL(BaseConv64FewShotModel):
         transport_mass = pair_transport_mass.reshape(num_query, num_way)
         return plan, transport_cost, transport_mass
 
+    def _rho_rank_loss(
+        self,
+        rho: torch.Tensor,
+        geodesic_distance: torch.Tensor | None,
+    ) -> torch.Tensor:
+        zero = rho.new_zeros(())
+        if (
+            not self.training
+            or not self.uses_rho_rank_loss
+            or self.lambda_rho_rank <= 0.0
+            or geodesic_distance is None
+            or rho.dim() != 3
+        ):
+            return zero
+
+        distance = geodesic_distance.to(device=rho.device, dtype=rho.dtype)
+        if distance.shape != rho.shape:
+            raise ValueError(f"geodesic_distance must match rho shape, got {tuple(distance.shape)} vs {tuple(rho.shape)}")
+
+        rho_flat = rho.reshape(rho.shape[0], -1)
+        distance_flat = distance.detach().reshape(distance.shape[0], -1)
+        distance_scale = distance_flat.std(dim=1, keepdim=True, unbiased=False).clamp_min(self.eps)
+        distance_norm = (distance_flat - distance_flat.mean(dim=1, keepdim=True)) / distance_scale
+
+        distance_gap = distance_norm.unsqueeze(1) - distance_norm.unsqueeze(2)
+        order_weight = distance_gap.clamp_min(0.0)
+        rho_gap = rho_flat.unsqueeze(2) - rho_flat.unsqueeze(1)
+        penalty = F.softplus((self.rho_rank_margin - rho_gap) / self.rho_rank_temperature)
+        penalty = penalty * self.rho_rank_temperature
+        per_query_loss = (penalty * order_weight).sum(dim=(1, 2)) / order_weight.sum(dim=(1, 2)).clamp_min(self.eps)
+        return per_query_loss.mean()
+
     def _forward_episode(
         self,
         query: torch.Tensor,
@@ -477,6 +576,7 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_transport_cost = None
         shot_transport_mass = None
         shot_rho = None
+        shot_geodesic_distance = None
         if self.uses_shot_decomposed_transport:
             flat_support_euclidean = support_euclidean.reshape(
                 way_num * shot_num,
@@ -489,11 +589,24 @@ class HROTFSL(BaseConv64FewShotModel):
                 support_hyperbolic.shape[-1],
             )
             flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
-            if self.uses_euclidean_geometric_eam:
+            if self.uses_hybrid_ablation_eam:
+                shot_rho = self._build_hybrid_rho_per_shot(
+                    query_hyperbolic,
+                    support_hyperbolic,
+                    query_euclidean,
+                    support_euclidean,
+                )
+                flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+            elif self.uses_euclidean_geometric_eam:
                 shot_rho = self._build_euclidean_rho_per_shot(query_euclidean, support_euclidean)
                 flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
             elif self.uses_geodesic_eam:
-                shot_rho = self._build_geodesic_rho_per_shot(query_hyperbolic, support_hyperbolic)
+                if self.uses_rho_rank_loss:
+                    geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
+                    shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
+                    shot_rho = self.eam.forward_features(geodesic_features).to(dtype=query_hyperbolic.dtype)
+                else:
+                    shot_rho = self._build_geodesic_rho_per_shot(query_hyperbolic, support_hyperbolic)
                 flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
             else:
                 flat_rho = self._build_pairwise_rho(query_hyperbolic, flat_support_hyperbolic)
@@ -530,11 +643,17 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.uses_learned_mass and self.lambda_rho > 0.0:
             rho_regularization = (rho - self.rho_target).pow(2).mean()
 
+        rho_rank_loss = self._rho_rank_loss(rho, shot_geodesic_distance)
+
         curvature_regularization = logits.new_zeros(())
         if self.lambda_curvature > 0.0:
             curvature_regularization = (self.min_curvature - self.curvature).clamp_min(0.0).pow(2)
 
-        aux_loss = self.lambda_rho * rho_regularization + self.lambda_curvature * curvature_regularization
+        aux_loss = (
+            self.lambda_rho * rho_regularization
+            + self.lambda_rho_rank * rho_rank_loss
+            + self.lambda_curvature * curvature_regularization
+        )
 
         if not needs_payload:
             return logits
@@ -548,6 +667,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "transported_mass": transport_mass,
             "rho": rho,
             "rho_regularization": rho_regularization,
+            "rho_rank_loss": rho_rank_loss,
             "curvature_regularization": curvature_regularization,
             "curvature": self.curvature.detach().to(dtype=logits.dtype),
             "mass_bonus": self._mass_reward_weight(logits).detach().to(dtype=logits.dtype),
@@ -592,6 +712,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "transported_mass": torch.cat([item["transported_mass"] for item in batch_outputs], dim=0),
             "rho": torch.cat([item["rho"] for item in batch_outputs], dim=0),
             "rho_regularization": torch.stack([item["rho_regularization"] for item in batch_outputs]).mean(),
+            "rho_rank_loss": torch.stack([item["rho_rank_loss"] for item in batch_outputs]).mean(),
             "curvature_regularization": torch.stack([item["curvature_regularization"] for item in batch_outputs]).mean(),
             "curvature": torch.stack([item["curvature"] for item in batch_outputs]).mean(),
             "mass_bonus": torch.stack([item["mass_bonus"] for item in batch_outputs]).mean(),
