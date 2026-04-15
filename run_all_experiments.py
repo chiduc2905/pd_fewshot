@@ -28,7 +28,7 @@ def get_args():
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1",
+        default="/workspace/pd_fewshot/scalogram_27_1_hrot_robust",
         help="Path to dataset",
     )
     parser.add_argument("--dataset_name", type=str, default="knee_aug_split", help="Dataset name for logging")
