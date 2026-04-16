@@ -419,11 +419,11 @@ def build_model_from_args(args):
         return DeepEMD(
             image_size=image_size,
             temperature=12.5,
-            solver=getattr(args, "deepemd_solver", "opencv"),
+            solver=getattr(args, "deepemd_solver", "sinkhorn"),
             qpth_form=getattr(args, "deepemd_qpth_form", "L2"),
             qpth_l2_strength=float(getattr(args, "deepemd_qpth_l2_strength", 1e-6)),
             sfc_lr=float(getattr(args, "deepemd_sfc_lr", 0.1)),
-            sfc_update_step=int(getattr(args, "deepemd_sfc_update_step", 100)),
+            sfc_update_step=int(getattr(args, "deepemd_sfc_update_step", 15)),
             sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
             fewshot_backbone=fewshot_backbone,
             device=device,

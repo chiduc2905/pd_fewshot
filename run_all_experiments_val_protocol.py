@@ -149,7 +149,7 @@ def run_experiment(
     if applied_backbone != "default":
         cmd.extend(["--fewshot_backbone", applied_backbone])
     if not use_external_smnet:
-        cmd.extend(["--deepemd_fast_val", "false"])
+        cmd.extend(["--deepemd_fast_val", "true"])
         if model.startswith("spif"):
             cmd.extend(
                 [
@@ -165,15 +165,15 @@ def run_experiment(
                     "--deepemd_solver",
                     base_runner.DEEPEMD_5SHOT_TRAIN_SOLVER,
                     "--deepemd_train_sfc",
-                    "true",
+                    base_runner.DEEPEMD_5SHOT_TRAIN_SFC,
                     "--deepemd_train_sfc_update_step",
                     str(base_runner.DEEPEMD_5SHOT_TRAIN_SFC_STEPS),
                     "--deepemd_train_sfc_bs",
                     str(base_runner.DEEPEMD_5SHOT_TRAIN_SFC_BS),
                     "--deepemd_test_sfc",
-                    "true",
+                    base_runner.DEEPEMD_5SHOT_TEST_SFC,
                     "--deepemd_test_exact",
-                    "true",
+                    base_runner.DEEPEMD_5SHOT_TEST_EXACT,
                 ]
             )
     if passthrough_args:

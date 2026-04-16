@@ -229,7 +229,7 @@ def _build_base_command(args, model: str, shot: int, samples: int | None, varian
         "--cudnn_benchmark",
         base_runner.FIXED_CUDNN_BENCHMARK,
         "--deepemd_fast_val",
-        "false",
+        "true",
     ]
     if samples is not None:
         cmd.extend(["--training_samples", str(samples)])

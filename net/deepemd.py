@@ -1,4 +1,4 @@
-"""DeepEMD aligned with the official repo's EMD/SFC workflow."""
+"""DeepEMD with a practical fast-training path for episodic benchmarks."""
 
 from __future__ import annotations
 
@@ -149,7 +149,7 @@ def emd_inference_opencv(cost_matrix: torch.Tensor, weight1: torch.Tensor, weigh
 
 
 class DeepEMD(nn.Module):
-    """DeepEMD with official-style solver selection and 5-shot SFC refinement."""
+    """DeepEMD with exact-test and approximate-train solver selection."""
 
     def __init__(
         self,
@@ -157,11 +157,11 @@ class DeepEMD(nn.Module):
         temperature: float = 12.5,
         metric: str = "cosine",
         norm: str = "center",
-        solver: str = "opencv",
+        solver: str = "sinkhorn",
         qpth_form: str = "L2",
         qpth_l2_strength: float = 1e-6,
         sfc_lr: float = 0.1,
-        sfc_update_step: int = 100,
+        sfc_update_step: int = 15,
         sfc_bs: int = 4,
         fewshot_backbone: str = "resnet12",
         device: str = "cuda",
@@ -214,9 +214,7 @@ class DeepEMD(nn.Module):
         if exact is True:
             return "opencv" if cv2 is not None else "linprog"
         if exact is False:
-            if self.training:
-                return self.solver
-            return "opencv" if cv2 is not None else "linprog"
+            return self.solver
         if self.training:
             return self.solver
         return "opencv" if cv2 is not None else "linprog"

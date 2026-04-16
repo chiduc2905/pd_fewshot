@@ -930,17 +930,17 @@ def get_args():
     parser.add_argument("--misclf_topk", type=int, default=30)
     parser.add_argument("--save_last_checkpoint", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--skip_final_test", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--deepemd_train_sfc", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--deepemd_train_sfc", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_train_sfc_update_step", type=int, default=None)
     parser.add_argument("--deepemd_train_sfc_bs", type=int, default=None)
-    parser.add_argument("--deepemd_fast_val", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--deepemd_test_exact", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--deepemd_test_sfc", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--deepemd_solver", type=str, default="opencv", choices=["opencv", "qpth", "linprog", "sinkhorn"])
+    parser.add_argument("--deepemd_fast_val", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--deepemd_test_exact", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--deepemd_test_sfc", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--deepemd_solver", type=str, default="sinkhorn", choices=["opencv", "qpth", "linprog", "sinkhorn"])
     parser.add_argument("--deepemd_qpth_form", type=str, default="L2", choices=["QP", "L2"])
     parser.add_argument("--deepemd_qpth_l2_strength", type=float, default=1e-6)
     parser.add_argument("--deepemd_sfc_lr", type=float, default=0.1)
-    parser.add_argument("--deepemd_sfc_update_step", type=int, default=100)
+    parser.add_argument("--deepemd_sfc_update_step", type=int, default=15)
     parser.add_argument("--deepemd_sfc_bs", type=int, default=4)
 
     parser.add_argument("--project", type=str, default="pulse_fewshot")
@@ -973,11 +973,15 @@ def get_model(args):
         if train_sfc_overrides:
             override_suffix = ", " + ", ".join(train_sfc_overrides)
         print(
-            "  deepemd: official-style EMD/SFC "
-            f"(solver={getattr(args, 'deepemd_solver', 'opencv')}, "
+            "  deepemd: fast benchmark OT "
+            f"(train_solver={getattr(args, 'deepemd_solver', 'sinkhorn')}, "
+            f"train_sfc={getattr(args, 'deepemd_train_sfc', 'false')}, "
+            f"fast_val={getattr(args, 'deepemd_fast_val', 'true')}, "
+            f"test_exact={getattr(args, 'deepemd_test_exact', 'false')}, "
+            f"test_sfc={getattr(args, 'deepemd_test_sfc', 'false')}, "
             f"qpth_form={getattr(args, 'deepemd_qpth_form', 'L2')}, "
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
-            f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 100)}, "
+            f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 15)}, "
             f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)}{override_suffix})"
         )
     if args.model == "hierarchical_episodic_ssm_net":
@@ -1699,7 +1703,7 @@ def forward_scores(
         return net(query, support, label_smoothing=smoothing)
     if args.model == "deepemd":
         if phase == "train":
-            refine_proto = _bool_flag(args.deepemd_train_sfc, default=True)
+            refine_proto = _bool_flag(args.deepemd_train_sfc, default=False)
             return net(
                 query,
                 support,
@@ -1709,11 +1713,11 @@ def forward_scores(
                 sfc_bs_override=getattr(args, "deepemd_train_sfc_bs", None),
             )
         if phase == "val":
-            fast_val = _bool_flag(args.deepemd_fast_val, default=False)
+            fast_val = _bool_flag(args.deepemd_fast_val, default=True)
             return net(query, support, refine_proto=not fast_val, exact=not fast_val)
         if phase == "test":
-            exact = _bool_flag(args.deepemd_test_exact, default=True)
-            refine_proto = _bool_flag(args.deepemd_test_sfc, default=True)
+            exact = _bool_flag(args.deepemd_test_exact, default=False)
+            refine_proto = _bool_flag(args.deepemd_test_sfc, default=False)
             return net(query, support, refine_proto=refine_proto, exact=exact)
         return net(query, support)
     if args.model in {"feat", "can"}:
