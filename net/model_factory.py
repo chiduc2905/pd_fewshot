@@ -1775,6 +1775,7 @@ def build_model_from_args(args):
                 getattr(args, "hrot_normalize_euclidean_tokens", "true"),
                 default=True,
             ),
+            normalize_rho=_bool_flag(getattr(args, "hrot_normalize_rho", "false"), default=False),
             eval_use_float64=_bool_flag(getattr(args, "hrot_eval_use_float64", "true"), default=True),
             hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
             ot_backend=str(getattr(args, "hrot_ot_backend", "native")),

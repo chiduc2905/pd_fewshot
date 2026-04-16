@@ -804,7 +804,7 @@ def get_args():
         "--hrot_variant",
         type=str,
         default="E",
-        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"],
+        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"],
     )
     parser.add_argument("--hrot_eam_hidden_dim", type=int, default=256)
     parser.add_argument("--hrot_curvature_init", type=float, default=1.0)
@@ -827,6 +827,7 @@ def get_args():
     parser.add_argument("--hrot_lambda_curvature", type=float, default=0.0)
     parser.add_argument("--hrot_min_curvature", type=float, default=0.05)
     parser.add_argument("--hrot_normalize_euclidean_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--hrot_normalize_rho", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_eval_use_float64", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_hyperbolic_backend", type=str, default="auto", choices=["auto", "geoopt", "native"])
     parser.add_argument("--hrot_ot_backend", type=str, default="native", choices=["auto", "native", "pot"])
@@ -1447,7 +1448,8 @@ def get_model(args):
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
             f"rho_rank_margin={getattr(args, 'hrot_rho_rank_margin', 0.05)}, "
-            f"rho_rank_temperature={getattr(args, 'hrot_rho_rank_temperature', 0.05)})"
+            f"rho_rank_temperature={getattr(args, 'hrot_rho_rank_temperature', 0.05)}, "
+            f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
     return model
 
