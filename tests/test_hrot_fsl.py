@@ -706,18 +706,39 @@ def test_hrot_fsl_variant_q_uses_noise_calibrated_hierarchical_uot():
     flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
     expected_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
     expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
-    mass_reward = (model.score_scale * model.transport_cost_threshold.detach()).to(
+    global_threshold = model.transport_cost_threshold.detach().to(
         dtype=outputs["shot_transported_mass"].dtype
     )
-    expected_shot_logits = -model.score_scale * outputs["shot_transport_cost"] + (
-        mass_reward * outputs["shot_transported_mass"]
+    expected_shot_logits = model.score_scale * (
+        outputs["adaptive_transport_cost_threshold"] * outputs["shot_transported_mass"]
+        - outputs["shot_transport_cost"]
     )
-    expected_logits = (outputs["shot_pool_weights"] * expected_shot_logits).sum(dim=-1)
-    expected_transport_cost = (outputs["shot_pool_weights"] * outputs["shot_transport_cost"]).sum(dim=-1)
-    expected_transport_mass = (outputs["shot_pool_weights"] * outputs["shot_transported_mass"]).sum(dim=-1)
+    expected_q_logits = (outputs["shot_pool_weights"] * expected_shot_logits).sum(dim=-1)
+    expected_q_transport_cost = (outputs["shot_pool_weights"] * outputs["shot_transport_cost"]).sum(dim=-1)
+    expected_q_transport_mass = (outputs["shot_pool_weights"] * outputs["shot_transported_mass"]).sum(dim=-1)
+    expected_h_anchor_shot_logits = model.score_scale * (
+        global_threshold * outputs["h_anchor_shot_transported_mass"]
+        - outputs["h_anchor_shot_transport_cost"]
+    )
+    expected_h_anchor_logits = expected_h_anchor_shot_logits.mean(dim=-1)
+    expected_h_anchor_transport_cost = outputs["h_anchor_shot_transport_cost"].mean(dim=-1)
+    expected_h_anchor_transport_mass = outputs["h_anchor_shot_transported_mass"].mean(dim=-1)
+    q_mix = outputs["q_enhancement_mix"]
+    expected_logits = (1.0 - q_mix) * expected_h_anchor_logits + q_mix * expected_q_logits
+    expected_transport_cost = (
+        (1.0 - q_mix) * expected_h_anchor_transport_cost
+        + q_mix * expected_q_transport_cost
+    )
+    expected_transport_mass = (
+        (1.0 - q_mix) * expected_h_anchor_transport_mass
+        + q_mix * expected_q_transport_mass
+    )
 
     assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["q_enhanced_logits"], expected_q_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["h_anchor_shot_logits"], expected_h_anchor_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["h_anchor_logits"], expected_h_anchor_logits, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
@@ -736,6 +757,18 @@ def test_hrot_fsl_variant_q_uses_noise_calibrated_hierarchical_uot():
         rtol=1e-5,
     )
     assert torch.allclose(
+        outputs["query_hyperbolic_token_prior"].sum(dim=-1),
+        torch.ones_like(outputs["shot_rho"]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["support_hyperbolic_token_prior"].sum(dim=-1),
+        torch.ones_like(outputs["shot_rho"]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
         outputs["shot_pool_weights"].sum(dim=-1),
         torch.ones_like(outputs["logits"]),
         atol=1e-5,
@@ -747,13 +780,33 @@ def test_hrot_fsl_variant_q_uses_noise_calibrated_hierarchical_uot():
     assert model.uses_unbalanced_transport
     assert model.uses_shot_decomposed_transport
     assert model.raw_token_temperature is not None
+    assert model.q_eam is not None
+    assert model.q_eam.network[0].in_features == 5
     assert model.query_reliability_weights is not None
     assert model.support_reliability_weights is not None
+    assert model.query_token_attention_vector is not None
+    assert model.support_token_attention_vector is not None
+    assert model.q_shot_pool_scorer is not None
+    assert model.q_threshold_scorer is not None
     assert model.raw_noise_sink_cost is not None
     assert model.raw_shot_pool_temperature is not None
     assert outputs["probe_query_reliability"].shape == outputs["query_token_mass"].shape
     assert outputs["probe_support_reliability"].shape == outputs["support_token_mass"].shape
     assert outputs["support_consensus"].shape == outputs["support_token_mass"].shape
+    assert outputs["query_hyperbolic_token_prior"].shape == outputs["query_token_mass"].shape
+    assert outputs["support_hyperbolic_token_prior"].shape == outputs["support_token_mass"].shape
+    assert outputs["adaptive_transport_cost_threshold"].shape == (2, 3, 2)
+    assert torch.all(outputs["adaptive_transport_cost_threshold"] > 0.0)
+    assert outputs["h_anchor_rho"].shape == (2, 3, 2)
+    assert outputs["h_anchor_shot_transport_cost"].shape == (2, 3, 2)
+    assert outputs["h_anchor_shot_transported_mass"].shape == (2, 3, 2)
+    assert outputs["q_eam_cross_attention"].shape == (2, 3, 2)
+    assert torch.allclose(
+        outputs["q_eam_cross_attention"].sum(dim=-1),
+        torch.full_like(outputs["logits"], 2.0),
+        atol=1e-5,
+        rtol=1e-5,
+    )
     assert outputs["transport_probe_cost"].shape == (2, 3, 2)
     assert outputs["noise_sink_query_mass"].shape == (2, 3, 2)
     assert outputs["noise_sink_support_mass"].shape == (2, 3, 2)
@@ -763,7 +816,10 @@ def test_hrot_fsl_variant_q_uses_noise_calibrated_hierarchical_uot():
     assert outputs["noise_sink_cost"].item() > 0.0
     assert 0.0 < outputs["token_reliability_mix"].item() < 1.0
     assert 0.0 < outputs["support_consensus_mix"].item() < 1.0
+    assert 0.0 < outputs["hyperbolic_token_prior_mix"].item() < 1.0
+    assert outputs["eam_cross_attention_temperature"].item() > 0.0
     assert 0.0 < outputs["shot_pool_mix"].item() < 1.0
+    assert 0.0 < outputs["q_enhancement_mix"].item() < 1.0
 
 
 def test_hrot_fsl_variant_q_backpropagates_noise_calibration_parameters():
@@ -782,16 +838,24 @@ def test_hrot_fsl_variant_q_backpropagates_noise_calibration_parameters():
 
     checked_params = [
         model.eam.network[-2].weight,
+        model.q_eam.network[-2].weight,
         model.raw_transport_cost_threshold,
         model.raw_token_temperature,
         model.query_reliability_weights,
         model.support_reliability_weights,
+        model.query_token_attention_vector,
+        model.support_token_attention_vector,
         model.raw_token_reliability_mix,
         model.raw_support_consensus_mix,
+        model.raw_hyperbolic_token_prior_mix,
+        model.raw_eam_cross_attention_temperature,
         model.raw_consensus_temperature,
         model.raw_noise_sink_cost,
         model.raw_shot_pool_temperature,
         model.raw_shot_pool_mix,
+        model.raw_q_enhancement_mix,
+        model.q_shot_pool_scorer.weight,
+        model.q_threshold_scorer.weight,
     ]
     for param in checked_params:
         assert param is not None
@@ -800,6 +864,8 @@ def test_hrot_fsl_variant_q_backpropagates_noise_calibration_parameters():
 
     assert model.query_reliability_weights.grad.abs().sum().item() > 0.0
     assert model.support_reliability_weights.grad.abs().sum().item() > 0.0
+    assert model.q_eam.network[-2].weight.grad.abs().sum().item() > 0.0
+    assert model.raw_q_enhancement_mix.grad.abs().sum().item() > 0.0
     assert model.raw_noise_sink_cost.grad.abs().sum().item() > 0.0
 
 

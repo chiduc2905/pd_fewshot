@@ -45,7 +45,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-P."""
+    """Vectorized HROT few-shot model with ablation variants A-Q."""
 
     def __init__(
         self,
@@ -178,6 +178,18 @@ class HROTFSL(BaseConv64FewShotModel):
             default_mass=fixed_mass,
             input_dim=eam_input_dim,
         )
+        self.q_eam_feature_dim = 5 if self.uses_noise_calibrated_transport else None
+        self.q_eam = (
+            EpisodeAdaptiveMass(
+                embed_dim=token_dim,
+                hidden_dim=eam_hidden_dim,
+                min_mass=min_mass,
+                default_mass=fixed_mass,
+                input_dim=self.q_eam_feature_dim,
+            )
+            if self.uses_noise_calibrated_transport
+            else None
+        )
         if self.uses_hybrid_ablation_eam:
             self.euclidean_eam = EpisodeAdaptiveMass(
                 embed_dim=token_dim,
@@ -208,23 +220,45 @@ class HROTFSL(BaseConv64FewShotModel):
             self.support_reliability_weights = nn.Parameter(
                 torch.tensor([1.0, -1.0, -0.5, -0.5], dtype=torch.float32)
             )
-            self.raw_token_reliability_mix = nn.Parameter(torch.tensor(-2.0, dtype=torch.float32))
-            self.raw_support_consensus_mix = nn.Parameter(torch.tensor(-2.0, dtype=torch.float32))
+            self.query_token_attention_vector = nn.Parameter(torch.zeros(token_dim, dtype=torch.float32))
+            self.support_token_attention_vector = nn.Parameter(torch.zeros(token_dim, dtype=torch.float32))
+            self.raw_token_reliability_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
+            self.raw_support_consensus_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
+            self.raw_hyperbolic_token_prior_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
+            self.raw_eam_cross_attention_temperature = nn.Parameter(
+                torch.tensor(_inverse_softplus(1.0), dtype=torch.float32)
+            )
             self.raw_consensus_temperature = nn.Parameter(
                 torch.tensor(_inverse_softplus(float(token_temperature)), dtype=torch.float32)
             )
             self.raw_noise_sink_cost = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
             self.raw_shot_pool_temperature = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
-            self.raw_shot_pool_mix = nn.Parameter(torch.tensor(-2.0, dtype=torch.float32))
+            self.raw_shot_pool_mix = nn.Parameter(torch.tensor(-0.5, dtype=torch.float32))
+            self.raw_q_enhancement_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
+            self.q_shot_pool_scorer = nn.Linear(self.q_eam_feature_dim, 1)
+            self.q_threshold_scorer = nn.Linear(self.q_eam_feature_dim, 1)
+            with torch.no_grad():
+                pool_init = torch.tensor([-1.0, -0.75, -0.10, -0.10, 0.75], dtype=torch.float32)
+                self.q_shot_pool_scorer.weight.copy_(pool_init.unsqueeze(0))
+                self.q_shot_pool_scorer.bias.zero_()
+                self.q_threshold_scorer.weight.zero_()
+                self.q_threshold_scorer.bias.zero_()
         else:
             self.query_reliability_weights = None
             self.support_reliability_weights = None
+            self.query_token_attention_vector = None
+            self.support_token_attention_vector = None
             self.raw_token_reliability_mix = None
             self.raw_support_consensus_mix = None
+            self.raw_hyperbolic_token_prior_mix = None
+            self.raw_eam_cross_attention_temperature = None
             self.raw_consensus_temperature = None
             self.raw_noise_sink_cost = None
             self.raw_shot_pool_temperature = None
             self.raw_shot_pool_mix = None
+            self.raw_q_enhancement_mix = None
+            self.q_shot_pool_scorer = None
+            self.q_threshold_scorer = None
         if self.uses_cost_threshold_score:
             threshold_init = (
                 float(transport_cost_threshold_init)
@@ -296,6 +330,18 @@ class HROTFSL(BaseConv64FewShotModel):
         return torch.sigmoid(self.raw_support_consensus_mix)
 
     @property
+    def hyperbolic_token_prior_mix(self) -> torch.Tensor:
+        if self.raw_hyperbolic_token_prior_mix is None:
+            return self.curvature.new_tensor(0.0)
+        return torch.sigmoid(self.raw_hyperbolic_token_prior_mix)
+
+    @property
+    def eam_cross_attention_temperature(self) -> torch.Tensor:
+        if self.raw_eam_cross_attention_temperature is None:
+            return self.curvature.new_tensor(1.0)
+        return F.softplus(self.raw_eam_cross_attention_temperature).clamp_min(self.eps)
+
+    @property
     def noise_sink_cost(self) -> torch.Tensor:
         if self.raw_noise_sink_cost is None:
             return self.curvature.new_tensor(1.0)
@@ -312,6 +358,12 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_shot_pool_mix is None:
             return self.curvature.new_tensor(0.0)
         return torch.sigmoid(self.raw_shot_pool_mix)
+
+    @property
+    def q_enhancement_mix(self) -> torch.Tensor:
+        if self.raw_q_enhancement_mix is None:
+            return self.curvature.new_tensor(1.0)
+        return torch.sigmoid(self.raw_q_enhancement_mix)
 
     def _mass_reward_weight(self, reference: torch.Tensor) -> torch.Tensor:
         if self.raw_transport_cost_threshold is not None:
@@ -471,6 +523,22 @@ class HROTFSL(BaseConv64FewShotModel):
             return torch.stack([mean_distance, query_variance, support_variance], dim=-1)
         return torch.stack([mean_distance, shot_spread, query_variance, support_variance], dim=-1)
 
+    def _build_q_geodesic_eam_features(
+        self,
+        query_tokens_hyp: torch.Tensor,
+        support_tokens_hyp: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        geodesic_features = self._build_geodesic_eam_features(query_tokens_hyp, support_tokens_hyp)
+        distance = geodesic_features[..., 0]
+        inv_distance = distance.clamp_min(self.eps).reciprocal()
+        temperature = self.eam_cross_attention_temperature.to(
+            device=inv_distance.device,
+            dtype=inv_distance.dtype,
+        )
+        cross_attention = torch.softmax(inv_distance / temperature, dim=-1) * float(distance.shape[-1])
+        q_features = torch.cat([geodesic_features, cross_attention.unsqueeze(-1)], dim=-1)
+        return q_features, geodesic_features
+
     def _build_euclidean_rho_per_shot(
         self,
         query_tokens_euc: torch.Tensor,
@@ -616,6 +684,51 @@ class HROTFSL(BaseConv64FewShotModel):
         std = values.std(dim=-2, keepdim=True, unbiased=False).clamp_min(self.eps)
         return (values - mean) / std
 
+    def _standardize_over_shots(self, values: torch.Tensor) -> torch.Tensor:
+        mean = values.mean(dim=-2, keepdim=True)
+        std = values.std(dim=-2, keepdim=True, unbiased=False).clamp_min(self.eps)
+        return (values - mean) / std
+
+    def _compute_hyperbolic_token_prior_logits(
+        self,
+        query_tokens_hyp: torch.Tensor,
+        support_tokens_hyp: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.query_token_attention_vector is None or self.support_token_attention_vector is None:
+            raise RuntimeError("Noise-calibrated transport requires token attention vectors")
+        if query_tokens_hyp.dim() != 3 or support_tokens_hyp.dim() != 3:
+            raise ValueError(
+                "Hyperbolic token prior expects query/support tokens shaped "
+                "(NumQuery, Tokens, Dim) and (NumPairs, Tokens, Dim)"
+            )
+
+        calc_dtype = torch.float64 if (self.eval_use_float64 and not self.training) else query_tokens_hyp.dtype
+        query_cast = query_tokens_hyp.to(dtype=calc_dtype)
+        support_cast = support_tokens_hyp.to(dtype=calc_dtype)
+        ball = self._build_ball(query_cast)
+        query_tangent = ball.logmap0(ball.project(query_cast))
+        support_tangent = ball.logmap0(ball.project(support_cast))
+
+        scale = math.sqrt(float(query_tangent.shape[-1]))
+        query_vector = self.query_token_attention_vector.to(
+            device=query_tangent.device,
+            dtype=query_tangent.dtype,
+        )
+        support_vector = self.support_token_attention_vector.to(
+            device=support_tangent.device,
+            dtype=support_tangent.dtype,
+        )
+        query_direction = torch.einsum("qtd,d->qt", query_tangent, query_vector) / scale
+        support_direction = torch.einsum("ptd,d->pt", support_tangent, support_vector) / scale
+        query_radius = torch.linalg.vector_norm(query_tangent, dim=-1)
+        support_radius = torch.linalg.vector_norm(support_tangent, dim=-1)
+
+        query_logits = self._standardize_over_tokens((query_direction + query_radius).unsqueeze(-1)).squeeze(-1)
+        support_logits = self._standardize_over_tokens((support_direction + support_radius).unsqueeze(-1)).squeeze(-1)
+        query_logits = query_logits[:, None, :].expand(-1, support_tokens_hyp.shape[0], -1)
+        support_logits = support_logits[None, :, :].expand(query_tokens_hyp.shape[0], -1, -1)
+        return query_logits.to(dtype=query_tokens_hyp.dtype), support_logits.to(dtype=support_tokens_hyp.dtype)
+
     def _build_probe_token_features(
         self,
         flat_cost: torch.Tensor,
@@ -696,6 +809,8 @@ class HROTFSL(BaseConv64FewShotModel):
         flat_cost: torch.Tensor,
         flat_rho: torch.Tensor,
         support_tokens_euc: torch.Tensor,
+        query_tokens_hyp: torch.Tensor,
+        flat_support_tokens_hyp: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         if self.query_reliability_weights is None or self.support_reliability_weights is None:
             raise RuntimeError("Noise-calibrated transport requires reliability weights")
@@ -719,6 +834,16 @@ class HROTFSL(BaseConv64FewShotModel):
         consensus_mix = self.support_consensus_mix.to(device=flat_cost.device, dtype=flat_cost.dtype)
         support_logits = support_logits + consensus_mix * flat_consensus
 
+        query_prior_logits, support_prior_logits = self._compute_hyperbolic_token_prior_logits(
+            query_tokens_hyp,
+            flat_support_tokens_hyp,
+        )
+        query_prior_logits = query_prior_logits.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        support_prior_logits = support_prior_logits.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        prior_mix = self.hyperbolic_token_prior_mix.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        query_logits = query_logits + prior_mix * query_prior_logits
+        support_logits = support_logits + prior_mix * support_prior_logits
+
         temperature = self.token_temperature.to(device=flat_cost.device, dtype=flat_cost.dtype)
         query_attn = torch.softmax(query_logits / temperature, dim=-1)
         support_attn = torch.softmax(support_logits / temperature, dim=-1)
@@ -735,6 +860,8 @@ class HROTFSL(BaseConv64FewShotModel):
                 "probe_query_reliability": query_weights,
                 "probe_support_reliability": support_weights,
                 "support_consensus": flat_consensus,
+                "query_hyperbolic_token_prior": torch.softmax(query_prior_logits / temperature, dim=-1),
+                "support_hyperbolic_token_prior": torch.softmax(support_prior_logits / temperature, dim=-1),
             }
         )
         return query_mass, support_mass, payload
@@ -766,17 +893,29 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_logits: torch.Tensor,
         shot_transport_cost: torch.Tensor,
         shot_transport_mass: torch.Tensor,
+        geodesic_features: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         shot_num = shot_logits.shape[-1]
         if shot_num == 1:
             weights = torch.ones_like(shot_logits)
         else:
-            evidence = shot_logits / float(self.score_scale)
-            evidence = (evidence - evidence.mean(dim=-1, keepdim=True)) / evidence.std(
-                dim=-1,
-                keepdim=True,
-                unbiased=False,
-            ).clamp_min(self.eps)
+            if geodesic_features is not None and self.q_shot_pool_scorer is not None:
+                if geodesic_features.shape[:-1] != shot_logits.shape:
+                    raise ValueError(
+                        "geodesic_features must have shape (*shot_logits.shape, FeatureDim), "
+                        f"got {tuple(geodesic_features.shape)} vs {tuple(shot_logits.shape)}"
+                    )
+                pooled_features = self._standardize_over_shots(geodesic_features)
+                network_dtype = self.q_shot_pool_scorer.weight.dtype
+                evidence = self.q_shot_pool_scorer(pooled_features.to(dtype=network_dtype)).squeeze(-1)
+                evidence = evidence.to(device=shot_logits.device, dtype=shot_logits.dtype)
+            else:
+                evidence = shot_logits / float(self.score_scale)
+                evidence = (evidence - evidence.mean(dim=-1, keepdim=True)) / evidence.std(
+                    dim=-1,
+                    keepdim=True,
+                    unbiased=False,
+                ).clamp_min(self.eps)
             temperature = self.shot_pool_temperature.to(device=shot_logits.device, dtype=shot_logits.dtype)
             attentive = torch.softmax(evidence / temperature, dim=-1)
             uniform = torch.full_like(attentive, 1.0 / float(shot_num))
@@ -787,6 +926,21 @@ class HROTFSL(BaseConv64FewShotModel):
         transport_cost = (weights * shot_transport_cost).sum(dim=-1)
         transport_mass = (weights * shot_transport_mass).sum(dim=-1)
         return logits, transport_cost, transport_mass, weights
+
+    def _compute_q_adaptive_threshold(
+        self,
+        q_features: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        base_threshold = self.transport_cost_threshold.to(device=reference.device, dtype=reference.dtype)
+        if self.q_threshold_scorer is None:
+            return base_threshold.expand_as(reference)
+        standardized = self._standardize_over_shots(q_features)
+        network_dtype = self.q_threshold_scorer.weight.dtype
+        raw_delta = self.q_threshold_scorer(standardized.to(dtype=network_dtype)).squeeze(-1)
+        raw_delta = raw_delta.to(device=reference.device, dtype=reference.dtype)
+        multiplier = torch.exp(0.25 * torch.tanh(raw_delta))
+        return (base_threshold * multiplier).clamp_min(self.eps)
 
     def _compute_hyperbolic_token_marginals(
         self,
@@ -1003,18 +1157,45 @@ class HROTFSL(BaseConv64FewShotModel):
                 support_hyperbolic.shape[-1],
             )
             if self.uses_noise_calibrated_transport:
+                if self.q_eam is None:
+                    raise RuntimeError("HROT-Q requires a dedicated q_eam head")
                 flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
-                geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
+                q_geodesic_features, geodesic_features = self._build_q_geodesic_eam_features(
+                    query_hyperbolic,
+                    support_hyperbolic,
+                )
                 shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
-                shot_rho = self.eam.forward_features(geodesic_features)
+                h_anchor_rho = self.eam.forward_features(geodesic_features)
+                h_anchor_rho = self._normalize_rho_budget(h_anchor_rho).to(dtype=query_hyperbolic.dtype)
+                shot_rho = self.q_eam.forward_features(q_geodesic_features)
                 shot_rho = self._normalize_rho_budget(shot_rho).to(dtype=query_hyperbolic.dtype)
+                flat_h_anchor_rho = h_anchor_rho.reshape(query.shape[0], way_num * shot_num)
                 flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+
+                _h_anchor_plan, h_anchor_flat_cost, h_anchor_flat_mass = self._transport_match(
+                    flat_cost,
+                    flat_h_anchor_rho,
+                )
+                h_anchor_shot_transport_cost = h_anchor_flat_cost.reshape(query.shape[0], way_num, shot_num)
+                h_anchor_shot_transport_mass = h_anchor_flat_mass.reshape(query.shape[0], way_num, shot_num)
+                global_threshold = self.transport_cost_threshold.to(
+                    device=h_anchor_shot_transport_cost.device,
+                    dtype=h_anchor_shot_transport_cost.dtype,
+                )
+                h_anchor_shot_logits = self.score_scale * (
+                    global_threshold * h_anchor_shot_transport_mass - h_anchor_shot_transport_cost
+                )
+                h_anchor_logits = h_anchor_shot_logits.mean(dim=-1)
+                h_anchor_transport_cost = h_anchor_shot_transport_cost.mean(dim=-1)
+                h_anchor_transport_mass = h_anchor_shot_transport_mass.mean(dim=-1)
 
                 query_token_mass, support_token_mass, transport_probe_payload = (
                     self._compute_noise_calibrated_token_marginals(
                         flat_cost,
                         flat_rho,
                         support_euclidean,
+                        query_hyperbolic,
+                        flat_support_hyperbolic,
                     )
                 )
                 cost_with_sink, query_mass_with_sink, support_mass_with_sink = self._append_noise_sink(
@@ -1035,15 +1216,19 @@ class HROTFSL(BaseConv64FewShotModel):
 
                 shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
                 shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
-                shot_logits = -self.score_scale * shot_transport_cost
-                if self.uses_unbalanced_transport:
-                    shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
+                adaptive_threshold = self._compute_q_adaptive_threshold(q_geodesic_features, shot_transport_cost)
+                shot_logits = self.score_scale * (adaptive_threshold * shot_transport_mass - shot_transport_cost)
 
-                logits, transport_cost, transport_mass, shot_pool_weights = self._pool_shot_scores(
+                q_logits, q_transport_cost, q_transport_mass, shot_pool_weights = self._pool_shot_scores(
                     shot_logits,
                     shot_transport_cost,
                     shot_transport_mass,
+                    geodesic_features=q_geodesic_features,
                 )
+                q_mix = self.q_enhancement_mix.to(device=q_logits.device, dtype=q_logits.dtype)
+                logits = (1.0 - q_mix) * h_anchor_logits + q_mix * q_logits
+                transport_cost = (1.0 - q_mix) * h_anchor_transport_cost + q_mix * q_transport_cost
+                transport_mass = (1.0 - q_mix) * h_anchor_transport_mass + q_mix * q_transport_mass
                 rho = shot_rho
                 cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
                 plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
@@ -1099,8 +1284,35 @@ class HROTFSL(BaseConv64FewShotModel):
                             shot_num,
                             support_token_mass.shape[-1],
                         ),
+                        "query_hyperbolic_token_prior": transport_probe_payload[
+                            "query_hyperbolic_token_prior"
+                        ].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            query_token_mass.shape[-1],
+                        ),
+                        "support_hyperbolic_token_prior": transport_probe_payload[
+                            "support_hyperbolic_token_prior"
+                        ].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            support_token_mass.shape[-1],
+                        ),
+                        "adaptive_transport_cost_threshold": adaptive_threshold,
                         "shot_logits": shot_logits,
                         "shot_pool_weights": shot_pool_weights,
+                        "q_enhanced_logits": q_logits,
+                        "h_anchor_logits": h_anchor_logits,
+                        "h_anchor_shot_logits": h_anchor_shot_logits,
+                        "h_anchor_shot_transport_cost": h_anchor_shot_transport_cost,
+                        "h_anchor_shot_transported_mass": h_anchor_shot_transport_mass,
+                        "h_anchor_rho": h_anchor_rho,
+                        "q_eam_cross_attention": q_geodesic_features[..., -1].to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
                         "noise_sink_query_mass": flat_plan_with_sink[..., :-1, -1].sum(dim=-1).reshape(
                             query.shape[0],
                             way_num,
@@ -1128,12 +1340,24 @@ class HROTFSL(BaseConv64FewShotModel):
                             device=logits.device,
                             dtype=logits.dtype,
                         ),
+                        "hyperbolic_token_prior_mix": self.hyperbolic_token_prior_mix.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
+                        "eam_cross_attention_temperature": self.eam_cross_attention_temperature.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
                         "noise_sink_cost": self.noise_sink_cost.detach().to(device=logits.device, dtype=logits.dtype),
                         "shot_pool_temperature": self.shot_pool_temperature.detach().to(
                             device=logits.device,
                             dtype=logits.dtype,
                         ),
                         "shot_pool_mix": self.shot_pool_mix.detach().to(device=logits.device, dtype=logits.dtype),
+                        "q_enhancement_mix": self.q_enhancement_mix.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
                     }
                 )
             elif self.uses_hyperbolic_token_attention:
@@ -1361,8 +1585,18 @@ class HROTFSL(BaseConv64FewShotModel):
             "probe_query_reliability",
             "probe_support_reliability",
             "support_consensus",
+            "query_hyperbolic_token_prior",
+            "support_hyperbolic_token_prior",
+            "adaptive_transport_cost_threshold",
             "shot_logits",
             "shot_pool_weights",
+            "q_enhanced_logits",
+            "h_anchor_logits",
+            "h_anchor_shot_logits",
+            "h_anchor_shot_transport_cost",
+            "h_anchor_shot_transported_mass",
+            "h_anchor_rho",
+            "q_eam_cross_attention",
             "noise_sink_query_mass",
             "noise_sink_support_mass",
             "noise_sink_self_mass",
@@ -1373,9 +1607,12 @@ class HROTFSL(BaseConv64FewShotModel):
             "token_temperature",
             "token_reliability_mix",
             "support_consensus_mix",
+            "hyperbolic_token_prior_mix",
+            "eam_cross_attention_temperature",
             "noise_sink_cost",
             "shot_pool_temperature",
             "shot_pool_mix",
+            "q_enhancement_mix",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
