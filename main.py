@@ -809,6 +809,7 @@ def get_args():
     parser.add_argument("--hrot_eam_hidden_dim", type=int, default=256)
     parser.add_argument("--hrot_curvature_init", type=float, default=1.0)
     parser.add_argument("--hrot_projection_scale", type=float, default=0.1)
+    parser.add_argument("--hrot_token_temperature", type=float, default=0.1)
     parser.add_argument("--hrot_score_scale", type=float, default=16.0)
     parser.add_argument("--hrot_tau_q", type=float, default=0.5)
     parser.add_argument("--hrot_tau_c", type=float, default=0.5)
@@ -1436,6 +1437,7 @@ def get_model(args):
             f"eam_hidden={getattr(args, 'hrot_eam_hidden_dim', 256)}, "
             f"curvature_init={getattr(args, 'hrot_curvature_init', 1.0)}, "
             f"proj_scale={getattr(args, 'hrot_projection_scale', 0.1)}, "
+            f"token_temp={getattr(args, 'hrot_token_temperature', 0.1)}, "
             f"score_scale={getattr(args, 'hrot_score_scale', 16.0)}, "
             f"tau_q={getattr(args, 'hrot_tau_q', 0.5)}, "
             f"tau_c={getattr(args, 'hrot_tau_c', 0.5)}, "

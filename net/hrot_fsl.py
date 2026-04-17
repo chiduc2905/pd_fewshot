@@ -44,19 +44,6 @@ def _inverse_softplus(value: float) -> float:
     return math.log(math.expm1(value))
 
 
-def _inverse_sigmoid(value: float) -> float:
-    value = min(max(float(value), 1e-6), 1.0 - 1e-6)
-    return math.log(value / (1.0 - value))
-
-
-def _init_sigmoid_gate(module: nn.Sequential, default_value: float) -> None:
-    final_linear = module[-2]
-    if not isinstance(final_linear, nn.Linear):
-        raise TypeError("Expected the penultimate gate layer to be nn.Linear")
-    nn.init.zeros_(final_linear.weight)
-    nn.init.constant_(final_linear.bias, _inverse_sigmoid(default_value))
-
-
 class HROTFSL(BaseConv64FewShotModel):
     """Vectorized HROT few-shot model with ablation variants A-P."""
 
@@ -73,6 +60,7 @@ class HROTFSL(BaseConv64FewShotModel):
         eam_hidden_dim: int = 256,
         curvature_init: float = 1.0,
         projection_scale: float = 0.1,
+        token_temperature: float = 0.1,
         score_scale: float = 16.0,
         tau_q: float = 0.5,
         tau_c: float = 0.5,
@@ -112,6 +100,8 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("token_dim must be positive")
         if projection_scale <= 0.0:
             raise ValueError("projection_scale must be positive")
+        if token_temperature <= 0.0:
+            raise ValueError("token_temperature must be positive")
         if score_scale <= 0.0:
             raise ValueError("score_scale must be positive")
         if sinkhorn_iterations <= 0:
@@ -138,7 +128,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
-        self.uses_reliability_calibrated_evidence_uot = variant == "P"
+        self.uses_hyperbolic_token_attention = variant == "P"
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
@@ -161,6 +151,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.lambda_curvature = float(lambda_curvature)
         self.min_curvature = float(min_curvature)
         self.eps = float(eps)
+        self.default_token_temperature = float(token_temperature)
 
         self.token_projector = nn.Sequential(
             nn.LayerNorm(hidden_dim),
@@ -204,44 +195,11 @@ class HROTFSL(BaseConv64FewShotModel):
         else:
             self.euclidean_eam = None
             self.reduced_geodesic_eam = None
-        if self.uses_reliability_calibrated_evidence_uot:
-            gate_hidden_dim = max(8, int(eam_hidden_dim) // 2)
-            self.query_survival_gate = nn.Sequential(
-                nn.Linear(4, gate_hidden_dim),
-                nn.LayerNorm(gate_hidden_dim),
-                nn.GELU(),
-                nn.Linear(gate_hidden_dim, 1),
-                nn.Sigmoid(),
-            )
-            self.support_survival_gate = nn.Sequential(
-                nn.Linear(4, gate_hidden_dim),
-                nn.LayerNorm(gate_hidden_dim),
-                nn.GELU(),
-                nn.Linear(gate_hidden_dim, 1),
-                nn.Sigmoid(),
-            )
-            self.shot_reliability_gate = nn.Sequential(
-                nn.Linear(4, gate_hidden_dim),
-                nn.LayerNorm(gate_hidden_dim),
-                nn.GELU(),
-                nn.Linear(gate_hidden_dim, 1),
-            )
-            token_survival_default = min(0.95, max(0.9, float(fixed_mass)))
-            _init_sigmoid_gate(self.query_survival_gate, token_survival_default)
-            _init_sigmoid_gate(self.support_survival_gate, token_survival_default)
-            final_shot_linear = self.shot_reliability_gate[-1]
-            if not isinstance(final_shot_linear, nn.Linear):
-                raise TypeError("Expected final shot reliability gate layer to be nn.Linear")
-            nn.init.zeros_(final_shot_linear.weight)
-            nn.init.zeros_(final_shot_linear.bias)
-            self.raw_evidence_residual_weight = nn.Parameter(
-                torch.tensor(_inverse_sigmoid(0.1), dtype=torch.float32)
-            )
-        else:
-            self.query_survival_gate = None
-            self.support_survival_gate = None
-            self.shot_reliability_gate = None
-            self.raw_evidence_residual_weight = None
+        self.raw_token_temperature = (
+            nn.Parameter(torch.tensor(_inverse_softplus(float(token_temperature)), dtype=torch.float32))
+            if self.uses_hyperbolic_token_attention
+            else None
+        )
         if self.uses_cost_threshold_score:
             threshold_init = (
                 float(transport_cost_threshold_init)
@@ -288,6 +246,12 @@ class HROTFSL(BaseConv64FewShotModel):
             return F.softplus(self.raw_transport_cost_threshold).clamp_min(self.eps)
         return self.mass_bonus / self.score_scale
 
+    @property
+    def token_temperature(self) -> torch.Tensor:
+        if self.raw_token_temperature is not None:
+            return F.softplus(self.raw_token_temperature).clamp_min(self.eps)
+        return self.curvature.new_tensor(self.default_token_temperature)
+
     def _mass_reward_weight(self, reference: torch.Tensor) -> torch.Tensor:
         if self.raw_transport_cost_threshold is not None:
             threshold = self.transport_cost_threshold.to(device=reference.device, dtype=reference.dtype)
@@ -296,11 +260,6 @@ class HROTFSL(BaseConv64FewShotModel):
                 reward = reward + self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
             return reward
         return self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
-
-    def _evidence_residual_weight(self, reference: torch.Tensor) -> torch.Tensor:
-        if self.raw_evidence_residual_weight is None:
-            return reference.new_zeros(())
-        return torch.sigmoid(self.raw_evidence_residual_weight).to(device=reference.device, dtype=reference.dtype)
 
     def _normalize_rho_budget(self, rho: torch.Tensor) -> torch.Tensor:
         if not self.normalize_rho:
@@ -591,95 +550,86 @@ class HROTFSL(BaseConv64FewShotModel):
         rho = self._normalize_rho_budget(rho)
         return rho.to(dtype=query_tokens_hyp.dtype), features, probe_payload
 
-    def _normalize_token_weights(self, weights: torch.Tensor) -> torch.Tensor:
-        weights = weights.clamp_min(self.eps)
-        return weights / weights.sum(dim=-1, keepdim=True).clamp_min(self.eps)
-
-    def _apply_survival_gate(self, gate: nn.Sequential, features: torch.Tensor) -> torch.Tensor:
-        network_dtype = gate[0].weight.dtype
-        survival = gate(features.to(dtype=network_dtype)).squeeze(-1).to(dtype=features.dtype)
-        return survival.clamp(min=self.min_mass, max=1.0)
-
-    def _build_reliability_evidence_masses(
+    def _compute_hyperbolic_token_marginals(
         self,
-        query_tokens_euc: torch.Tensor,
-        support_tokens_euc: torch.Tensor,
         query_tokens_hyp: torch.Tensor,
         support_tokens_hyp: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.query_survival_gate is None or self.support_survival_gate is None:
-            raise RuntimeError("Reliability-calibrated evidence UOT requires token survival gates")
-
-        support_mean_euc = support_tokens_euc.mean(dim=-2)
-        query_mean_euc = query_tokens_euc.mean(dim=-2)
-        query_saliency = F.relu(torch.einsum("qtd,wsd->qwst", query_tokens_euc, support_mean_euc)) + self.eps
-        support_saliency = F.relu(torch.einsum("wstd,qd->qwst", support_tokens_euc, query_mean_euc)) + self.eps
-        query_base_mass = self._normalize_token_weights(query_saliency)
-        support_base_mass = self._normalize_token_weights(support_saliency)
-
-        geodesic_features = self._build_geodesic_eam_features(query_tokens_hyp, support_tokens_hyp)
-        shot_rho = self.eam.forward_features(geodesic_features)
-        shot_rho = self._normalize_rho_budget(shot_rho).to(dtype=query_tokens_euc.dtype)
+        rho: torch.Tensor,
+        ball: PoincareBall | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if query_tokens_hyp.dim() != 3 or support_tokens_hyp.dim() != 3:
+            raise ValueError(
+                "Hyperbolic token marginals expect query/support tokens shaped "
+                "(NumQuery, Tokens, Dim) and (NumPairs, Tokens, Dim)"
+            )
+        num_query = query_tokens_hyp.shape[0]
+        num_pairs = support_tokens_hyp.shape[0]
+        if tuple(rho.shape) != (num_query, num_pairs):
+            raise ValueError(
+                "rho must have shape (NumQuery, NumPairs), "
+                f"got {tuple(rho.shape)} vs {(num_query, num_pairs)}"
+            )
 
         calc_dtype = torch.float64 if (self.eval_use_float64 and not self.training) else query_tokens_hyp.dtype
         query_cast = query_tokens_hyp.to(dtype=calc_dtype)
         support_cast = support_tokens_hyp.to(dtype=calc_dtype)
-        ball = self._build_ball(query_cast)
+        ball = self._build_ball(query_cast) if ball is None else ball
+        query_cast = ball.project(query_cast)
+        support_cast = ball.project(support_cast)
+
         query_stats = summarize_hyperbolic_tokens(query_cast, ball)
-        way_num, shot_num = support_cast.shape[:2]
-        flat_support = support_cast.reshape(way_num * shot_num, support_cast.shape[-2], support_cast.shape[-1])
-        shot_stats = summarize_hyperbolic_tokens(flat_support, ball)
-        shot_means = shot_stats.mean_hyp.reshape(way_num, shot_num, -1)
+        support_stats = summarize_hyperbolic_tokens(support_cast, ball)
 
-        query_token_distance = ball.dist(query_cast[:, None, None, :, :], shot_means[None, :, :, None, :])
-        support_token_distance = ball.dist(support_cast[None, :, :, :, :], query_stats.mean_hyp[:, None, None, None, :])
-        pair_distance = geodesic_features[..., 0].to(dtype=calc_dtype)
-        query_variance = geodesic_features[..., 2].to(dtype=calc_dtype)
-        support_variance = geodesic_features[..., 3].to(dtype=calc_dtype)
+        query_to_support = ball.dist(
+            query_cast[:, None, :, :],
+            support_stats.mean_hyp[None, :, None, :],
+        )
+        support_to_query = ball.dist(
+            support_cast[None, :, :, :],
+            query_stats.mean_hyp[:, None, None, :],
+        )
+        temperature = self.token_temperature.to(device=query_to_support.device, dtype=query_to_support.dtype)
+        query_weights = torch.softmax(-query_to_support / temperature, dim=-1)
+        support_weights = torch.softmax(-support_to_query / temperature, dim=-1)
 
-        query_gate_features = torch.stack(
-            [
-                query_saliency.to(dtype=calc_dtype),
-                query_token_distance,
-                pair_distance[..., None].expand_as(query_token_distance),
-                query_variance[..., None].expand_as(query_token_distance),
-            ],
-            dim=-1,
-        )
-        support_gate_features = torch.stack(
-            [
-                support_saliency.to(dtype=calc_dtype),
-                support_token_distance,
-                pair_distance[..., None].expand_as(support_token_distance),
-                support_variance[..., None].expand_as(support_token_distance),
-            ],
-            dim=-1,
-        )
-
-        query_survival = self._apply_survival_gate(self.query_survival_gate, query_gate_features).to(
-            dtype=query_tokens_euc.dtype
-        )
-        support_survival = self._apply_survival_gate(self.support_survival_gate, support_gate_features).to(
-            dtype=query_tokens_euc.dtype
-        )
-        query_mass = query_base_mass * query_survival * shot_rho[..., None]
-        support_mass = support_base_mass * support_survival * shot_rho[..., None]
-        return query_mass, support_mass, shot_rho, geodesic_features.to(dtype=query_tokens_euc.dtype)
+        rho_cast = rho.to(device=query_weights.device, dtype=query_weights.dtype)
+        query_mass = query_weights * rho_cast[..., None]
+        support_mass = support_weights * rho_cast[..., None]
+        return query_mass.to(dtype=query_tokens_hyp.dtype), support_mass.to(dtype=support_tokens_hyp.dtype)
 
     def _transport_match(
         self,
         cost: torch.Tensor,
         rho: torch.Tensor,
+        a: torch.Tensor | None = None,
+        b: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_query, num_way, query_tokens, class_tokens = cost.shape
-        base_a = cost.new_full((num_query, query_tokens), 1.0 / float(query_tokens))
-        base_b = cost.new_full((num_way, class_tokens), 1.0 / float(class_tokens))
-        a = base_a.unsqueeze(1).expand(-1, num_way, -1)
-        b = base_b.unsqueeze(0).expand(num_query, -1, -1)
+        if a is None:
+            base_a = cost.new_full((num_query, query_tokens), 1.0 / float(query_tokens))
+            a = base_a.unsqueeze(1).expand(-1, num_way, -1)
+            if self.uses_unbalanced_transport:
+                a = a * rho.unsqueeze(-1)
+        else:
+            if tuple(a.shape) != (num_query, num_way, query_tokens):
+                raise ValueError(
+                    "a must have shape (NumQuery, NumPairs, QueryTokens), "
+                    f"got {tuple(a.shape)}"
+                )
+            a = a.to(device=cost.device, dtype=cost.dtype)
 
-        if self.uses_unbalanced_transport:
-            a = a * rho.unsqueeze(-1)
-            b = b * rho.unsqueeze(-1)
+        if b is None:
+            base_b = cost.new_full((num_way, class_tokens), 1.0 / float(class_tokens))
+            b = base_b.unsqueeze(0).expand(num_query, -1, -1)
+            if self.uses_unbalanced_transport:
+                b = b * rho.unsqueeze(-1)
+        else:
+            if tuple(b.shape) != (num_query, num_way, class_tokens):
+                raise ValueError(
+                    "b must have shape (NumQuery, NumPairs, SupportTokens), "
+                    f"got {tuple(b.shape)}"
+                )
+            b = b.to(device=cost.device, dtype=cost.dtype)
 
         pair_cost = cost.reshape(num_query * num_way, query_tokens, class_tokens)
         pair_a = a.reshape(num_query * num_way, query_tokens)
@@ -734,101 +684,6 @@ class HROTFSL(BaseConv64FewShotModel):
         transport_cost = pair_transport_cost.reshape(num_query, num_way)
         transport_mass = pair_transport_mass.reshape(num_query, num_way)
         return plan, transport_cost, transport_mass
-
-    def _transport_match_weighted(
-        self,
-        cost: torch.Tensor,
-        source_mass: torch.Tensor,
-        target_mass: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_query, num_way, query_tokens, class_tokens = cost.shape
-        if tuple(source_mass.shape) != (num_query, num_way, query_tokens):
-            raise ValueError(
-                "source_mass must have shape (NumQuery, NumPairs, QueryTokens), "
-                f"got {tuple(source_mass.shape)}"
-            )
-        if tuple(target_mass.shape) != (num_query, num_way, class_tokens):
-            raise ValueError(
-                "target_mass must have shape (NumQuery, NumPairs, SupportTokens), "
-                f"got {tuple(target_mass.shape)}"
-            )
-
-        pair_cost = cost.reshape(num_query * num_way, query_tokens, class_tokens)
-        pair_a = source_mass.reshape(num_query * num_way, query_tokens).clamp_min(self.eps)
-        pair_b = target_mass.reshape(num_query * num_way, class_tokens).clamp_min(self.eps)
-
-        if self.ot_backend == "pot":
-            pair_plan = sinkhorn_unbalanced_pot(
-                pair_cost,
-                pair_a,
-                pair_b,
-                tau_q=self.tau_q,
-                tau_c=self.tau_c,
-                eps=self.sinkhorn_epsilon,
-                max_iter=self.sinkhorn_iterations,
-                tol=self.sinkhorn_tolerance,
-            )
-        else:
-            pair_plan = sinkhorn_unbalanced_log(
-                pair_cost,
-                pair_a,
-                pair_b,
-                tau_q=self.tau_q,
-                tau_c=self.tau_c,
-                eps=self.sinkhorn_epsilon,
-                max_iter=self.sinkhorn_iterations,
-                tol=self.sinkhorn_tolerance,
-            )
-
-        pair_transport_cost = compute_transport_cost(pair_plan, pair_cost)
-        pair_transport_mass = compute_transported_mass(pair_plan)
-        plan = pair_plan.reshape(num_query, num_way, query_tokens, class_tokens)
-        transport_cost = pair_transport_cost.reshape(num_query, num_way)
-        transport_mass = pair_transport_mass.reshape(num_query, num_way)
-        return plan, transport_cost, transport_mass
-
-    def _build_reliability_evidence_outputs(
-        self,
-        shot_transport_cost: torch.Tensor,
-        shot_transport_mass: torch.Tensor,
-        shot_rho: torch.Tensor,
-        shot_geodesic_distance: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        if self.shot_reliability_gate is None:
-            raise RuntimeError("Reliability-calibrated evidence UOT requires a shot reliability gate")
-
-        normalized_cost = shot_transport_cost / shot_transport_mass.clamp_min(self.eps)
-        transported_similarity = 1.0 - normalized_cost
-        mass_reward = self._mass_reward_weight(shot_transport_mass)
-        shot_logits = self.score_scale * transported_similarity + mass_reward * torch.log(
-            shot_transport_mass.clamp_min(self.eps)
-        )
-        reliability_features = torch.stack(
-            [
-                transported_similarity,
-                shot_transport_mass,
-                shot_rho,
-                -shot_geodesic_distance.to(dtype=shot_transport_mass.dtype),
-            ],
-            dim=-1,
-        )
-        network_dtype = self.shot_reliability_gate[0].weight.dtype
-        shot_reliability_logits = self.shot_reliability_gate(reliability_features.to(dtype=network_dtype)).squeeze(-1)
-        shot_reliability_logits = shot_reliability_logits.to(dtype=shot_logits.dtype)
-        shot_aggregation_weights = torch.softmax(shot_reliability_logits, dim=-1)
-        logits = (shot_aggregation_weights * shot_logits).sum(dim=-1)
-        transport_cost = (shot_aggregation_weights * shot_transport_cost).sum(dim=-1)
-        transport_mass = (shot_aggregation_weights * shot_transport_mass).sum(dim=-1)
-        return {
-            "logits": logits,
-            "transport_cost": transport_cost,
-            "transport_mass": transport_mass,
-            "shot_logits": shot_logits,
-            "shot_normalized_transport_cost": normalized_cost,
-            "shot_transported_similarity": transported_similarity,
-            "shot_reliability_logits": shot_reliability_logits,
-            "shot_aggregation_weights": shot_aggregation_weights,
-        }
 
     def _rho_rank_loss(
         self,
@@ -909,89 +764,52 @@ class HROTFSL(BaseConv64FewShotModel):
                 support_hyperbolic.shape[-2],
                 support_hyperbolic.shape[-1],
             )
-            if self.uses_reliability_calibrated_evidence_uot:
-                flat_cost = self._cosine_cost(query_euclidean, flat_support_euclidean)
-                query_token_mass, support_token_mass, shot_rho, geodesic_features = (
-                    self._build_reliability_evidence_masses(
-                        query_euclidean,
-                        support_euclidean,
-                        query_hyperbolic,
-                        support_hyperbolic,
-                    )
-                )
+            if self.uses_hyperbolic_token_attention:
+                flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+                geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
                 shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
-                flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match_weighted(
+                shot_rho = self.eam.forward_features(geodesic_features)
+                shot_rho = self._normalize_rho_budget(shot_rho).to(dtype=query_hyperbolic.dtype)
+                flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+                query_token_mass, support_token_mass = self._compute_hyperbolic_token_marginals(
+                    query_hyperbolic,
+                    flat_support_hyperbolic,
+                    flat_rho,
+                )
+                flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match(
                     flat_cost,
-                    query_token_mass.reshape(query.shape[0], way_num * shot_num, query_token_mass.shape[-1]),
-                    support_token_mass.reshape(query.shape[0], way_num * shot_num, support_token_mass.shape[-1]),
+                    flat_rho,
+                    a=query_token_mass,
+                    b=support_token_mass,
                 )
 
                 shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
                 shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
-                evidence_outputs = self._build_reliability_evidence_outputs(
-                    shot_transport_cost,
-                    shot_transport_mass,
-                    shot_rho,
-                    shot_geodesic_distance,
-                )
-                base_flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
-                base_flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
-                base_plan, base_flat_transport_cost, base_flat_transport_mass = self._transport_match(
-                    base_flat_cost,
-                    base_flat_rho,
-                )
-                base_shot_transport_cost = base_flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
-                base_shot_transport_mass = base_flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
-                base_shot_logits = (
-                    -self.score_scale * base_shot_transport_cost
-                    + self._mass_reward_weight(base_shot_transport_cost) * base_shot_transport_mass
-                )
-                base_logits = (evidence_outputs["shot_aggregation_weights"] * base_shot_logits).sum(dim=-1)
-                evidence_logits = evidence_outputs["logits"]
-                evidence_residual = evidence_logits - evidence_logits.mean(dim=-1, keepdim=True)
-                evidence_residual_weight = self._evidence_residual_weight(evidence_logits)
-                logits = base_logits + evidence_residual_weight * evidence_residual
-                transport_cost = evidence_outputs["transport_cost"]
-                transport_mass = evidence_outputs["transport_mass"]
+                shot_logits = -self.score_scale * shot_transport_cost
+                if self.uses_unbalanced_transport:
+                    shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
+
+                logits = shot_logits.mean(dim=-1)
+                transport_cost = shot_transport_cost.mean(dim=-1)
+                transport_mass = shot_transport_mass.mean(dim=-1)
                 rho = shot_rho
                 cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
                 plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
                 transport_probe_payload = {
-                    "query_token_mass": query_token_mass,
-                    "support_token_mass": support_token_mass,
-                    "base_transport_plan": base_plan.reshape(
+                    "query_token_mass": query_token_mass.reshape(
                         query.shape[0],
                         way_num,
                         shot_num,
-                        base_plan.shape[-2],
-                        base_plan.shape[-1],
+                        query_token_mass.shape[-1],
                     ),
-                    "base_cost_matrix": base_flat_cost.reshape(
+                    "support_token_mass": support_token_mass.reshape(
                         query.shape[0],
                         way_num,
                         shot_num,
-                        base_flat_cost.shape[-2],
-                        base_flat_cost.shape[-1],
+                        support_token_mass.shape[-1],
                     ),
-                    "base_shot_transport_cost": base_shot_transport_cost,
-                    "base_shot_transported_mass": base_shot_transport_mass,
-                    "base_shot_logits": base_shot_logits,
-                    "base_logits": base_logits,
-                    "evidence_logits": evidence_logits,
-                    "evidence_residual": evidence_residual,
-                    "evidence_residual_weight": evidence_residual_weight.detach(),
-                    **{
-                        key: value
-                        for key, value in evidence_outputs.items()
-                        if key
-                        in {
-                            "shot_logits",
-                            "shot_normalized_transport_cost",
-                            "shot_transported_similarity",
-                            "shot_reliability_logits",
-                            "shot_aggregation_weights",
-                        }
-                    },
+                    "shot_logits": shot_logits,
+                    "token_temperature": self.token_temperature.detach().to(device=logits.device, dtype=logits.dtype),
                 }
             else:
                 flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
@@ -1169,25 +987,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "query_token_mass",
             "support_token_mass",
             "shot_logits",
-            "shot_normalized_transport_cost",
-            "shot_transported_similarity",
-            "shot_reliability_logits",
-            "shot_aggregation_weights",
-            "base_transport_plan",
-            "base_cost_matrix",
-            "base_shot_transport_cost",
-            "base_shot_transported_mass",
-            "base_shot_logits",
-            "base_logits",
-            "evidence_logits",
-            "evidence_residual",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
-        if "evidence_residual_weight" in batch_outputs[0]:
-            stacked["evidence_residual_weight"] = torch.stack(
-                [item["evidence_residual_weight"] for item in batch_outputs]
-            ).mean()
+        if "token_temperature" in batch_outputs[0]:
+            stacked["token_temperature"] = torch.stack([item["token_temperature"] for item in batch_outputs]).mean()
         if "transport_plan" in batch_outputs[0]:
             stacked["transport_plan"] = torch.cat([item["transport_plan"] for item in batch_outputs], dim=0)
             stacked["cost_matrix"] = torch.cat([item["cost_matrix"] for item in batch_outputs], dim=0)

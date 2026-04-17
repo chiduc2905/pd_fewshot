@@ -30,6 +30,7 @@ def _build_model(**overrides) -> HROTFSL:
         eam_hidden_dim=32,
         curvature_init=1.0,
         projection_scale=0.1,
+        token_temperature=0.1,
         score_scale=8.0,
         tau_q=0.5,
         tau_c=0.5,
@@ -600,9 +601,9 @@ def test_hrot_fsl_variant_o_uses_transport_aware_geodesic_eam():
     assert torch.isfinite(outputs["transport_probe_min_cost"]).all()
 
 
-def test_hrot_fsl_variant_p_uses_reliability_calibrated_evidence_uot():
+def test_hrot_fsl_variant_p_uses_hyperbolic_attentive_uot_marginals():
     torch.manual_seed(24)
-    model = _build_model(variant="P")
+    model = _build_model(variant="P", token_temperature=0.2)
     model.eval()
 
     query = torch.randn(1, 2, 3, 64, 64)
@@ -612,67 +613,62 @@ def test_hrot_fsl_variant_p_uses_reliability_calibrated_evidence_uot():
         outputs = model(query, support, return_aux=True)
 
     flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
-    expected_cost = model._cosine_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
     expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
-    expected_transport_cost = (
-        outputs["shot_aggregation_weights"] * outputs["shot_transport_cost"]
-    ).sum(dim=-1)
-    expected_transport_mass = (
-        outputs["shot_aggregation_weights"] * outputs["shot_transported_mass"]
-    ).sum(dim=-1)
+    flat_support_hyp = outputs["support_hyperbolic_tokens"].squeeze(0).reshape(6, -1, 24)
+    flat_rho = outputs["shot_rho"].reshape(2, 6)
+    expected_query_mass, expected_support_mass = model._compute_hyperbolic_token_marginals(
+        outputs["query_hyperbolic_tokens"],
+        flat_support_hyp,
+        flat_rho,
+    )
+    expected_query_mass = expected_query_mass.reshape_as(outputs["query_token_mass"])
+    expected_support_mass = expected_support_mass.reshape_as(outputs["support_token_mass"])
     mass_reward = (model.score_scale * model.transport_cost_threshold.detach()).to(
-        dtype=outputs["shot_transported_similarity"].dtype
+        dtype=outputs["shot_transported_mass"].dtype
     )
-    expected_shot_logits = (
-        model.score_scale * outputs["shot_transported_similarity"]
-        + mass_reward * torch.log(outputs["shot_transported_mass"].clamp_min(model.eps))
+    expected_shot_logits = -model.score_scale * outputs["shot_transport_cost"] + (
+        mass_reward * outputs["shot_transported_mass"]
     )
-    expected_base_shot_logits = (
-        -model.score_scale * outputs["base_shot_transport_cost"]
-        + mass_reward * outputs["base_shot_transported_mass"]
-    )
-    expected_base_logits = (outputs["shot_aggregation_weights"] * expected_base_shot_logits).sum(dim=-1)
-    expected_evidence_residual = outputs["evidence_logits"] - outputs["evidence_logits"].mean(dim=-1, keepdim=True)
-    expected_logits = expected_base_logits + outputs["evidence_residual_weight"] * expected_evidence_residual
+    expected_logits = expected_shot_logits.mean(dim=-1)
 
     assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["query_token_mass"], expected_query_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["support_token_mass"], expected_support_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["query_token_mass"].sum(dim=-1), outputs["shot_rho"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["support_token_mass"].sum(dim=-1), outputs["shot_rho"], atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(outputs["base_shot_logits"], expected_base_shot_logits, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(outputs["base_logits"], expected_base_logits, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(outputs["evidence_residual"], expected_evidence_residual, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transport_cost"], outputs["shot_transport_cost"].mean(dim=-1), atol=1e-5, rtol=1e-5)
     assert torch.allclose(
-        outputs["shot_aggregation_weights"].sum(dim=-1),
-        torch.ones_like(outputs["logits"]),
-        atol=1e-6,
-        rtol=0.0,
+        outputs["transported_mass"],
+        outputs["shot_transported_mass"].mean(dim=-1),
+        atol=1e-5,
+        rtol=1e-5,
     )
-    assert model.uses_reliability_calibrated_evidence_uot
+    uniform_query_mass = outputs["shot_rho"].unsqueeze(-1) / outputs["query_token_mass"].shape[-1]
+    uniform_support_mass = outputs["shot_rho"].unsqueeze(-1) / outputs["support_token_mass"].shape[-1]
+    assert not torch.allclose(outputs["query_token_mass"], uniform_query_mass, atol=1e-4, rtol=1e-4)
+    assert not torch.allclose(outputs["support_token_mass"], uniform_support_mass, atol=1e-4, rtol=1e-4)
+    assert model.uses_hyperbolic_token_attention
+    assert not model.uses_hyperbolic_geometry
     assert model.uses_geodesic_eam
     assert model.uses_cost_threshold_score
     assert model.uses_unbalanced_transport
     assert model.uses_shot_decomposed_transport
     assert model.mass_bonus is None
     assert model.raw_transport_cost_threshold is not None
-    assert model.raw_evidence_residual_weight is not None
-    assert model.query_survival_gate is not None
-    assert model.support_survival_gate is not None
-    assert model.shot_reliability_gate is not None
+    assert model.raw_token_temperature is not None
+    assert outputs["token_temperature"].item() > 0.0
     assert outputs["query_token_mass"].shape[:3] == (2, 3, 2)
     assert outputs["support_token_mass"].shape[:3] == (2, 3, 2)
     assert outputs["query_token_mass"].shape[-1] == outputs["cost_matrix"].shape[-2]
     assert outputs["support_token_mass"].shape[-1] == outputs["cost_matrix"].shape[-1]
-    assert outputs["base_cost_matrix"].shape == outputs["cost_matrix"].shape
-    assert outputs["base_transport_plan"].shape == outputs["transport_plan"].shape
     assert torch.all(outputs["query_token_mass"] > 0.0)
     assert torch.all(outputs["support_token_mass"] > 0.0)
-    assert torch.isfinite(outputs["shot_reliability_logits"]).all()
-    assert 0.0 < outputs["evidence_residual_weight"].item() < 1.0
 
 
-def test_hrot_fsl_variant_p_backpropagates_survival_and_shot_reliability():
+def test_hrot_fsl_variant_p_backpropagates_token_attention_and_geodesic_eam():
     torch.manual_seed(25)
     model = _build_model(variant="P", lambda_rho=0.1)
     model.train()
@@ -686,21 +682,14 @@ def test_hrot_fsl_variant_p_backpropagates_survival_and_shot_reliability():
     model.zero_grad(set_to_none=True)
     loss.backward()
 
-    assert model.query_survival_gate[-2].bias.grad is not None
-    assert model.support_survival_gate[-2].bias.grad is not None
-    assert model.shot_reliability_gate[-1].weight.grad is not None
     assert model.eam.network[-2].weight.grad is not None
     assert model.raw_transport_cost_threshold.grad is not None
-    assert model.raw_evidence_residual_weight.grad is not None
-    assert torch.isfinite(model.query_survival_gate[-2].bias.grad).all()
-    assert torch.isfinite(model.support_survival_gate[-2].bias.grad).all()
-    assert torch.isfinite(model.shot_reliability_gate[-1].weight.grad).all()
+    assert model.raw_token_temperature.grad is not None
+    assert torch.isfinite(model.raw_token_temperature.grad).all()
     assert torch.isfinite(model.raw_transport_cost_threshold.grad).all()
-    assert torch.isfinite(model.raw_evidence_residual_weight.grad).all()
-    assert model.query_survival_gate[-2].bias.grad.abs().sum().item() > 0.0
-    assert model.support_survival_gate[-2].bias.grad.abs().sum().item() > 0.0
-    assert model.shot_reliability_gate[-1].weight.grad.abs().sum().item() > 0.0
-    assert model.raw_evidence_residual_weight.grad.abs().sum().item() > 0.0
+    assert torch.isfinite(model.eam.network[-2].weight.grad).all()
+    assert model.raw_token_temperature.grad.abs().sum().item() > 0.0
+    assert model.eam.network[-2].weight.grad.abs().sum().item() > 0.0
 
 
 def test_hrot_fsl_normalize_rho_keeps_episode_budget_mean():
@@ -808,6 +797,7 @@ def test_hrot_fsl_model_factory_builds_and_runs():
         hrot_eam_hidden_dim=32,
         hrot_curvature_init=1.0,
         hrot_projection_scale=0.1,
+        hrot_token_temperature=0.1,
         hrot_score_scale=8.0,
         hrot_tau_q=0.5,
         hrot_tau_c=0.5,

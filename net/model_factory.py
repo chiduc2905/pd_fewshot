@@ -1754,6 +1754,7 @@ def build_model_from_args(args):
             eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
             curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
             projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),
+            token_temperature=float(getattr(args, "hrot_token_temperature", 0.1)),
             score_scale=float(getattr(args, "hrot_score_scale", 16.0)),
             tau_q=float(getattr(args, "hrot_tau_q", 0.5)),
             tau_c=float(getattr(args, "hrot_tau_c", 0.5)),
