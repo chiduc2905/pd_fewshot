@@ -94,7 +94,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = str(variant).upper()
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
@@ -117,18 +117,19 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P"}
-        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}
+        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P", "Q"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant == "P"
+        self.uses_noise_calibrated_transport = variant == "Q"
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
@@ -197,9 +198,33 @@ class HROTFSL(BaseConv64FewShotModel):
             self.reduced_geodesic_eam = None
         self.raw_token_temperature = (
             nn.Parameter(torch.tensor(_inverse_softplus(float(token_temperature)), dtype=torch.float32))
-            if self.uses_hyperbolic_token_attention
+            if self.uses_hyperbolic_token_attention or self.uses_noise_calibrated_transport
             else None
         )
+        if self.uses_noise_calibrated_transport:
+            self.query_reliability_weights = nn.Parameter(
+                torch.tensor([1.0, -1.0, -0.5, -0.5], dtype=torch.float32)
+            )
+            self.support_reliability_weights = nn.Parameter(
+                torch.tensor([1.0, -1.0, -0.5, -0.5], dtype=torch.float32)
+            )
+            self.raw_token_reliability_mix = nn.Parameter(torch.tensor(-2.0, dtype=torch.float32))
+            self.raw_support_consensus_mix = nn.Parameter(torch.tensor(-2.0, dtype=torch.float32))
+            self.raw_consensus_temperature = nn.Parameter(
+                torch.tensor(_inverse_softplus(float(token_temperature)), dtype=torch.float32)
+            )
+            self.raw_noise_sink_cost = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
+            self.raw_shot_pool_temperature = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
+            self.raw_shot_pool_mix = nn.Parameter(torch.tensor(-2.0, dtype=torch.float32))
+        else:
+            self.query_reliability_weights = None
+            self.support_reliability_weights = None
+            self.raw_token_reliability_mix = None
+            self.raw_support_consensus_mix = None
+            self.raw_consensus_temperature = None
+            self.raw_noise_sink_cost = None
+            self.raw_shot_pool_temperature = None
+            self.raw_shot_pool_mix = None
         if self.uses_cost_threshold_score:
             threshold_init = (
                 float(transport_cost_threshold_init)
@@ -251,6 +276,42 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_token_temperature is not None:
             return F.softplus(self.raw_token_temperature).clamp_min(self.eps)
         return self.curvature.new_tensor(self.default_token_temperature)
+
+    @property
+    def consensus_temperature(self) -> torch.Tensor:
+        if self.raw_consensus_temperature is not None:
+            return F.softplus(self.raw_consensus_temperature).clamp_min(self.eps)
+        return self.token_temperature
+
+    @property
+    def token_reliability_mix(self) -> torch.Tensor:
+        if self.raw_token_reliability_mix is None:
+            return self.curvature.new_tensor(0.0)
+        return torch.sigmoid(self.raw_token_reliability_mix)
+
+    @property
+    def support_consensus_mix(self) -> torch.Tensor:
+        if self.raw_support_consensus_mix is None:
+            return self.curvature.new_tensor(0.0)
+        return torch.sigmoid(self.raw_support_consensus_mix)
+
+    @property
+    def noise_sink_cost(self) -> torch.Tensor:
+        if self.raw_noise_sink_cost is None:
+            return self.curvature.new_tensor(1.0)
+        return F.softplus(self.raw_noise_sink_cost).clamp_min(self.eps)
+
+    @property
+    def shot_pool_temperature(self) -> torch.Tensor:
+        if self.raw_shot_pool_temperature is None:
+            return self.curvature.new_tensor(1.0)
+        return F.softplus(self.raw_shot_pool_temperature).clamp_min(self.eps)
+
+    @property
+    def shot_pool_mix(self) -> torch.Tensor:
+        if self.raw_shot_pool_mix is None:
+            return self.curvature.new_tensor(0.0)
+        return torch.sigmoid(self.raw_shot_pool_mix)
 
     def _mass_reward_weight(self, reference: torch.Tensor) -> torch.Tensor:
         if self.raw_transport_cost_threshold is not None:
@@ -550,6 +611,183 @@ class HROTFSL(BaseConv64FewShotModel):
         rho = self._normalize_rho_budget(rho)
         return rho.to(dtype=query_tokens_hyp.dtype), features, probe_payload
 
+    def _standardize_over_tokens(self, values: torch.Tensor) -> torch.Tensor:
+        mean = values.mean(dim=-2, keepdim=True)
+        std = values.std(dim=-2, keepdim=True, unbiased=False).clamp_min(self.eps)
+        return (values - mean) / std
+
+    def _build_probe_token_features(
+        self,
+        flat_cost: torch.Tensor,
+        flat_rho: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        with torch.no_grad():
+            probe_plan, probe_cost, probe_mass = self._transport_match(flat_cost.detach(), flat_rho.detach())
+            plan_mass = probe_plan.sum(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+
+            row_mass = probe_plan.sum(dim=-1)
+            row_cost = (probe_plan * flat_cost.detach()).sum(dim=-1) / row_mass.clamp_min(self.eps)
+            row_prob = probe_plan / row_mass.unsqueeze(-1).clamp_min(self.eps)
+            row_entropy = -(row_prob * row_prob.clamp_min(self.eps).log()).sum(dim=-1)
+            row_entropy = row_entropy / math.log(float(max(2, flat_cost.shape[-1])))
+            row_min_cost = flat_cost.detach().amin(dim=-1)
+            row_mass_share = row_mass / plan_mass.squeeze(-1) * float(flat_cost.shape[-2])
+
+            col_mass = probe_plan.sum(dim=-2)
+            col_cost = (probe_plan * flat_cost.detach()).sum(dim=-2) / col_mass.clamp_min(self.eps)
+            col_prob = probe_plan / col_mass.unsqueeze(-2).clamp_min(self.eps)
+            col_entropy = -(col_prob * col_prob.clamp_min(self.eps).log()).sum(dim=-2)
+            col_entropy = col_entropy / math.log(float(max(2, flat_cost.shape[-2])))
+            col_min_cost = flat_cost.detach().amin(dim=-2)
+            col_mass_share = col_mass / plan_mass.squeeze(-2) * float(flat_cost.shape[-1])
+
+            query_features = torch.stack(
+                [
+                    row_mass_share.clamp_min(self.eps).log(),
+                    row_cost,
+                    row_entropy,
+                    row_min_cost,
+                ],
+                dim=-1,
+            )
+            support_features = torch.stack(
+                [
+                    col_mass_share.clamp_min(self.eps).log(),
+                    col_cost,
+                    col_entropy,
+                    col_min_cost,
+                ],
+                dim=-1,
+            )
+
+            query_features = self._standardize_over_tokens(query_features)
+            support_features = self._standardize_over_tokens(support_features)
+            plan_prob = probe_plan / plan_mass
+            probe_entropy = -(plan_prob * plan_prob.clamp_min(self.eps).log()).sum(dim=(-1, -2))
+            probe_entropy = probe_entropy / math.log(float(max(2, flat_cost.shape[-2] * flat_cost.shape[-1])))
+            probe_min_cost = flat_cost.detach().amin(dim=(-1, -2))
+
+        payload = {
+            "transport_probe_cost": probe_cost,
+            "transport_probe_mass": probe_mass,
+            "transport_probe_entropy": probe_entropy,
+            "transport_probe_min_cost": probe_min_cost,
+        }
+        return query_features.to(dtype=flat_cost.dtype), support_features.to(dtype=flat_cost.dtype), payload
+
+    def _build_support_consensus_scores(self, support_tokens_euc: torch.Tensor) -> torch.Tensor:
+        way_num, shot_num, token_num, _ = support_tokens_euc.shape
+        if shot_num <= 1:
+            return support_tokens_euc.new_zeros(way_num, shot_num, token_num)
+
+        pair_cost = (
+            support_tokens_euc[:, :, None, :, None, :] - support_tokens_euc[:, None, :, None, :, :]
+        ).pow(2).sum(dim=-1)
+        nearest_other = pair_cost.amin(dim=-1)
+        shot_mask = ~torch.eye(shot_num, device=support_tokens_euc.device, dtype=torch.bool)
+        nearest_other = nearest_other.masked_fill(~shot_mask[None, :, :, None], 0.0)
+        mean_nearest = nearest_other.sum(dim=2) / float(shot_num - 1)
+        temperature = self.consensus_temperature.to(device=support_tokens_euc.device, dtype=support_tokens_euc.dtype)
+        scores = -mean_nearest / temperature
+        return self._standardize_over_tokens(scores.unsqueeze(-1)).squeeze(-1)
+
+    def _compute_noise_calibrated_token_marginals(
+        self,
+        flat_cost: torch.Tensor,
+        flat_rho: torch.Tensor,
+        support_tokens_euc: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        if self.query_reliability_weights is None or self.support_reliability_weights is None:
+            raise RuntimeError("Noise-calibrated transport requires reliability weights")
+
+        way_num, shot_num = support_tokens_euc.shape[:2]
+        query_features, support_features, payload = self._build_probe_token_features(flat_cost, flat_rho)
+        query_logits = torch.einsum(
+            "qstf,f->qst",
+            query_features,
+            self.query_reliability_weights.to(device=flat_cost.device, dtype=flat_cost.dtype),
+        )
+        support_logits = torch.einsum(
+            "qstf,f->qst",
+            support_features,
+            self.support_reliability_weights.to(device=flat_cost.device, dtype=flat_cost.dtype),
+        )
+
+        support_consensus = self._build_support_consensus_scores(support_tokens_euc)
+        flat_consensus = support_consensus.reshape(way_num * shot_num, support_consensus.shape[-1])
+        flat_consensus = flat_consensus.unsqueeze(0).expand(flat_cost.shape[0], -1, -1)
+        consensus_mix = self.support_consensus_mix.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        support_logits = support_logits + consensus_mix * flat_consensus
+
+        temperature = self.token_temperature.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        query_attn = torch.softmax(query_logits / temperature, dim=-1)
+        support_attn = torch.softmax(support_logits / temperature, dim=-1)
+        query_uniform = flat_cost.new_full(query_attn.shape, 1.0 / float(query_attn.shape[-1]))
+        support_uniform = flat_cost.new_full(support_attn.shape, 1.0 / float(support_attn.shape[-1]))
+        reliability_mix = self.token_reliability_mix.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        query_weights = (1.0 - reliability_mix) * query_uniform + reliability_mix * query_attn
+        support_weights = (1.0 - reliability_mix) * support_uniform + reliability_mix * support_attn
+
+        query_mass = query_weights * flat_rho.unsqueeze(-1).to(dtype=query_weights.dtype)
+        support_mass = support_weights * flat_rho.unsqueeze(-1).to(dtype=support_weights.dtype)
+        payload.update(
+            {
+                "probe_query_reliability": query_weights,
+                "probe_support_reliability": support_weights,
+                "support_consensus": flat_consensus,
+            }
+        )
+        return query_mass, support_mass, payload
+
+    def _append_noise_sink(
+        self,
+        flat_cost: torch.Tensor,
+        query_mass: torch.Tensor,
+        support_mass: torch.Tensor,
+        flat_rho: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        sink_cost = self.noise_sink_cost.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        cost_with_sink = sink_cost.expand(
+            flat_cost.shape[0],
+            flat_cost.shape[1],
+            flat_cost.shape[2] + 1,
+            flat_cost.shape[3] + 1,
+        ).clone()
+        cost_with_sink[..., :-1, :-1] = flat_cost
+        cost_with_sink[..., -1, -1] = 0.0
+
+        sink_mass = (1.0 - flat_rho).clamp_min(self.eps).to(device=flat_cost.device, dtype=flat_cost.dtype)
+        query_mass_with_sink = torch.cat([query_mass, sink_mass.unsqueeze(-1)], dim=-1)
+        support_mass_with_sink = torch.cat([support_mass, sink_mass.unsqueeze(-1)], dim=-1)
+        return cost_with_sink, query_mass_with_sink, support_mass_with_sink
+
+    def _pool_shot_scores(
+        self,
+        shot_logits: torch.Tensor,
+        shot_transport_cost: torch.Tensor,
+        shot_transport_mass: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        shot_num = shot_logits.shape[-1]
+        if shot_num == 1:
+            weights = torch.ones_like(shot_logits)
+        else:
+            evidence = shot_logits / float(self.score_scale)
+            evidence = (evidence - evidence.mean(dim=-1, keepdim=True)) / evidence.std(
+                dim=-1,
+                keepdim=True,
+                unbiased=False,
+            ).clamp_min(self.eps)
+            temperature = self.shot_pool_temperature.to(device=shot_logits.device, dtype=shot_logits.dtype)
+            attentive = torch.softmax(evidence / temperature, dim=-1)
+            uniform = torch.full_like(attentive, 1.0 / float(shot_num))
+            mix = self.shot_pool_mix.to(device=shot_logits.device, dtype=shot_logits.dtype)
+            weights = (1.0 - mix) * uniform + mix * attentive
+
+        logits = (weights * shot_logits).sum(dim=-1)
+        transport_cost = (weights * shot_transport_cost).sum(dim=-1)
+        transport_mass = (weights * shot_transport_mass).sum(dim=-1)
+        return logits, transport_cost, transport_mass, weights
+
     def _compute_hyperbolic_token_marginals(
         self,
         query_tokens_hyp: torch.Tensor,
@@ -764,7 +1002,141 @@ class HROTFSL(BaseConv64FewShotModel):
                 support_hyperbolic.shape[-2],
                 support_hyperbolic.shape[-1],
             )
-            if self.uses_hyperbolic_token_attention:
+            if self.uses_noise_calibrated_transport:
+                flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+                geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
+                shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
+                shot_rho = self.eam.forward_features(geodesic_features)
+                shot_rho = self._normalize_rho_budget(shot_rho).to(dtype=query_hyperbolic.dtype)
+                flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+
+                query_token_mass, support_token_mass, transport_probe_payload = (
+                    self._compute_noise_calibrated_token_marginals(
+                        flat_cost,
+                        flat_rho,
+                        support_euclidean,
+                    )
+                )
+                cost_with_sink, query_mass_with_sink, support_mass_with_sink = self._append_noise_sink(
+                    flat_cost,
+                    query_token_mass,
+                    support_token_mass,
+                    flat_rho,
+                )
+                flat_plan_with_sink, _, _ = self._transport_match(
+                    cost_with_sink,
+                    flat_rho,
+                    a=query_mass_with_sink,
+                    b=support_mass_with_sink,
+                )
+                flat_plan = flat_plan_with_sink[..., :-1, :-1]
+                flat_transport_cost = compute_transport_cost(flat_plan, flat_cost)
+                flat_transport_mass = compute_transported_mass(flat_plan)
+
+                shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
+                shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
+                shot_logits = -self.score_scale * shot_transport_cost
+                if self.uses_unbalanced_transport:
+                    shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
+
+                logits, transport_cost, transport_mass, shot_pool_weights = self._pool_shot_scores(
+                    shot_logits,
+                    shot_transport_cost,
+                    shot_transport_mass,
+                )
+                rho = shot_rho
+                cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
+                plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
+                transport_probe_payload.update(
+                    {
+                        "transport_probe_cost": transport_probe_payload["transport_probe_cost"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "transport_probe_mass": transport_probe_payload["transport_probe_mass"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "transport_probe_entropy": transport_probe_payload["transport_probe_entropy"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "transport_probe_min_cost": transport_probe_payload["transport_probe_min_cost"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "query_token_mass": query_token_mass.reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            query_token_mass.shape[-1],
+                        ),
+                        "support_token_mass": support_token_mass.reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            support_token_mass.shape[-1],
+                        ),
+                        "probe_query_reliability": transport_probe_payload["probe_query_reliability"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            query_token_mass.shape[-1],
+                        ),
+                        "probe_support_reliability": transport_probe_payload["probe_support_reliability"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            support_token_mass.shape[-1],
+                        ),
+                        "support_consensus": transport_probe_payload["support_consensus"].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            support_token_mass.shape[-1],
+                        ),
+                        "shot_logits": shot_logits,
+                        "shot_pool_weights": shot_pool_weights,
+                        "noise_sink_query_mass": flat_plan_with_sink[..., :-1, -1].sum(dim=-1).reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "noise_sink_support_mass": flat_plan_with_sink[..., -1, :-1].sum(dim=-1).reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "noise_sink_self_mass": flat_plan_with_sink[..., -1, -1].reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                        ),
+                        "token_temperature": self.token_temperature.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
+                        "token_reliability_mix": self.token_reliability_mix.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
+                        "support_consensus_mix": self.support_consensus_mix.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
+                        "noise_sink_cost": self.noise_sink_cost.detach().to(device=logits.device, dtype=logits.dtype),
+                        "shot_pool_temperature": self.shot_pool_temperature.detach().to(
+                            device=logits.device,
+                            dtype=logits.dtype,
+                        ),
+                        "shot_pool_mix": self.shot_pool_mix.detach().to(device=logits.device, dtype=logits.dtype),
+                    }
+                )
+            elif self.uses_hyperbolic_token_attention:
                 flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
                 geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
                 shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
@@ -986,12 +1358,27 @@ class HROTFSL(BaseConv64FewShotModel):
         for key in (
             "query_token_mass",
             "support_token_mass",
+            "probe_query_reliability",
+            "probe_support_reliability",
+            "support_consensus",
             "shot_logits",
+            "shot_pool_weights",
+            "noise_sink_query_mass",
+            "noise_sink_support_mass",
+            "noise_sink_self_mass",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
-        if "token_temperature" in batch_outputs[0]:
-            stacked["token_temperature"] = torch.stack([item["token_temperature"] for item in batch_outputs]).mean()
+        for key in (
+            "token_temperature",
+            "token_reliability_mix",
+            "support_consensus_mix",
+            "noise_sink_cost",
+            "shot_pool_temperature",
+            "shot_pool_mix",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
         if "transport_plan" in batch_outputs[0]:
             stacked["transport_plan"] = torch.cat([item["transport_plan"] for item in batch_outputs], dim=0)
             stacked["cost_matrix"] = torch.cat([item["cost_matrix"] for item in batch_outputs], dim=0)

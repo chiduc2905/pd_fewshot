@@ -139,7 +139,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -156,7 +156,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["total_distance"].shape == (2, 3)
     assert outputs["transport_cost"].shape == (2, 3)
     assert outputs["transported_mass"].shape == (2, 3)
-    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P"}:
+    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -692,6 +692,117 @@ def test_hrot_fsl_variant_p_backpropagates_token_attention_and_geodesic_eam():
     assert model.eam.network[-2].weight.grad.abs().sum().item() > 0.0
 
 
+def test_hrot_fsl_variant_q_uses_noise_calibrated_hierarchical_uot():
+    torch.manual_seed(26)
+    model = _build_model(variant="Q", token_temperature=0.2)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
+    mass_reward = (model.score_scale * model.transport_cost_threshold.detach()).to(
+        dtype=outputs["shot_transported_mass"].dtype
+    )
+    expected_shot_logits = -model.score_scale * outputs["shot_transport_cost"] + (
+        mass_reward * outputs["shot_transported_mass"]
+    )
+    expected_logits = (outputs["shot_pool_weights"] * expected_shot_logits).sum(dim=-1)
+    expected_transport_cost = (outputs["shot_pool_weights"] * outputs["shot_transport_cost"]).sum(dim=-1)
+    expected_transport_mass = (outputs["shot_pool_weights"] * outputs["shot_transported_mass"]).sum(dim=-1)
+
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["query_token_mass"].sum(dim=-1), outputs["shot_rho"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["support_token_mass"].sum(dim=-1), outputs["shot_rho"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        outputs["probe_query_reliability"].sum(dim=-1),
+        torch.ones_like(outputs["shot_rho"]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["probe_support_reliability"].sum(dim=-1),
+        torch.ones_like(outputs["shot_rho"]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["shot_pool_weights"].sum(dim=-1),
+        torch.ones_like(outputs["logits"]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert model.uses_noise_calibrated_transport
+    assert model.uses_geodesic_eam
+    assert model.uses_cost_threshold_score
+    assert model.uses_unbalanced_transport
+    assert model.uses_shot_decomposed_transport
+    assert model.raw_token_temperature is not None
+    assert model.query_reliability_weights is not None
+    assert model.support_reliability_weights is not None
+    assert model.raw_noise_sink_cost is not None
+    assert model.raw_shot_pool_temperature is not None
+    assert outputs["probe_query_reliability"].shape == outputs["query_token_mass"].shape
+    assert outputs["probe_support_reliability"].shape == outputs["support_token_mass"].shape
+    assert outputs["support_consensus"].shape == outputs["support_token_mass"].shape
+    assert outputs["transport_probe_cost"].shape == (2, 3, 2)
+    assert outputs["noise_sink_query_mass"].shape == (2, 3, 2)
+    assert outputs["noise_sink_support_mass"].shape == (2, 3, 2)
+    assert outputs["noise_sink_self_mass"].shape == (2, 3, 2)
+    assert torch.all(outputs["noise_sink_query_mass"] >= 0.0)
+    assert torch.all(outputs["noise_sink_support_mass"] >= 0.0)
+    assert outputs["noise_sink_cost"].item() > 0.0
+    assert 0.0 < outputs["token_reliability_mix"].item() < 1.0
+    assert 0.0 < outputs["support_consensus_mix"].item() < 1.0
+    assert 0.0 < outputs["shot_pool_mix"].item() < 1.0
+
+
+def test_hrot_fsl_variant_q_backpropagates_noise_calibration_parameters():
+    torch.manual_seed(27)
+    model = _build_model(variant="Q", lambda_rho=0.1)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    checked_params = [
+        model.eam.network[-2].weight,
+        model.raw_transport_cost_threshold,
+        model.raw_token_temperature,
+        model.query_reliability_weights,
+        model.support_reliability_weights,
+        model.raw_token_reliability_mix,
+        model.raw_support_consensus_mix,
+        model.raw_consensus_temperature,
+        model.raw_noise_sink_cost,
+        model.raw_shot_pool_temperature,
+        model.raw_shot_pool_mix,
+    ]
+    for param in checked_params:
+        assert param is not None
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()
+
+    assert model.query_reliability_weights.grad.abs().sum().item() > 0.0
+    assert model.support_reliability_weights.grad.abs().sum().item() > 0.0
+    assert model.raw_noise_sink_cost.grad.abs().sum().item() > 0.0
+
+
 def test_hrot_fsl_normalize_rho_keeps_episode_budget_mean():
     torch.manual_seed(22)
     model = _build_model(variant="O", normalize_rho=True)
@@ -785,7 +896,8 @@ def test_hrot_fsl_pot_backend_runs_for_debug_path():
     assert torch.isfinite(outputs["transport_plan"]).all()
 
 
-def test_hrot_fsl_model_factory_builds_and_runs():
+@pytest.mark.parametrize("factory_variant", ["E", "Q"])
+def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",
         device="cpu",
@@ -793,7 +905,7 @@ def test_hrot_fsl_model_factory_builds_and_runs():
         fewshot_backbone="conv64f",
         token_dim=24,
         hrot_token_dim=24,
-        hrot_variant="E",
+        hrot_variant=factory_variant,
         hrot_eam_hidden_dim=32,
         hrot_curvature_init=1.0,
         hrot_projection_scale=0.1,
@@ -833,6 +945,8 @@ def test_hrot_fsl_model_factory_builds_and_runs():
     assert outputs["logits"].shape == (2, 3)
     assert outputs["support_hyperbolic_tokens"].shape[-1] == 24
     assert torch.isfinite(outputs["logits"]).all()
+    if factory_variant == "Q":
+        assert outputs["shot_pool_weights"].shape == (2, 3, 2)
 
 
 def test_forward_scores_routes_query_targets_and_aux_to_hrot():

@@ -305,7 +305,7 @@ MODEL_REGISTRY = {
     },
     "hrot_fsl": {
         "display_name": "HROT-FSL",
-        "architecture": "Backbone spatial tokens -> Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive mass",
+        "architecture": "Backbone spatial tokens -> Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive, token-reliable mass",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "transport_prior_replay_mamba_net": {
