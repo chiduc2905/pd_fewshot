@@ -138,7 +138,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -155,7 +155,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["total_distance"].shape == (2, 3)
     assert outputs["transport_cost"].shape == (2, 3)
     assert outputs["transported_mass"].shape == (2, 3)
-    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O"}:
+    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -598,6 +598,87 @@ def test_hrot_fsl_variant_o_uses_transport_aware_geodesic_eam():
     assert torch.isfinite(outputs["transport_probe_mass"]).all()
     assert torch.isfinite(outputs["transport_probe_entropy"]).all()
     assert torch.isfinite(outputs["transport_probe_min_cost"]).all()
+
+
+def test_hrot_fsl_variant_p_uses_reliability_calibrated_evidence_uot():
+    torch.manual_seed(24)
+    model = _build_model(variant="P")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_cost = model._cosine_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
+    expected_transport_cost = (
+        outputs["shot_aggregation_weights"] * outputs["shot_transport_cost"]
+    ).sum(dim=-1)
+    expected_transport_mass = (
+        outputs["shot_aggregation_weights"] * outputs["shot_transported_mass"]
+    ).sum(dim=-1)
+    expected_shot_logits = (
+        model.score_scale * outputs["shot_transported_similarity"]
+        + model.mass_bonus.detach().to(dtype=outputs["shot_transported_similarity"].dtype)
+        * torch.log(outputs["shot_transported_mass"].clamp_min(model.eps))
+    )
+    expected_logits = (outputs["shot_aggregation_weights"] * expected_shot_logits).sum(dim=-1)
+
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        outputs["shot_aggregation_weights"].sum(dim=-1),
+        torch.ones_like(outputs["logits"]),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert model.uses_reliability_calibrated_evidence_uot
+    assert model.uses_geodesic_eam
+    assert model.uses_unbalanced_transport
+    assert model.uses_shot_decomposed_transport
+    assert model.query_survival_gate is not None
+    assert model.support_survival_gate is not None
+    assert model.shot_reliability_gate is not None
+    assert outputs["query_token_mass"].shape[:3] == (2, 3, 2)
+    assert outputs["support_token_mass"].shape[:3] == (2, 3, 2)
+    assert outputs["query_token_mass"].shape[-1] == outputs["cost_matrix"].shape[-2]
+    assert outputs["support_token_mass"].shape[-1] == outputs["cost_matrix"].shape[-1]
+    assert torch.all(outputs["query_token_mass"] > 0.0)
+    assert torch.all(outputs["support_token_mass"] > 0.0)
+    assert torch.isfinite(outputs["shot_reliability_logits"]).all()
+
+
+def test_hrot_fsl_variant_p_backpropagates_survival_and_shot_reliability():
+    torch.manual_seed(25)
+    model = _build_model(variant="P", lambda_rho=0.1)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    assert model.query_survival_gate[-2].bias.grad is not None
+    assert model.support_survival_gate[-2].bias.grad is not None
+    assert model.shot_reliability_gate[-1].weight.grad is not None
+    assert model.eam.network[-2].weight.grad is not None
+    assert model.mass_bonus.grad is not None
+    assert torch.isfinite(model.query_survival_gate[-2].bias.grad).all()
+    assert torch.isfinite(model.support_survival_gate[-2].bias.grad).all()
+    assert torch.isfinite(model.shot_reliability_gate[-1].weight.grad).all()
+    assert model.query_survival_gate[-2].bias.grad.abs().sum().item() > 0.0
+    assert model.support_survival_gate[-2].bias.grad.abs().sum().item() > 0.0
+    assert model.shot_reliability_gate[-1].weight.grad.abs().sum().item() > 0.0
 
 
 def test_hrot_fsl_normalize_rho_keeps_episode_budget_mean():
