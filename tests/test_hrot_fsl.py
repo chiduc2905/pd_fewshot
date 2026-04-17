@@ -620,15 +620,26 @@ def test_hrot_fsl_variant_p_uses_reliability_calibrated_evidence_uot():
     expected_transport_mass = (
         outputs["shot_aggregation_weights"] * outputs["shot_transported_mass"]
     ).sum(dim=-1)
+    mass_reward = (model.score_scale * model.transport_cost_threshold.detach()).to(
+        dtype=outputs["shot_transported_similarity"].dtype
+    )
     expected_shot_logits = (
         model.score_scale * outputs["shot_transported_similarity"]
-        + model.mass_bonus.detach().to(dtype=outputs["shot_transported_similarity"].dtype)
-        * torch.log(outputs["shot_transported_mass"].clamp_min(model.eps))
+        + mass_reward * torch.log(outputs["shot_transported_mass"].clamp_min(model.eps))
     )
-    expected_logits = (outputs["shot_aggregation_weights"] * expected_shot_logits).sum(dim=-1)
+    expected_base_shot_logits = (
+        -model.score_scale * outputs["base_shot_transport_cost"]
+        + mass_reward * outputs["base_shot_transported_mass"]
+    )
+    expected_base_logits = (outputs["shot_aggregation_weights"] * expected_base_shot_logits).sum(dim=-1)
+    expected_evidence_residual = outputs["evidence_logits"] - outputs["evidence_logits"].mean(dim=-1, keepdim=True)
+    expected_logits = expected_base_logits + outputs["evidence_residual_weight"] * expected_evidence_residual
 
     assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["base_shot_logits"], expected_base_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["base_logits"], expected_base_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["evidence_residual"], expected_evidence_residual, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
@@ -640,8 +651,12 @@ def test_hrot_fsl_variant_p_uses_reliability_calibrated_evidence_uot():
     )
     assert model.uses_reliability_calibrated_evidence_uot
     assert model.uses_geodesic_eam
+    assert model.uses_cost_threshold_score
     assert model.uses_unbalanced_transport
     assert model.uses_shot_decomposed_transport
+    assert model.mass_bonus is None
+    assert model.raw_transport_cost_threshold is not None
+    assert model.raw_evidence_residual_weight is not None
     assert model.query_survival_gate is not None
     assert model.support_survival_gate is not None
     assert model.shot_reliability_gate is not None
@@ -649,9 +664,12 @@ def test_hrot_fsl_variant_p_uses_reliability_calibrated_evidence_uot():
     assert outputs["support_token_mass"].shape[:3] == (2, 3, 2)
     assert outputs["query_token_mass"].shape[-1] == outputs["cost_matrix"].shape[-2]
     assert outputs["support_token_mass"].shape[-1] == outputs["cost_matrix"].shape[-1]
+    assert outputs["base_cost_matrix"].shape == outputs["cost_matrix"].shape
+    assert outputs["base_transport_plan"].shape == outputs["transport_plan"].shape
     assert torch.all(outputs["query_token_mass"] > 0.0)
     assert torch.all(outputs["support_token_mass"] > 0.0)
     assert torch.isfinite(outputs["shot_reliability_logits"]).all()
+    assert 0.0 < outputs["evidence_residual_weight"].item() < 1.0
 
 
 def test_hrot_fsl_variant_p_backpropagates_survival_and_shot_reliability():
@@ -672,13 +690,17 @@ def test_hrot_fsl_variant_p_backpropagates_survival_and_shot_reliability():
     assert model.support_survival_gate[-2].bias.grad is not None
     assert model.shot_reliability_gate[-1].weight.grad is not None
     assert model.eam.network[-2].weight.grad is not None
-    assert model.mass_bonus.grad is not None
+    assert model.raw_transport_cost_threshold.grad is not None
+    assert model.raw_evidence_residual_weight.grad is not None
     assert torch.isfinite(model.query_survival_gate[-2].bias.grad).all()
     assert torch.isfinite(model.support_survival_gate[-2].bias.grad).all()
     assert torch.isfinite(model.shot_reliability_gate[-1].weight.grad).all()
+    assert torch.isfinite(model.raw_transport_cost_threshold.grad).all()
+    assert torch.isfinite(model.raw_evidence_residual_weight.grad).all()
     assert model.query_survival_gate[-2].bias.grad.abs().sum().item() > 0.0
     assert model.support_survival_gate[-2].bias.grad.abs().sum().item() > 0.0
     assert model.shot_reliability_gate[-1].weight.grad.abs().sum().item() > 0.0
+    assert model.raw_evidence_residual_weight.grad.abs().sum().item() > 0.0
 
 
 def test_hrot_fsl_normalize_rho_keeps_episode_budget_mean():

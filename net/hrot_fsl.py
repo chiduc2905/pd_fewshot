@@ -135,7 +135,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_reliability_calibrated_evidence_uot = variant == "P"
@@ -234,10 +234,14 @@ class HROTFSL(BaseConv64FewShotModel):
                 raise TypeError("Expected final shot reliability gate layer to be nn.Linear")
             nn.init.zeros_(final_shot_linear.weight)
             nn.init.zeros_(final_shot_linear.bias)
+            self.raw_evidence_residual_weight = nn.Parameter(
+                torch.tensor(_inverse_sigmoid(0.1), dtype=torch.float32)
+            )
         else:
             self.query_survival_gate = None
             self.support_survival_gate = None
             self.shot_reliability_gate = None
+            self.raw_evidence_residual_weight = None
         if self.uses_cost_threshold_score:
             threshold_init = (
                 float(transport_cost_threshold_init)
@@ -292,6 +296,11 @@ class HROTFSL(BaseConv64FewShotModel):
                 reward = reward + self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
             return reward
         return self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
+
+    def _evidence_residual_weight(self, reference: torch.Tensor) -> torch.Tensor:
+        if self.raw_evidence_residual_weight is None:
+            return reference.new_zeros(())
+        return torch.sigmoid(self.raw_evidence_residual_weight).to(device=reference.device, dtype=reference.dtype)
 
     def _normalize_rho_budget(self, rho: torch.Tensor) -> torch.Tensor:
         if not self.normalize_rho:
@@ -925,7 +934,23 @@ class HROTFSL(BaseConv64FewShotModel):
                     shot_rho,
                     shot_geodesic_distance,
                 )
-                logits = evidence_outputs["logits"]
+                base_flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+                base_flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+                base_plan, base_flat_transport_cost, base_flat_transport_mass = self._transport_match(
+                    base_flat_cost,
+                    base_flat_rho,
+                )
+                base_shot_transport_cost = base_flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
+                base_shot_transport_mass = base_flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
+                base_shot_logits = (
+                    -self.score_scale * base_shot_transport_cost
+                    + self._mass_reward_weight(base_shot_transport_cost) * base_shot_transport_mass
+                )
+                base_logits = (evidence_outputs["shot_aggregation_weights"] * base_shot_logits).sum(dim=-1)
+                evidence_logits = evidence_outputs["logits"]
+                evidence_residual = evidence_logits - evidence_logits.mean(dim=-1, keepdim=True)
+                evidence_residual_weight = self._evidence_residual_weight(evidence_logits)
+                logits = base_logits + evidence_residual_weight * evidence_residual
                 transport_cost = evidence_outputs["transport_cost"]
                 transport_mass = evidence_outputs["transport_mass"]
                 rho = shot_rho
@@ -934,6 +959,27 @@ class HROTFSL(BaseConv64FewShotModel):
                 transport_probe_payload = {
                     "query_token_mass": query_token_mass,
                     "support_token_mass": support_token_mass,
+                    "base_transport_plan": base_plan.reshape(
+                        query.shape[0],
+                        way_num,
+                        shot_num,
+                        base_plan.shape[-2],
+                        base_plan.shape[-1],
+                    ),
+                    "base_cost_matrix": base_flat_cost.reshape(
+                        query.shape[0],
+                        way_num,
+                        shot_num,
+                        base_flat_cost.shape[-2],
+                        base_flat_cost.shape[-1],
+                    ),
+                    "base_shot_transport_cost": base_shot_transport_cost,
+                    "base_shot_transported_mass": base_shot_transport_mass,
+                    "base_shot_logits": base_shot_logits,
+                    "base_logits": base_logits,
+                    "evidence_logits": evidence_logits,
+                    "evidence_residual": evidence_residual,
+                    "evidence_residual_weight": evidence_residual_weight.detach(),
                     **{
                         key: value
                         for key, value in evidence_outputs.items()
@@ -1127,9 +1173,21 @@ class HROTFSL(BaseConv64FewShotModel):
             "shot_transported_similarity",
             "shot_reliability_logits",
             "shot_aggregation_weights",
+            "base_transport_plan",
+            "base_cost_matrix",
+            "base_shot_transport_cost",
+            "base_shot_transported_mass",
+            "base_shot_logits",
+            "base_logits",
+            "evidence_logits",
+            "evidence_residual",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
+        if "evidence_residual_weight" in batch_outputs[0]:
+            stacked["evidence_residual_weight"] = torch.stack(
+                [item["evidence_residual_weight"] for item in batch_outputs]
+            ).mean()
         if "transport_plan" in batch_outputs[0]:
             stacked["transport_plan"] = torch.cat([item["transport_plan"] for item in batch_outputs], dim=0)
             stacked["cost_matrix"] = torch.cat([item["cost_matrix"] for item in batch_outputs], dim=0)
