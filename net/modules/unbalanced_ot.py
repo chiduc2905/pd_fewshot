@@ -300,3 +300,46 @@ def compute_transport_cost(plan: torch.Tensor, cost: torch.Tensor) -> torch.Tens
 
 def compute_transported_mass(plan: torch.Tensor) -> torch.Tensor:
     return plan.sum(dim=(-1, -2))
+
+
+def generalized_kl_divergence(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = EPS,
+) -> torch.Tensor:
+    """Generalized KL divergence used by KL-relaxed UOT marginals."""
+    target_safe = target.clamp_min(eps)
+    return (
+        source * (torch.log(source.clamp_min(eps)) - torch.log(target_safe))
+        - source
+        + target
+    ).sum(dim=-1)
+
+
+def compute_unbalanced_transport_objective(
+    plan: torch.Tensor,
+    cost: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    tau_q: float,
+    tau_c: float,
+    eps: float = EPS,
+) -> torch.Tensor:
+    """Unregularized KL-relaxed UOT objective evaluated at a Sinkhorn plan.
+
+    The Sinkhorn plan is produced with entropic regularization for numerical
+    stability, but classification should not ignore the KL marginal penalties:
+    otherwise a class can drop most mass and still receive a low average cost.
+    """
+    if tau_q <= 0.0 or tau_c <= 0.0:
+        raise ValueError("tau_q and tau_c must be positive")
+    _validate_transport_inputs(cost, a, b, eps=1.0)
+    if plan.shape != cost.shape:
+        raise ValueError(f"plan must have shape {tuple(cost.shape)}, got {tuple(plan.shape)}")
+
+    row_mass = plan.sum(dim=-1)
+    col_mass = plan.sum(dim=-2)
+    transport_cost = compute_transport_cost(plan, cost)
+    source_kl = generalized_kl_divergence(row_mass, a, eps=eps)
+    target_kl = generalized_kl_divergence(col_mass, b, eps=eps)
+    return transport_cost + float(tau_q) * source_kl + float(tau_c) * target_kl

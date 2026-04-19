@@ -861,6 +861,12 @@ def get_args():
     parser.add_argument("--jsc_wdro_normalize_tokens", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--jsc_wdro_cost_power", type=float, default=2.0)
     parser.add_argument("--jsc_wdro_normalize_unbalanced_cost", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--jsc_wdro_unbalanced_score_mode",
+        type=str,
+        default="uot_objective",
+        choices=["uot_objective", "normalized_transport", "transport"],
+    )
     parser.add_argument("--jsc_wdro_use_competitive_diagnostics", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--jsc_wdro_competitive_temperature", type=float, default=0.1)
     parser.add_argument("--jsc_wdro_profile", type=str, default="false", choices=["true", "false"])
@@ -1502,6 +1508,7 @@ def get_model(args):
             f"epsilon_alpha={getattr(args, 'jsc_wdro_epsilon_alpha_init', 0.05)}, "
             f"epsilon_beta={getattr(args, 'jsc_wdro_epsilon_beta_init', 0.25)}, "
             f"epsilon_reg={getattr(args, 'jsc_wdro_epsilon_reg_weight', 0.0)}, "
+            f"unbalanced_score={getattr(args, 'jsc_wdro_unbalanced_score_mode', 'uot_objective')}, "
             f"ot_backend={getattr(args, 'jsc_wdro_ot_backend', 'pot')})"
         )
     return model
@@ -1920,6 +1927,16 @@ def _scalar_metric(value):
     return None
 
 
+def _masked_scalar_metric(values, mask):
+    if values is None or mask is None:
+        return None
+    if not torch.is_tensor(values) or not torch.is_tensor(mask):
+        return None
+    if values.numel() == 0 or mask.numel() == 0 or not bool(mask.any().item()):
+        return None
+    return _scalar_metric(values[mask])
+
+
 def summarize_prediction_diagnostics(logits, targets):
     with torch.no_grad():
         probs = torch.softmax(logits, dim=1)
@@ -1931,11 +1948,20 @@ def summarize_prediction_diagnostics(logits, targets):
             margin = true_logits - max_other_logits
         else:
             margin = torch.zeros_like(true_logits)
-        max_probs = probs.max(dim=1).values
+        max_probs, predictions = probs.max(dim=1)
+        correct = predictions.eq(targets)
         return {
+            "pred_acc": _scalar_metric(correct.float()),
             "true_prob": _scalar_metric(true_probs),
             "max_prob": _scalar_metric(max_probs),
+            "correct_true_prob": _masked_scalar_metric(true_probs, correct),
+            "wrong_true_prob": _masked_scalar_metric(true_probs, ~correct),
+            "correct_max_prob": _masked_scalar_metric(max_probs, correct),
+            "wrong_max_prob": _masked_scalar_metric(max_probs, ~correct),
             "logit_margin": _scalar_metric(margin),
+            "margin_pos_rate": _scalar_metric((margin > 0.0).float()),
+            "correct_logit_margin": _masked_scalar_metric(margin, correct),
+            "wrong_logit_margin": _masked_scalar_metric(margin, ~correct),
         }
 
 
@@ -1953,6 +1979,29 @@ def summarize_distance_diagnostics(total_distance, targets):
             "true_distance": _scalar_metric(true_distance),
             "best_negative_distance": _scalar_metric(best_negative_distance),
             "distance_gap": _scalar_metric(distance_gap),
+            "distance_gap_pos_rate": _scalar_metric((distance_gap > 0.0).float()),
+            "correct_distance_gap": _masked_scalar_metric(distance_gap, distance_gap > 0.0),
+            "wrong_distance_gap": _masked_scalar_metric(distance_gap, distance_gap <= 0.0),
+        }
+
+
+def summarize_class_distance_tensor(distances, targets, prefix):
+    with torch.no_grad():
+        true_distance = distances.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+        if distances.shape[1] > 1:
+            mask = F.one_hot(targets, num_classes=distances.shape[1]).bool()
+            best_negative_distance = distances.masked_fill(mask, float("inf")).min(dim=1).values
+            distance_gap = best_negative_distance - true_distance
+        else:
+            best_negative_distance = torch.zeros_like(true_distance)
+            distance_gap = torch.zeros_like(true_distance)
+        return {
+            f"{prefix}_true_distance": _scalar_metric(true_distance),
+            f"{prefix}_best_negative_distance": _scalar_metric(best_negative_distance),
+            f"{prefix}_distance_gap": _scalar_metric(distance_gap),
+            f"{prefix}_distance_gap_pos_rate": _scalar_metric((distance_gap > 0.0).float()),
+            f"{prefix}_correct_distance_gap": _masked_scalar_metric(distance_gap, distance_gap > 0.0),
+            f"{prefix}_wrong_distance_gap": _masked_scalar_metric(distance_gap, distance_gap <= 0.0),
         }
 
 
@@ -1990,6 +2039,32 @@ def summarize_budget_tensor(values, targets, prefix):
         }
 
 
+def summarize_episode_class_tensor(values, targets, prefix):
+    with torch.no_grad():
+        if values.dim() == 1:
+            values = values.unsqueeze(0)
+        if values.dim() != 2:
+            return {}
+        batch_size, way_num = values.shape
+        if targets.numel() % batch_size != 0:
+            return {}
+        episode_targets = targets.reshape(batch_size, -1)
+        true_value = values.gather(dim=1, index=episode_targets).reshape(-1)
+        if way_num > 1:
+            mask = F.one_hot(episode_targets, num_classes=way_num).bool()
+            expanded = values.unsqueeze(1).expand(-1, episode_targets.shape[1], -1)
+            best_negative_value = expanded.masked_fill(mask, float("-inf")).max(dim=-1).values.reshape(-1)
+            value_gap = true_value - best_negative_value
+        else:
+            best_negative_value = torch.zeros_like(true_value)
+            value_gap = torch.zeros_like(true_value)
+        return {
+            f"{prefix}_true": _scalar_metric(true_value),
+            f"{prefix}_best_negative": _scalar_metric(best_negative_value),
+            f"{prefix}_gap": _scalar_metric(value_gap),
+        }
+
+
 def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss=None):
     metrics = summarize_prediction_diagnostics(logits, targets)
     metrics["cls_loss"] = _scalar_metric(cls_loss)
@@ -2001,6 +2076,26 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     total_distance = scores.get("total_distance")
     if torch.is_tensor(total_distance) and total_distance.dim() == 2 and total_distance.shape[0] == targets.shape[0]:
         metrics.update(summarize_distance_diagnostics(total_distance, targets))
+
+    query_class_distance = scores.get("query_class_distance")
+    if (
+        torch.is_tensor(query_class_distance)
+        and query_class_distance.dim() == 2
+        and query_class_distance.shape[0] == targets.shape[0]
+    ):
+        metrics.update(summarize_class_distance_tensor(query_class_distance, targets, prefix="query_class"))
+
+    epsilon = scores.get("epsilon")
+    if torch.is_tensor(epsilon):
+        metrics.update(summarize_episode_class_tensor(epsilon, targets, prefix="epsilon"))
+
+    support_dispersion = scores.get("support_dispersion")
+    if torch.is_tensor(support_dispersion):
+        metrics.update(summarize_episode_class_tensor(support_dispersion, targets, prefix="support_dispersion"))
+
+    transported_mass = scores.get("transported_mass")
+    if torch.is_tensor(transported_mass) and transported_mass.dim() == 2 and transported_mass.shape[0] == targets.shape[0]:
+        metrics.update(summarize_budget_tensor(transported_mass, targets, prefix="transport_mass"))
 
     global_scores = scores.get("global_scores")
     if torch.is_tensor(global_scores) and global_scores.dim() == 2 and global_scores.shape[0] == targets.shape[0]:
@@ -2148,9 +2243,17 @@ def format_diagnostic_summary(metrics):
     ordered_keys = [
         "cls_loss",
         "aux_loss",
+        "pred_acc",
         "true_prob",
         "max_prob",
+        "correct_true_prob",
+        "wrong_true_prob",
+        "correct_max_prob",
+        "wrong_max_prob",
         "logit_margin",
+        "margin_pos_rate",
+        "correct_logit_margin",
+        "wrong_logit_margin",
         "global_true_score",
         "global_best_negative_score",
         "global_score_gap",
@@ -2217,6 +2320,24 @@ def format_diagnostic_summary(metrics):
         "true_distance",
         "best_negative_distance",
         "distance_gap",
+        "distance_gap_pos_rate",
+        "correct_distance_gap",
+        "wrong_distance_gap",
+        "query_class_true_distance",
+        "query_class_best_negative_distance",
+        "query_class_distance_gap",
+        "query_class_distance_gap_pos_rate",
+        "query_class_correct_distance_gap",
+        "query_class_wrong_distance_gap",
+        "epsilon_true",
+        "epsilon_best_negative",
+        "epsilon_gap",
+        "support_dispersion_true",
+        "support_dispersion_best_negative",
+        "support_dispersion_gap",
+        "transport_mass_true",
+        "transport_mass_best_negative",
+        "transport_mass_gap",
         "mean_shot_distance",
         "mean_gamma_entropy",
         "mean_consistency_penalty",

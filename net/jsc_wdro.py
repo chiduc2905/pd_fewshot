@@ -16,6 +16,7 @@ from net.modules.unbalanced_ot import (
     barycenter_unbalanced_pot,
     compute_transport_cost,
     compute_transported_mass,
+    compute_unbalanced_transport_objective,
     resolve_ot_backend,
     sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
@@ -55,6 +56,9 @@ class JSCWDRO(BaseConv64FewShotModel):
     Scores use POT or native log-domain Sinkhorn solvers and follow the
     closed-form WDRO distance
     `score(q, c) = -[W_p(mu_q, nu_c) - epsilon_c]_+`.
+    If query-class matching is unbalanced, the default class distance is the
+    KL-relaxed UOT objective evaluated at the Sinkhorn plan, so dropped mass is
+    penalized instead of being hidden by a normalized transport average.
     """
 
     def __init__(
@@ -87,6 +91,7 @@ class JSCWDRO(BaseConv64FewShotModel):
         normalize_tokens: bool = True,
         cost_power: float = 2.0,
         normalize_unbalanced_cost: bool = True,
+        unbalanced_score_mode: str = "uot_objective",
         use_competitive_diagnostics: bool = True,
         competitive_temperature: float = 0.1,
         profile: bool = False,
@@ -125,6 +130,12 @@ class JSCWDRO(BaseConv64FewShotModel):
         barycenter_transport = str(barycenter_transport).lower()
         if barycenter_transport not in {"balanced", "unbalanced"}:
             raise ValueError(f"Unsupported barycenter_transport: {barycenter_transport}")
+        unbalanced_score_mode = str(unbalanced_score_mode).lower()
+        if unbalanced_score_mode not in {"uot_objective", "normalized_transport", "transport"}:
+            raise ValueError(
+                "unbalanced_score_mode must be 'uot_objective', "
+                "'normalized_transport', or 'transport'"
+            )
         if competitive_temperature <= 0.0:
             raise ValueError("competitive_temperature must be positive")
         ot_backend = "native" if str(ot_backend).lower() == "auto" else str(ot_backend).lower()
@@ -150,6 +161,7 @@ class JSCWDRO(BaseConv64FewShotModel):
         self.normalize_tokens = bool(normalize_tokens)
         self.cost_power = float(cost_power)
         self.normalize_unbalanced_cost = bool(normalize_unbalanced_cost)
+        self.unbalanced_score_mode = unbalanced_score_mode
         self.use_competitive_diagnostics = bool(use_competitive_diagnostics)
         self.competitive_temperature = float(competitive_temperature)
         self.profile = bool(profile)
@@ -407,9 +419,21 @@ class JSCWDRO(BaseConv64FewShotModel):
 
         transported_cost = compute_transport_cost(plan, cost)
         transported_mass = compute_transported_mass(plan)
-        if unbalanced and self.normalize_unbalanced_cost:
-            transported_cost = transported_cost / transported_mass.clamp_min(self.eps)
-        distance = transported_cost.clamp_min(0.0).pow(1.0 / self.cost_power)
+        score_cost = transported_cost
+        if unbalanced:
+            if self.unbalanced_score_mode == "uot_objective":
+                score_cost = compute_unbalanced_transport_objective(
+                    plan,
+                    cost,
+                    query_mass,
+                    class_mass,
+                    tau_q=self.tau_q,
+                    tau_c=self.tau_c,
+                    eps=self.eps,
+                )
+            elif self.unbalanced_score_mode == "normalized_transport":
+                score_cost = transported_cost / transported_mass.clamp_min(self.eps)
+        distance = score_cost.clamp_min(0.0).pow(1.0 / self.cost_power)
 
         if squeeze_output:
             return distance.squeeze(0), plan.squeeze(0), cost.squeeze(0), transported_mass.squeeze(0)

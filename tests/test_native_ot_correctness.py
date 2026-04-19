@@ -5,6 +5,7 @@ import torch
 
 from net.modules.unbalanced_ot import (
     compute_transported_mass,
+    compute_unbalanced_transport_objective,
     sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
     sinkhorn_unbalanced_log,
@@ -96,3 +97,31 @@ def test_native_unbalanced_sinkhorn_recovers_balanced_limit_for_large_tau():
 
     assert torch.allclose(plan.sum(dim=-1), a, atol=2e-4, rtol=2e-4)
     assert torch.allclose(plan.sum(dim=-2), b, atol=2e-4, rtol=2e-4)
+
+
+def test_unbalanced_objective_penalizes_dropped_mass():
+    cost = torch.zeros(1, 2, 2)
+    a = torch.tensor([[0.5, 0.5]])
+    b = torch.tensor([[0.5, 0.5]])
+    full_plan = torch.tensor([[[0.5, 0.0], [0.0, 0.5]]])
+    dropped_plan = torch.tensor([[[0.05, 0.0], [0.0, 0.05]]])
+
+    full_objective = compute_unbalanced_transport_objective(
+        full_plan,
+        cost,
+        a,
+        b,
+        tau_q=0.5,
+        tau_c=0.5,
+    )
+    dropped_objective = compute_unbalanced_transport_objective(
+        dropped_plan,
+        cost,
+        a,
+        b,
+        tau_q=0.5,
+        tau_c=0.5,
+    )
+
+    assert torch.allclose(full_objective, torch.zeros_like(full_objective), atol=1e-6)
+    assert torch.all(dropped_objective > full_objective)

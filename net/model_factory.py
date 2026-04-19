@@ -1823,6 +1823,7 @@ def build_model_from_args(args):
                 getattr(args, "jsc_wdro_normalize_unbalanced_cost", "true"),
                 default=True,
             ),
+            unbalanced_score_mode=str(getattr(args, "jsc_wdro_unbalanced_score_mode", "uot_objective")),
             use_competitive_diagnostics=_bool_flag(
                 getattr(args, "jsc_wdro_use_competitive_diagnostics", "true"),
                 default=True,
