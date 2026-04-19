@@ -139,7 +139,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -156,7 +156,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["total_distance"].shape == (2, 3)
     assert outputs["transport_cost"].shape == (2, 3)
     assert outputs["transported_mass"].shape == (2, 3)
-    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}:
+    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -668,6 +668,108 @@ def test_hrot_fsl_variant_p_uses_hyperbolic_attentive_uot_marginals():
     assert torch.all(outputs["support_token_mass"] > 0.0)
 
 
+def test_hrot_fsl_variant_s_adds_token_and_shot_contribution_uot():
+    torch.manual_seed(30)
+    model = _build_model(variant="S", token_temperature=0.2)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
+    flat_support_hyp = outputs["support_hyperbolic_tokens"].squeeze(0).reshape(6, -1, 24)
+    flat_rho = outputs["shot_rho"].reshape(2, 6)
+    expected_query_mass, expected_support_mass = model._compute_hyperbolic_token_marginals(
+        outputs["query_hyperbolic_tokens"],
+        flat_support_hyp,
+        flat_rho,
+    )
+    expected_query_mass = expected_query_mass.reshape_as(outputs["query_token_mass"])
+    expected_support_mass = expected_support_mass.reshape_as(outputs["support_token_mass"])
+    mass_reward = (model.score_scale * model.transport_cost_threshold.detach()).to(
+        dtype=outputs["shot_transported_mass"].dtype
+    )
+    expected_shot_logits = -model.score_scale * outputs["shot_transport_cost"] + (
+        mass_reward * outputs["shot_transported_mass"]
+    )
+    expected_logits = (outputs["shot_pool_weights"] * expected_shot_logits).sum(dim=-1)
+    expected_transport_cost = (outputs["shot_pool_weights"] * outputs["shot_transport_cost"]).sum(dim=-1)
+    expected_transport_mass = (outputs["shot_pool_weights"] * outputs["shot_transported_mass"]).sum(dim=-1)
+
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["query_token_mass"], expected_query_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["support_token_mass"], expected_support_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["query_token_mass"].sum(dim=-1), outputs["shot_rho"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["support_token_mass"].sum(dim=-1), outputs["shot_rho"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        outputs["shot_pool_weights"].sum(dim=-1),
+        torch.ones_like(outputs["logits"]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    uniform_query_mass = outputs["shot_rho"].unsqueeze(-1) / outputs["query_token_mass"].shape[-1]
+    uniform_support_mass = outputs["shot_rho"].unsqueeze(-1) / outputs["support_token_mass"].shape[-1]
+    uniform_shot_weights = torch.full_like(outputs["shot_pool_weights"], 1.0 / outputs["shot_pool_weights"].shape[-1])
+    assert not torch.allclose(outputs["query_token_mass"], uniform_query_mass, atol=1e-4, rtol=1e-4)
+    assert not torch.allclose(outputs["support_token_mass"], uniform_support_mass, atol=1e-4, rtol=1e-4)
+    assert not torch.allclose(outputs["shot_pool_weights"], uniform_shot_weights, atol=1e-5, rtol=1e-5)
+    assert model.uses_hyperbolic_token_attention
+    assert model.uses_geodesic_shot_pooling
+    assert model.uses_geodesic_eam
+    assert model.uses_cost_threshold_score
+    assert model.uses_unbalanced_transport
+    assert model.uses_shot_decomposed_transport
+    assert model.q_shot_pool_scorer is not None
+    assert model.q_shot_pool_scorer.in_features == 4
+    assert model.raw_token_temperature is not None
+    assert model.raw_shot_pool_temperature is not None
+    assert model.raw_shot_pool_mix is not None
+    assert outputs["token_temperature"].item() > 0.0
+    assert outputs["shot_pool_temperature"].item() > 0.0
+    assert 0.0 < outputs["shot_pool_mix"].item() < 1.0
+
+
+def test_hrot_fsl_variant_s_backpropagates_contribution_parameters():
+    torch.manual_seed(31)
+    model = _build_model(variant="S", lambda_rho=0.1)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    checked_params = [
+        model.eam.network[-2].weight,
+        model.raw_transport_cost_threshold,
+        model.raw_token_temperature,
+        model.q_shot_pool_scorer.weight,
+        model.raw_shot_pool_temperature,
+        model.raw_shot_pool_mix,
+    ]
+    for param in checked_params:
+        assert param is not None
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()
+
+    assert model.raw_token_temperature.grad.abs().sum().item() > 0.0
+    assert model.q_shot_pool_scorer.weight.grad.abs().sum().item() > 0.0
+    assert model.raw_shot_pool_mix.grad.abs().sum().item() > 0.0
+
+
 def test_hrot_fsl_variant_p_backpropagates_token_attention_and_geodesic_eam():
     torch.manual_seed(25)
     model = _build_model(variant="P", lambda_rho=0.1)
@@ -869,6 +971,59 @@ def test_hrot_fsl_variant_q_backpropagates_noise_calibration_parameters():
     assert model.raw_noise_sink_cost.grad.abs().sum().item() > 0.0
 
 
+def test_hrot_fsl_variant_r_adds_structure_consistent_uot_cost():
+    torch.manual_seed(28)
+    model = _build_model(variant="R", token_temperature=0.2, structure_cost_init=0.05)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_base_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_base_cost = expected_base_cost.reshape(2, 3, 2, expected_base_cost.shape[-2], expected_base_cost.shape[-1])
+    expected_cost = outputs["base_cost_matrix"] + outputs["structure_cost"]
+    expected_shot_logits = model.score_scale * (
+        outputs["adaptive_transport_cost_threshold"] * outputs["shot_transported_mass"]
+        - outputs["shot_transport_cost"]
+    )
+
+    assert model.uses_structure_consistent_transport
+    assert model.uses_noise_calibrated_transport
+    assert model.raw_structure_cost_weight is not None
+    assert torch.allclose(outputs["base_cost_matrix"], expected_base_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
+    assert outputs["structure_probe_mass"].shape == (2, 3, 2)
+    assert torch.all(outputs["structure_cost"] >= 0.0)
+    assert outputs["structure_cost"].sum().item() > 0.0
+    assert outputs["structure_cost_weight"].item() > 0.0
+
+
+def test_hrot_fsl_variant_r_backpropagates_structure_weight():
+    torch.manual_seed(29)
+    model = _build_model(variant="R", lambda_rho=0.1, structure_cost_init=0.05)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    assert model.raw_structure_cost_weight is not None
+    assert model.raw_structure_cost_weight.grad is not None
+    assert torch.isfinite(model.raw_structure_cost_weight.grad).all()
+    assert model.raw_structure_cost_weight.grad.abs().sum().item() > 0.0
+
+
 def test_hrot_fsl_normalize_rho_keeps_episode_budget_mean():
     torch.manual_seed(22)
     model = _build_model(variant="O", normalize_rho=True)
@@ -962,7 +1117,7 @@ def test_hrot_fsl_pot_backend_runs_for_debug_path():
     assert torch.isfinite(outputs["transport_plan"]).all()
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "Q"])
+@pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",
@@ -992,6 +1147,7 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         hrot_rho_rank_temperature=0.05,
         hrot_lambda_curvature=0.01,
         hrot_min_curvature=0.05,
+        hrot_structure_cost_init=0.05,
         hrot_normalize_euclidean_tokens="true",
         hrot_normalize_rho="false",
         hrot_eval_use_float64="true",
@@ -1013,6 +1169,11 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     assert torch.isfinite(outputs["logits"]).all()
     if factory_variant == "Q":
         assert outputs["shot_pool_weights"].shape == (2, 3, 2)
+    if factory_variant == "R":
+        assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
+    if factory_variant == "S":
+        assert outputs["shot_pool_weights"].shape == (2, 3, 2)
+        assert outputs["query_token_mass"].shape[:3] == (2, 3, 2)
 
 
 def test_forward_scores_routes_query_targets_and_aux_to_hrot():

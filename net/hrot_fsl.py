@@ -45,7 +45,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-Q."""
+    """Vectorized HROT few-shot model with ablation variants A-S."""
 
     def __init__(
         self,
@@ -78,6 +78,7 @@ class HROTFSL(BaseConv64FewShotModel):
         rho_rank_temperature: float = 0.05,
         lambda_curvature: float = 0.0,
         min_curvature: float = 0.05,
+        structure_cost_init: float = 0.05,
         normalize_euclidean_tokens: bool = True,
         normalize_rho: bool = False,
         eval_use_float64: bool = True,
@@ -94,7 +95,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = str(variant).upper()
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
@@ -117,19 +118,21 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q"}
-        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P", "Q"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
-        self.uses_hyperbolic_token_attention = variant == "P"
-        self.uses_noise_calibrated_transport = variant == "Q"
+        self.uses_hyperbolic_token_attention = variant in {"P", "S"}
+        self.uses_geodesic_shot_pooling = variant == "S"
+        self.uses_noise_calibrated_transport = variant in {"Q", "R"}
+        self.uses_structure_consistent_transport = variant == "R"
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
@@ -214,6 +217,8 @@ class HROTFSL(BaseConv64FewShotModel):
             else None
         )
         if self.uses_noise_calibrated_transport:
+            if self.uses_structure_consistent_transport and structure_cost_init <= 0.0:
+                raise ValueError("structure_cost_init must be positive for structure-consistent transport")
             self.query_reliability_weights = nn.Parameter(
                 torch.tensor([1.0, -1.0, -0.5, -0.5], dtype=torch.float32)
             )
@@ -235,6 +240,11 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_shot_pool_temperature = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
             self.raw_shot_pool_mix = nn.Parameter(torch.tensor(-0.5, dtype=torch.float32))
             self.raw_q_enhancement_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
+            self.raw_structure_cost_weight = (
+                nn.Parameter(torch.tensor(_inverse_softplus(float(structure_cost_init)), dtype=torch.float32))
+                if self.uses_structure_consistent_transport
+                else None
+            )
             self.q_shot_pool_scorer = nn.Linear(self.q_eam_feature_dim, 1)
             self.q_threshold_scorer = nn.Linear(self.q_eam_feature_dim, 1)
             with torch.no_grad():
@@ -257,8 +267,17 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_shot_pool_temperature = None
             self.raw_shot_pool_mix = None
             self.raw_q_enhancement_mix = None
+            self.raw_structure_cost_weight = None
             self.q_shot_pool_scorer = None
             self.q_threshold_scorer = None
+        if self.uses_geodesic_shot_pooling:
+            self.raw_shot_pool_temperature = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
+            self.raw_shot_pool_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
+            self.q_shot_pool_scorer = nn.Linear(4, 1)
+            with torch.no_grad():
+                pool_init = torch.tensor([-1.0, -0.75, -0.10, -0.10], dtype=torch.float32)
+                self.q_shot_pool_scorer.weight.copy_(pool_init.unsqueeze(0))
+                self.q_shot_pool_scorer.bias.zero_()
         if self.uses_cost_threshold_score:
             threshold_init = (
                 float(transport_cost_threshold_init)
@@ -364,6 +383,12 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_q_enhancement_mix is None:
             return self.curvature.new_tensor(1.0)
         return torch.sigmoid(self.raw_q_enhancement_mix)
+
+    @property
+    def structure_cost_weight(self) -> torch.Tensor:
+        if self.raw_structure_cost_weight is None:
+            return self.curvature.new_tensor(0.0)
+        return F.softplus(self.raw_structure_cost_weight).clamp_min(self.eps)
 
     def _mass_reward_weight(self, reference: torch.Tensor) -> torch.Tensor:
         if self.raw_transport_cost_threshold is not None:
@@ -866,6 +891,64 @@ class HROTFSL(BaseConv64FewShotModel):
         )
         return query_mass, support_mass, payload
 
+    def _pairwise_token_distance(self, tokens: torch.Tensor) -> torch.Tensor:
+        token_norm = tokens.pow(2).sum(dim=-1)
+        pairwise = token_norm.unsqueeze(-1) + token_norm.unsqueeze(-2) - 2.0 * torch.matmul(
+            tokens,
+            tokens.transpose(-1, -2),
+        )
+        return pairwise.clamp_min(0.0)
+
+    def _normalize_structure_distance(self, distance: torch.Tensor) -> torch.Tensor:
+        scale = distance.mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        return distance / scale
+
+    def _compute_structure_consistency_cost(
+        self,
+        flat_cost: torch.Tensor,
+        query_tokens_euc: torch.Tensor,
+        flat_support_tokens_euc: torch.Tensor,
+        flat_rho: torch.Tensor,
+        query_mass: torch.Tensor,
+        support_mass: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if query_tokens_euc.dim() != 3 or flat_support_tokens_euc.dim() != 3:
+            raise ValueError("Structure cost expects query/support tokens shaped (N, Tokens, Dim)")
+        if flat_cost.shape[:2] != flat_rho.shape:
+            raise ValueError(f"flat_rho must match flat_cost leading dims, got {tuple(flat_rho.shape)}")
+
+        with torch.no_grad():
+            probe_plan, _, _ = self._transport_match(
+                flat_cost.detach(),
+                flat_rho.detach(),
+                a=query_mass.detach(),
+                b=support_mass.detach(),
+            )
+            probe_plan = probe_plan.detach()
+            row_mass = probe_plan.sum(dim=-1)
+            col_mass = probe_plan.sum(dim=-2)
+            probe_mass = probe_plan.sum(dim=(-1, -2))
+
+        query_structure = self._normalize_structure_distance(self._pairwise_token_distance(query_tokens_euc))
+        support_structure = self._normalize_structure_distance(
+            self._pairwise_token_distance(flat_support_tokens_euc)
+        )
+        query_structure = query_structure.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        support_structure = support_structure.to(device=flat_cost.device, dtype=flat_cost.dtype)
+
+        query_term = torch.einsum("qti,qpi->qpt", query_structure.pow(2), row_mass)
+        support_term = torch.einsum("pkj,qpj->qpk", support_structure.pow(2), col_mass)
+        cross_term = torch.einsum("qti,qpij,pkj->qptk", query_structure, probe_plan, support_structure)
+        structure_cost = (query_term.unsqueeze(-1) + support_term.unsqueeze(-2) - 2.0 * cross_term).clamp_min(0.0)
+        structure_cost = structure_cost / structure_cost.mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        structure_cost = self.structure_cost_weight.to(device=flat_cost.device, dtype=flat_cost.dtype) * structure_cost
+
+        payload = {
+            "structure_cost": structure_cost,
+            "structure_probe_mass": probe_mass,
+        }
+        return structure_cost.to(dtype=flat_cost.dtype), payload
+
     def _append_noise_sink(
         self,
         flat_cost: torch.Tensor,
@@ -1198,8 +1281,20 @@ class HROTFSL(BaseConv64FewShotModel):
                         flat_support_hyperbolic,
                     )
                 )
+                final_cost = flat_cost
+                structure_payload = None
+                if self.uses_structure_consistent_transport:
+                    structure_cost, structure_payload = self._compute_structure_consistency_cost(
+                        flat_cost,
+                        query_euclidean,
+                        flat_support_euclidean,
+                        flat_rho,
+                        query_token_mass,
+                        support_token_mass,
+                    )
+                    final_cost = flat_cost + structure_cost
                 cost_with_sink, query_mass_with_sink, support_mass_with_sink = self._append_noise_sink(
-                    flat_cost,
+                    final_cost,
                     query_token_mass,
                     support_token_mass,
                     flat_rho,
@@ -1211,7 +1306,7 @@ class HROTFSL(BaseConv64FewShotModel):
                     b=support_mass_with_sink,
                 )
                 flat_plan = flat_plan_with_sink[..., :-1, :-1]
-                flat_transport_cost = compute_transport_cost(flat_plan, flat_cost)
+                flat_transport_cost = compute_transport_cost(flat_plan, final_cost)
                 flat_transport_mass = compute_transported_mass(flat_plan)
 
                 shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
@@ -1230,8 +1325,36 @@ class HROTFSL(BaseConv64FewShotModel):
                 transport_cost = (1.0 - q_mix) * h_anchor_transport_cost + q_mix * q_transport_cost
                 transport_mass = (1.0 - q_mix) * h_anchor_transport_mass + q_mix * q_transport_mass
                 rho = shot_rho
-                cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
+                cost = final_cost.reshape(query.shape[0], way_num, shot_num, final_cost.shape[-2], final_cost.shape[-1])
                 plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
+                if structure_payload is not None:
+                    transport_probe_payload.update(
+                        {
+                            "base_cost_matrix": flat_cost.reshape(
+                                query.shape[0],
+                                way_num,
+                                shot_num,
+                                flat_cost.shape[-2],
+                                flat_cost.shape[-1],
+                            ),
+                            "structure_cost": structure_payload["structure_cost"].reshape(
+                                query.shape[0],
+                                way_num,
+                                shot_num,
+                                flat_cost.shape[-2],
+                                flat_cost.shape[-1],
+                            ),
+                            "structure_probe_mass": structure_payload["structure_probe_mass"].reshape(
+                                query.shape[0],
+                                way_num,
+                                shot_num,
+                            ),
+                            "structure_cost_weight": self.structure_cost_weight.detach().to(
+                                device=logits.device,
+                                dtype=logits.dtype,
+                            ),
+                        }
+                    )
                 transport_probe_payload.update(
                     {
                         "transport_probe_cost": transport_probe_payload["transport_probe_cost"].reshape(
@@ -1385,9 +1508,18 @@ class HROTFSL(BaseConv64FewShotModel):
                 if self.uses_unbalanced_transport:
                     shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
 
-                logits = shot_logits.mean(dim=-1)
-                transport_cost = shot_transport_cost.mean(dim=-1)
-                transport_mass = shot_transport_mass.mean(dim=-1)
+                if self.uses_geodesic_shot_pooling:
+                    logits, transport_cost, transport_mass, shot_pool_weights = self._pool_shot_scores(
+                        shot_logits,
+                        shot_transport_cost,
+                        shot_transport_mass,
+                        geodesic_features=geodesic_features,
+                    )
+                else:
+                    shot_pool_weights = None
+                    logits = shot_logits.mean(dim=-1)
+                    transport_cost = shot_transport_cost.mean(dim=-1)
+                    transport_mass = shot_transport_mass.mean(dim=-1)
                 rho = shot_rho
                 cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
                 plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
@@ -1407,6 +1539,20 @@ class HROTFSL(BaseConv64FewShotModel):
                     "shot_logits": shot_logits,
                     "token_temperature": self.token_temperature.detach().to(device=logits.device, dtype=logits.dtype),
                 }
+                if shot_pool_weights is not None:
+                    transport_probe_payload.update(
+                        {
+                            "shot_pool_weights": shot_pool_weights,
+                            "shot_pool_temperature": self.shot_pool_temperature.detach().to(
+                                device=logits.device,
+                                dtype=logits.dtype,
+                            ),
+                            "shot_pool_mix": self.shot_pool_mix.detach().to(
+                                device=logits.device,
+                                dtype=logits.dtype,
+                            ),
+                        }
+                    )
             else:
                 flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
                 if self.uses_hybrid_ablation_eam:
@@ -1600,6 +1746,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "noise_sink_query_mass",
             "noise_sink_support_mass",
             "noise_sink_self_mass",
+            "base_cost_matrix",
+            "structure_cost",
+            "structure_probe_mass",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -1613,6 +1762,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "shot_pool_temperature",
             "shot_pool_mix",
             "q_enhancement_mix",
+            "structure_cost_weight",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
