@@ -108,6 +108,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "warn",
     "pars_net",
     "hrot_fsl",
+    "jsc_wdro",
 }
 
 

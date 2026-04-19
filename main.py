@@ -834,6 +834,38 @@ def get_args():
     parser.add_argument("--hrot_hyperbolic_backend", type=str, default="auto", choices=["auto", "geoopt", "native"])
     parser.add_argument("--hrot_ot_backend", type=str, default="native", choices=["auto", "native", "pot"])
     parser.add_argument("--hrot_eps", type=float, default=1e-6)
+    parser.add_argument("--jsc_wdro_token_dim", type=int, default=None)
+    parser.add_argument("--jsc_wdro_score_scale", type=float, default=16.0)
+    parser.add_argument("--jsc_wdro_sinkhorn_epsilon", type=float, default=0.05)
+    parser.add_argument("--jsc_wdro_sinkhorn_iterations", type=int, default=80)
+    parser.add_argument("--jsc_wdro_sinkhorn_tolerance", type=float, default=1e-5)
+    parser.add_argument("--jsc_wdro_barycenter_iterations", type=int, default=40)
+    parser.add_argument("--jsc_wdro_barycenter_tolerance", type=float, default=1e-5)
+    parser.add_argument(
+        "--jsc_wdro_barycenter_transport",
+        type=str,
+        default="unbalanced",
+        choices=["balanced", "unbalanced"],
+    )
+    parser.add_argument("--jsc_wdro_barycenter_tau", type=float, default=0.5)
+    parser.add_argument("--jsc_wdro_barycenter_method", type=str, default="sinkhorn")
+    parser.add_argument("--jsc_wdro_tau_q", type=float, default=0.5)
+    parser.add_argument("--jsc_wdro_tau_c", type=float, default=0.5)
+    parser.add_argument("--jsc_wdro_query_transport", type=str, default="balanced", choices=["balanced", "unbalanced"])
+    parser.add_argument("--jsc_wdro_epsilon_alpha_init", type=float, default=0.05)
+    parser.add_argument("--jsc_wdro_epsilon_beta_init", type=float, default=0.25)
+    parser.add_argument("--jsc_wdro_epsilon_floor_init", type=float, default=1e-4)
+    parser.add_argument("--jsc_wdro_learn_epsilon", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--jsc_wdro_epsilon_dimension", type=int, default=None)
+    parser.add_argument("--jsc_wdro_epsilon_reg_weight", type=float, default=0.0)
+    parser.add_argument("--jsc_wdro_normalize_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--jsc_wdro_cost_power", type=float, default=2.0)
+    parser.add_argument("--jsc_wdro_normalize_unbalanced_cost", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--jsc_wdro_use_competitive_diagnostics", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--jsc_wdro_competitive_temperature", type=float, default=0.1)
+    parser.add_argument("--jsc_wdro_profile", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--jsc_wdro_ot_backend", type=str, default="pot", choices=["auto", "pot"])
+    parser.add_argument("--jsc_wdro_eps", type=float, default=1e-8)
 
     parser.add_argument(
         "--training_samples",
@@ -1455,6 +1487,23 @@ def get_model(args):
             f"structure_cost_init={getattr(args, 'hrot_structure_cost_init', 0.05)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
+    if args.model == "jsc_wdro":
+        print(
+            "  jsc_wdro: backbone spatial tokens -> class Wasserstein barycenter -> "
+            "adaptive WDRO radius -> robust query-class OT score "
+            f"(token_dim={getattr(args, 'jsc_wdro_token_dim', None) or getattr(args, 'token_dim', 128)}, "
+            f"score_scale={getattr(args, 'jsc_wdro_score_scale', 16.0)}, "
+            f"sinkhorn_eps={getattr(args, 'jsc_wdro_sinkhorn_epsilon', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'jsc_wdro_sinkhorn_iterations', 80)}, "
+            f"bary_iters={getattr(args, 'jsc_wdro_barycenter_iterations', 40)}, "
+            f"bary_transport={getattr(args, 'jsc_wdro_barycenter_transport', 'unbalanced')}, "
+            f"bary_tau={getattr(args, 'jsc_wdro_barycenter_tau', 0.5)}, "
+            f"query_transport={getattr(args, 'jsc_wdro_query_transport', 'balanced')}, "
+            f"epsilon_alpha={getattr(args, 'jsc_wdro_epsilon_alpha_init', 0.05)}, "
+            f"epsilon_beta={getattr(args, 'jsc_wdro_epsilon_beta_init', 0.25)}, "
+            f"epsilon_reg={getattr(args, 'jsc_wdro_epsilon_reg_weight', 0.0)}, "
+            f"ot_backend={getattr(args, 'jsc_wdro_ot_backend', 'pot')})"
+        )
     return model
 
 
@@ -1781,6 +1830,14 @@ def forward_scores(
             return_aux=collect_diagnostics,
         )
     if args.model == "hrot_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
+    if args.model == "jsc_wdro":
         return net(
             query,
             support,

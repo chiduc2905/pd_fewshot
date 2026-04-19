@@ -308,6 +308,11 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive, token-reliable mass",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
+    "jsc_wdro": {
+        "display_name": "JSC-WDRO",
+        "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT robust query-class OT score",
+        "metric": "POT Barycentric Wasserstein DRO Distance",
+    },
     "transport_prior_replay_mamba_net": {
         "display_name": "TPR-MambaNet",
         "architecture": "Conv64F -> multi-atom support prior calibration -> replay-controlled query reader -> trajectory transport head",
@@ -1782,6 +1787,50 @@ def build_model_from_args(args):
             hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
             ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
+        )
+    if args.model == "jsc_wdro":
+        JSCWDRO = _load_symbol("net.jsc_wdro", "JSCWDRO")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return JSCWDRO(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "jsc_wdro_token_dim", getattr(args, "token_dim", 128)) or 128),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            sinkhorn_epsilon=float(getattr(args, "jsc_wdro_sinkhorn_epsilon", 0.05)),
+            sinkhorn_iterations=int(getattr(args, "jsc_wdro_sinkhorn_iterations", 80)),
+            sinkhorn_tolerance=float(getattr(args, "jsc_wdro_sinkhorn_tolerance", 1e-5)),
+            barycenter_iterations=int(getattr(args, "jsc_wdro_barycenter_iterations", 40)),
+            barycenter_tolerance=float(getattr(args, "jsc_wdro_barycenter_tolerance", 1e-5)),
+            barycenter_transport=str(getattr(args, "jsc_wdro_barycenter_transport", "unbalanced")),
+            barycenter_tau=float(getattr(args, "jsc_wdro_barycenter_tau", 0.5)),
+            barycenter_method=str(getattr(args, "jsc_wdro_barycenter_method", "sinkhorn")),
+            tau_q=float(getattr(args, "jsc_wdro_tau_q", 0.5)),
+            tau_c=float(getattr(args, "jsc_wdro_tau_c", 0.5)),
+            query_transport=str(getattr(args, "jsc_wdro_query_transport", "balanced")),
+            score_scale=float(getattr(args, "jsc_wdro_score_scale", 16.0)),
+            epsilon_alpha_init=float(getattr(args, "jsc_wdro_epsilon_alpha_init", 0.05)),
+            epsilon_beta_init=float(getattr(args, "jsc_wdro_epsilon_beta_init", 0.25)),
+            epsilon_floor_init=float(getattr(args, "jsc_wdro_epsilon_floor_init", 1e-4)),
+            learn_epsilon=_bool_flag(getattr(args, "jsc_wdro_learn_epsilon", "true"), default=True),
+            epsilon_dimension=getattr(args, "jsc_wdro_epsilon_dimension", None),
+            epsilon_reg_weight=float(getattr(args, "jsc_wdro_epsilon_reg_weight", 0.0)),
+            normalize_tokens=_bool_flag(getattr(args, "jsc_wdro_normalize_tokens", "true"), default=True),
+            cost_power=float(getattr(args, "jsc_wdro_cost_power", 2.0)),
+            normalize_unbalanced_cost=_bool_flag(
+                getattr(args, "jsc_wdro_normalize_unbalanced_cost", "true"),
+                default=True,
+            ),
+            use_competitive_diagnostics=_bool_flag(
+                getattr(args, "jsc_wdro_use_competitive_diagnostics", "true"),
+                default=True,
+            ),
+            competitive_temperature=float(getattr(args, "jsc_wdro_competitive_temperature", 0.1)),
+            profile=_bool_flag(getattr(args, "jsc_wdro_profile", "false"), default=False),
+            ot_backend=str(getattr(args, "jsc_wdro_ot_backend", "pot")),
+            eps=float(getattr(args, "jsc_wdro_eps", 1e-8)),
         )
     if args.model in {"warn", "pars_net"}:
         WassersteinRoutedAttentiveReconstructionNet = _load_symbol(
