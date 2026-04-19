@@ -17,7 +17,9 @@ from net.modules.unbalanced_ot import (
     compute_transport_cost,
     compute_transported_mass,
     resolve_ot_backend,
+    sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
+    sinkhorn_unbalanced_log,
     sinkhorn_unbalanced_pot,
 )
 
@@ -50,7 +52,8 @@ class JSCWDRO(BaseConv64FewShotModel):
 
     The class-level nominal distribution is a POT fixed-support entropic
     Wasserstein/UOT barycenter over the union of all support tokens for a class.
-    Scores use POT Sinkhorn solvers and follow the closed-form WDRO distance
+    Scores use POT or native log-domain Sinkhorn solvers and follow the
+    closed-form WDRO distance
     `score(q, c) = -[W_p(mu_q, nu_c) - epsilon_c]_+`.
     """
 
@@ -124,9 +127,9 @@ class JSCWDRO(BaseConv64FewShotModel):
             raise ValueError(f"Unsupported barycenter_transport: {barycenter_transport}")
         if competitive_temperature <= 0.0:
             raise ValueError("competitive_temperature must be positive")
-        ot_backend = "pot" if str(ot_backend).lower() == "auto" else str(ot_backend).lower()
-        if ot_backend != "pot":
-            raise ValueError("JSC-WDRO uses POT solvers; set ot_backend='pot'")
+        ot_backend = "native" if str(ot_backend).lower() == "auto" else str(ot_backend).lower()
+        if ot_backend not in {"native", "pot"}:
+            raise ValueError("JSC-WDRO ot_backend must be 'native', 'pot', or 'auto'")
 
         self.token_dim = int(token_dim)
         self.sinkhorn_epsilon = float(sinkhorn_epsilon)
@@ -380,7 +383,8 @@ class JSCWDRO(BaseConv64FewShotModel):
         cost = self._pairwise_cost(query_tokens, class_tokens)
 
         if unbalanced:
-            plan = sinkhorn_unbalanced_pot(
+            solver = sinkhorn_unbalanced_pot if self.ot_backend == "pot" else sinkhorn_unbalanced_log
+            plan = solver(
                 cost,
                 query_mass,
                 class_mass,
@@ -391,7 +395,8 @@ class JSCWDRO(BaseConv64FewShotModel):
                 tol=self.sinkhorn_tolerance,
             )
         else:
-            plan = sinkhorn_balanced_pot(
+            solver = sinkhorn_balanced_pot if self.ot_backend == "pot" else sinkhorn_balanced_log
+            plan = solver(
                 cost,
                 query_mass,
                 class_mass,

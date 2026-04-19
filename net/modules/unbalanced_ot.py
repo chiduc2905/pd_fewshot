@@ -50,6 +50,11 @@ def sinkhorn_balanced_log(
     max_iter: int = 60,
     tol: float = 1e-5,
 ) -> torch.Tensor:
+    """Log-domain entropic Sinkhorn solver for balanced OT.
+
+    Solves `P = diag(u) exp(-C / eps) diag(v)` with fixed row
+    marginal `a` and column marginal `b`.
+    """
     _validate_transport_inputs(cost, a, b, eps)
     log_a = torch.log(a.clamp_min(EPS))
     log_b = torch.log(b.clamp_min(EPS))
@@ -60,9 +65,14 @@ def sinkhorn_balanced_log(
 
     for _ in range(max_iter):
         prev_log_u = log_u
+        prev_log_v = log_v
         log_u = log_a - torch.logsumexp(log_kernel + log_v.unsqueeze(-2), dim=-1)
         log_v = log_b - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=-2)
-        if tol > 0.0 and (log_u - prev_log_u).abs().amax() < tol:
+        delta = torch.maximum(
+            (log_u - prev_log_u).abs().amax(),
+            (log_v - prev_log_v).abs().amax(),
+        )
+        if tol > 0.0 and delta < tol:
             break
 
     log_plan = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)
@@ -79,6 +89,13 @@ def sinkhorn_unbalanced_log(
     max_iter: int = 60,
     tol: float = 1e-5,
 ) -> torch.Tensor:
+    """Log-domain Sinkhorn solver for KL-relaxed unbalanced OT.
+
+    This matches POT's entropy-regularized UOT scaling
+    `ot.unbalanced.sinkhorn_unbalanced(..., reg_type="entropy")`:
+    `K = exp(-C / eps)` and scaling exponents
+    `rho = tau / (tau + eps)`.
+    """
     _validate_transport_inputs(cost, a, b, eps)
     if tau_q <= 0.0 or tau_c <= 0.0:
         raise ValueError("tau_q and tau_c must be positive")
@@ -94,9 +111,14 @@ def sinkhorn_unbalanced_log(
 
     for _ in range(max_iter):
         prev_log_u = log_u
+        prev_log_v = log_v
         log_u = rho_q * (log_a - torch.logsumexp(log_kernel + log_v.unsqueeze(-2), dim=-1))
         log_v = rho_c * (log_b - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=-2))
-        if tol > 0.0 and (log_u - prev_log_u).abs().amax() < tol:
+        delta = torch.maximum(
+            (log_u - prev_log_u).abs().amax(),
+            (log_v - prev_log_v).abs().amax(),
+        )
+        if tol > 0.0 and delta < tol:
             break
 
     log_plan = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)

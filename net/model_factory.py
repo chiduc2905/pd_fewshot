@@ -310,8 +310,8 @@ MODEL_REGISTRY = {
     },
     "jsc_wdro": {
         "display_name": "JSC-WDRO",
-        "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT robust query-class OT score",
-        "metric": "POT Barycentric Wasserstein DRO Distance",
+        "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT/native robust query-class OT score",
+        "metric": "Barycentric Wasserstein DRO Distance",
     },
     "transport_prior_replay_mamba_net": {
         "display_name": "TPR-MambaNet",

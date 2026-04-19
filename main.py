@@ -864,7 +864,7 @@ def get_args():
     parser.add_argument("--jsc_wdro_use_competitive_diagnostics", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--jsc_wdro_competitive_temperature", type=float, default=0.1)
     parser.add_argument("--jsc_wdro_profile", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--jsc_wdro_ot_backend", type=str, default="pot", choices=["auto", "pot"])
+    parser.add_argument("--jsc_wdro_ot_backend", type=str, default="pot", choices=["auto", "native", "pot"])
     parser.add_argument("--jsc_wdro_eps", type=float, default=1e-8)
 
     parser.add_argument(
