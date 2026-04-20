@@ -92,6 +92,8 @@ class JSCWDRO(BaseConv64FewShotModel):
         cost_power: float = 2.0,
         normalize_unbalanced_cost: bool = True,
         unbalanced_score_mode: str = "uot_objective",
+        token_weighting: str = "uniform",
+        token_weight_temperature: float = 0.25,
         use_competitive_diagnostics: bool = True,
         competitive_temperature: float = 0.1,
         profile: bool = False,
@@ -136,6 +138,11 @@ class JSCWDRO(BaseConv64FewShotModel):
                 "unbalanced_score_mode must be 'uot_objective', "
                 "'normalized_transport', or 'transport'"
             )
+        token_weighting = str(token_weighting).lower()
+        if token_weighting not in {"uniform", "cross_reference"}:
+            raise ValueError("token_weighting must be 'uniform' or 'cross_reference'")
+        if token_weight_temperature <= 0.0:
+            raise ValueError("token_weight_temperature must be positive")
         if competitive_temperature <= 0.0:
             raise ValueError("competitive_temperature must be positive")
         ot_backend = "native" if str(ot_backend).lower() == "auto" else str(ot_backend).lower()
@@ -162,6 +169,8 @@ class JSCWDRO(BaseConv64FewShotModel):
         self.cost_power = float(cost_power)
         self.normalize_unbalanced_cost = bool(normalize_unbalanced_cost)
         self.unbalanced_score_mode = unbalanced_score_mode
+        self.token_weighting = token_weighting
+        self.token_weight_temperature = float(token_weight_temperature)
         self.use_competitive_diagnostics = bool(use_competitive_diagnostics)
         self.competitive_temperature = float(competitive_temperature)
         self.profile = bool(profile)
@@ -364,8 +373,49 @@ class JSCWDRO(BaseConv64FewShotModel):
             raise ValueError(
                 "query_weights must have shape (Tokens,) or (NumQuery, Tokens), "
                 f"got {tuple(query_weights.shape)}"
-            )
+        )
         return _normalize_weights(query_weights, self.eps)
+
+    def _prepare_class_weights(
+        self,
+        class_weights: torch.Tensor,
+        *,
+        query_num: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        class_weights = class_weights.to(device=device, dtype=dtype)
+        if class_weights.dim() == 1:
+            class_mass = _normalize_weights(class_weights, self.eps)
+            return class_mass.unsqueeze(0).expand(query_num, -1)
+        if class_weights.dim() == 2 and class_weights.shape[0] == query_num:
+            return _normalize_weights(class_weights, self.eps)
+        raise ValueError(
+            "class_weights must have shape (ClassTokens,) or (NumQuery, ClassTokens), "
+            f"got {tuple(class_weights.shape)} for NumQuery={query_num}"
+        )
+
+    def _cross_reference_weights(
+        self,
+        query_tokens: torch.Tensor,
+        class_tokens: torch.Tensor,
+        class_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        class_prior = _normalize_weights(
+            class_weights.to(device=query_tokens.device, dtype=query_tokens.dtype),
+            self.eps,
+        )
+        class_summary = torch.matmul(class_prior, class_tokens)
+        temperature = max(self.token_weight_temperature, self.eps)
+
+        query_logits = torch.matmul(query_tokens, class_summary) / temperature
+        query_weights = torch.softmax(query_logits, dim=-1)
+        query_summary = torch.einsum("nt,ntd->nd", query_weights, query_tokens)
+
+        class_logits = torch.matmul(query_summary, class_tokens.transpose(0, 1)) / temperature
+        class_logits = class_logits + torch.log(class_prior.clamp_min(self.eps)).unsqueeze(0)
+        query_conditioned_class_weights = torch.softmax(class_logits, dim=-1)
+        return query_weights, query_conditioned_class_weights
 
     def _compute_wot_details(
         self,
@@ -390,8 +440,12 @@ class JSCWDRO(BaseConv64FewShotModel):
             raise ValueError(f"class_tokens must have shape (Tokens, Dim), got {tuple(class_tokens.shape)}")
 
         query_mass = self._prepare_query_weights(query_tokens, query_weights)
-        class_mass = _normalize_weights(class_weights.to(device=query_tokens.device, dtype=query_tokens.dtype), self.eps)
-        class_mass = class_mass.unsqueeze(0).expand(query_tokens.shape[0], -1)
+        class_mass = self._prepare_class_weights(
+            class_weights,
+            query_num=query_tokens.shape[0],
+            device=query_tokens.device,
+            dtype=query_tokens.dtype,
+        )
         cost = self._pairwise_cost(query_tokens, class_tokens)
 
         if unbalanced:
@@ -580,12 +634,24 @@ class JSCWDRO(BaseConv64FewShotModel):
         plans = []
         costs = []
         masses = []
+        query_weight_items = []
+        class_weight_items = []
         for class_idx in range(way_num):
+            class_query_weights = query_weights
+            class_bary_weights = bary_weights_tensor[class_idx]
+            if query_weights is None and self.token_weighting == "cross_reference":
+                class_query_weights, class_bary_weights = self._cross_reference_weights(
+                    query_tokens,
+                    bary_tokens_tensor[class_idx],
+                    bary_weights_tensor[class_idx],
+                )
+                query_weight_items.append(class_query_weights)
+                class_weight_items.append(class_bary_weights)
             distance, plan, cost, transported_mass = self._compute_wot_details(
                 query_tokens,
-                query_weights,
+                class_query_weights,
                 bary_tokens_tensor[class_idx],
-                bary_weights_tensor[class_idx],
+                class_bary_weights,
                 unbalanced=self.query_transport == "unbalanced",
             )
             distances.append(distance)
@@ -598,6 +664,20 @@ class JSCWDRO(BaseConv64FewShotModel):
         transport_plan = torch.stack(plans, dim=1)
         cost_matrix = torch.stack(costs, dim=1)
         transported_mass = torch.stack(masses, dim=-1)
+        if query_weight_items:
+            query_weight_tensor = torch.stack(query_weight_items, dim=1)
+            class_weight_tensor = torch.stack(class_weight_items, dim=1)
+            query_weight_entropy = -(
+                query_weight_tensor.clamp_min(self.eps) * query_weight_tensor.clamp_min(self.eps).log()
+            ).sum(dim=-1)
+            class_weight_entropy = -(
+                class_weight_tensor.clamp_min(self.eps) * class_weight_tensor.clamp_min(self.eps).log()
+            ).sum(dim=-1)
+        else:
+            query_weight_tensor = None
+            class_weight_tensor = None
+            query_weight_entropy = None
+            class_weight_entropy = None
 
         score_start = time.perf_counter()
         robust_distance = (distance_tensor - epsilon_tensor[None, :]).clamp_min(0.0)
@@ -620,6 +700,13 @@ class JSCWDRO(BaseConv64FewShotModel):
             "support_dispersion": dispersion_tensor,
             "shot_barycenter_distance": shot_distance_tensor,
         }
+        if query_weight_entropy is not None and class_weight_entropy is not None:
+            outputs.update(
+                {
+                    "mean_query_mass_entropy": query_weight_entropy.mean().detach(),
+                    "mean_support_mass_entropy": class_weight_entropy.mean().detach(),
+                }
+            )
         if return_aux:
             outputs.update(
                 {
@@ -629,6 +716,13 @@ class JSCWDRO(BaseConv64FewShotModel):
                     "cost_matrix": cost_matrix,
                 }
             )
+            if query_weight_tensor is not None and class_weight_tensor is not None:
+                outputs.update(
+                    {
+                        "query_token_weights": query_weight_tensor,
+                        "class_token_weights": class_weight_tensor,
+                    }
+                )
             if self.use_competitive_diagnostics:
                 outputs["competitive_assignment"] = self.compute_competitive_assignment(
                     query_tokens,
@@ -682,7 +776,13 @@ class JSCWDRO(BaseConv64FewShotModel):
                 dim=0,
             ),
         }
-        optional_cat_keys = ("transport_plan", "cost_matrix", "competitive_assignment")
+        optional_cat_keys = (
+            "transport_plan",
+            "cost_matrix",
+            "competitive_assignment",
+            "query_token_weights",
+            "class_token_weights",
+        )
         for key in optional_cat_keys:
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -691,6 +791,9 @@ class JSCWDRO(BaseConv64FewShotModel):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
         for key in ("profile_barycenter_ms", "profile_ot_ms", "profile_scoring_ms", "profile_total_ms"):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
+        for key in ("mean_query_mass_entropy", "mean_support_mass_entropy"):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
         return JSCWDROResult(stacked)

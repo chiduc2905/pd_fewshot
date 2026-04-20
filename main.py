@@ -867,6 +867,13 @@ def get_args():
         default="uot_objective",
         choices=["uot_objective", "normalized_transport", "transport"],
     )
+    parser.add_argument(
+        "--jsc_wdro_token_weighting",
+        type=str,
+        default="uniform",
+        choices=["uniform", "cross_reference"],
+    )
+    parser.add_argument("--jsc_wdro_token_weight_temperature", type=float, default=0.25)
     parser.add_argument("--jsc_wdro_use_competitive_diagnostics", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--jsc_wdro_competitive_temperature", type=float, default=0.1)
     parser.add_argument("--jsc_wdro_profile", type=str, default="false", choices=["true", "false"])
@@ -1509,6 +1516,7 @@ def get_model(args):
             f"epsilon_beta={getattr(args, 'jsc_wdro_epsilon_beta_init', 0.25)}, "
             f"epsilon_reg={getattr(args, 'jsc_wdro_epsilon_reg_weight', 0.0)}, "
             f"unbalanced_score={getattr(args, 'jsc_wdro_unbalanced_score_mode', 'uot_objective')}, "
+            f"token_weighting={getattr(args, 'jsc_wdro_token_weighting', 'uniform')}, "
             f"ot_backend={getattr(args, 'jsc_wdro_ot_backend', 'pot')})"
         )
     return model

@@ -1824,6 +1824,8 @@ def build_model_from_args(args):
                 default=True,
             ),
             unbalanced_score_mode=str(getattr(args, "jsc_wdro_unbalanced_score_mode", "uot_objective")),
+            token_weighting=str(getattr(args, "jsc_wdro_token_weighting", "uniform")),
+            token_weight_temperature=float(getattr(args, "jsc_wdro_token_weight_temperature", 0.25)),
             use_competitive_diagnostics=_bool_flag(
                 getattr(args, "jsc_wdro_use_competitive_diagnostics", "true"),
                 default=True,
