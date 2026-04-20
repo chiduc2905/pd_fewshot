@@ -1176,6 +1176,61 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         assert outputs["query_token_mass"].shape[:3] == (2, 3, 2)
 
 
+def test_hrot_fsl_raw_backbone_tokens_bypass_projector():
+    args = SimpleNamespace(
+        model="hrot_fsl",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        token_dim=24,
+        hrot_token_dim=24,
+        hrot_use_raw_backbone_tokens="true",
+        hrot_variant="H",
+        hrot_eam_hidden_dim=32,
+        hrot_curvature_init=1.0,
+        hrot_projection_scale=0.1,
+        hrot_token_temperature=0.1,
+        hrot_score_scale=8.0,
+        hrot_tau_q=0.5,
+        hrot_tau_c=0.5,
+        hrot_sinkhorn_epsilon=0.1,
+        hrot_sinkhorn_iterations=10,
+        hrot_sinkhorn_tolerance=1e-5,
+        hrot_fixed_mass=0.8,
+        hrot_min_mass=0.1,
+        hrot_mass_bonus_init=1.0,
+        hrot_lambda_rho=0.05,
+        hrot_rho_target=0.8,
+        hrot_lambda_rho_rank=0.05,
+        hrot_rho_rank_margin=0.05,
+        hrot_rho_rank_temperature=0.05,
+        hrot_lambda_curvature=0.01,
+        hrot_min_curvature=0.05,
+        hrot_structure_cost_init=0.05,
+        hrot_normalize_euclidean_tokens="true",
+        hrot_normalize_rho="false",
+        hrot_eval_use_float64="true",
+        hrot_hyperbolic_backend="native",
+        hrot_ot_backend="native",
+        hrot_eps=1e-6,
+    )
+    model = build_model_from_args(args)
+    model.eval()
+
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 2, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.use_raw_backbone_tokens
+    assert isinstance(model.token_projector, torch.nn.Identity)
+    assert model.token_dim == 64
+    assert outputs["query_euclidean_tokens"].shape[-1] == 64
+    assert outputs["support_hyperbolic_tokens"].shape[-1] == 64
+    assert torch.isfinite(outputs["logits"]).all()
+
+
 def test_forward_scores_routes_query_targets_and_aux_to_hrot():
     source = Path("main.py").read_text(encoding="utf-8")
     module = ast.parse(source)

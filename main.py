@@ -800,6 +800,7 @@ def get_args():
     parser.add_argument("--warn_diversity_weight", type=float, default=0.0)
     parser.add_argument("--warn_recon_lambda_init", type=float, default=0.1)
     parser.add_argument("--hrot_token_dim", type=int, default=None)
+    parser.add_argument("--hrot_use_raw_backbone_tokens", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
         "--hrot_variant",
         type=str,
@@ -1475,11 +1476,16 @@ def get_model(args):
             f"prior_temp={getattr(args, 'warn_prior_temperature', 1.0)})"
         )
     if args.model == "hrot_fsl":
+        hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
+        hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
+            getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
+        )
         print(
-            "  hrot_fsl: backbone spatial tokens -> Euclidean projector -> "
+            "  hrot_fsl: backbone spatial tokens -> optional Euclidean projector -> "
             "Poincare-ball geometry -> balanced/unbalanced relational transport "
             f"(variant={getattr(args, 'hrot_variant', 'E')}, "
-            f"token_dim={getattr(args, 'hrot_token_dim', None) or getattr(args, 'token_dim', 128)}, "
+            f"token_dim={hrot_token_dim}, "
+            f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
             f"eam_hidden={getattr(args, 'hrot_eam_hidden_dim', 256)}, "
             f"curvature_init={getattr(args, 'hrot_curvature_init', 1.0)}, "
             f"proj_scale={getattr(args, 'hrot_projection_scale', 0.1)}, "

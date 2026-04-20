@@ -305,7 +305,7 @@ MODEL_REGISTRY = {
     },
     "hrot_fsl": {
         "display_name": "HROT-FSL",
-        "architecture": "Backbone spatial tokens -> Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive, token-reliable mass",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive, token-reliable mass",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "jsc_wdro": {
@@ -1751,6 +1751,10 @@ def build_model_from_args(args):
             in_channels=3,
             hidden_dim=hidden_dim,
             token_dim=int(getattr(args, "hrot_token_dim", getattr(args, "token_dim", 128)) or 128),
+            use_raw_backbone_tokens=_bool_flag(
+                getattr(args, "hrot_use_raw_backbone_tokens", "false"),
+                default=False,
+            ),
             backbone_name=fewshot_backbone,
             image_size=image_size,
             resnet12_drop_rate=0.0,

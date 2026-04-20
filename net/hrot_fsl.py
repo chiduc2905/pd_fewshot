@@ -52,6 +52,7 @@ class HROTFSL(BaseConv64FewShotModel):
         in_channels: int = 3,
         hidden_dim: int = 640,
         token_dim: int = 128,
+        use_raw_backbone_tokens: bool = False,
         backbone_name: str = "resnet12",
         image_size: int = 84,
         resnet12_drop_rate: float = 0.0,
@@ -97,6 +98,9 @@ class HROTFSL(BaseConv64FewShotModel):
         variant = str(variant).upper()
         if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
+        self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
+        if self.use_raw_backbone_tokens:
+            token_dim = int(hidden_dim)
         if token_dim <= 0:
             raise ValueError("token_dim must be positive")
         if projection_scale <= 0.0:
@@ -157,9 +161,14 @@ class HROTFSL(BaseConv64FewShotModel):
         self.eps = float(eps)
         self.default_token_temperature = float(token_temperature)
 
-        self.token_projector = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, token_dim, bias=False),
+        self.token_dim = int(token_dim)
+        self.token_projector = (
+            nn.Identity()
+            if self.use_raw_backbone_tokens
+            else nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, token_dim, bias=False),
+            )
         )
         if self.hyperbolic_backend == "geoopt":
             self.manifold = get_ball(float(curvature_init), backend="geoopt", learnable=True)
