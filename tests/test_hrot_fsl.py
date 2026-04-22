@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,7 +140,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -156,7 +157,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["total_distance"].shape == (2, 3)
     assert outputs["transport_cost"].shape == (2, 3)
     assert outputs["transported_mass"].shape == (2, 3)
-    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}:
+    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -169,6 +170,33 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     else:
         assert torch.all(outputs["rho"] >= 0.1)
         assert torch.all(outputs["rho"] <= 1.0)
+
+
+def test_hrot_fsl_variant_t_uses_structural_cover_objective():
+    torch.manual_seed(33)
+    model = _build_model(variant="T")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    expected_shot_distance = outputs["shot_transport_cost"] / outputs["shot_transported_mass"].clamp_min(model.eps)
+    expected_shot_logits = -model.score_scale * expected_shot_distance
+    expected_logits = torch.logsumexp(expected_shot_logits, dim=-1) - math.log(2.0)
+    expected_cover_weights = torch.softmax(expected_shot_logits, dim=-1)
+    expected_cover_distance = -expected_logits / float(model.score_scale)
+
+    assert model.uses_structural_cover_objective
+    assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
+    assert torch.allclose(outputs["shot_explanation_distance"], expected_shot_distance, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["shot_cover_weights"], expected_cover_weights, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["transport_cost"], expected_cover_distance, atol=1e-5, rtol=1e-5)
+    assert outputs["rho_regularization"].item() == 0.0
 
 
 def test_hrot_fsl_variant_f_uses_euclidean_cost_with_learned_hyperbolic_mass():
@@ -1117,7 +1145,7 @@ def test_hrot_fsl_pot_backend_runs_for_debug_path():
     assert torch.isfinite(outputs["transport_plan"]).all()
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S"])
+@pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S", "T"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",
@@ -1174,6 +1202,9 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     if factory_variant == "S":
         assert outputs["shot_pool_weights"].shape == (2, 3, 2)
         assert outputs["query_token_mass"].shape[:3] == (2, 3, 2)
+    if factory_variant == "T":
+        assert outputs["shot_cover_weights"].shape == (2, 3, 2)
+        assert outputs["shot_explanation_distance"].shape == (2, 3, 2)
 
 
 def test_hrot_fsl_raw_backbone_tokens_bypass_projector():
