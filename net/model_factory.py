@@ -308,6 +308,11 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive, token-reliable mass",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
+    "fgwuot_fsl": {
+        "display_name": "FGWUOT-FSL",
+        "architecture": "Backbone spatial tokens -> Fused Gromov-Wasserstein Unbalanced OT -> joint k-shot support matching",
+        "metric": "FGW Unbalanced OT",
+    },
     "jsc_wdro": {
         "display_name": "JSC-WDRO",
         "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT/native robust query-class OT score",
@@ -1791,6 +1796,29 @@ def build_model_from_args(args):
             hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
             ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
+        )
+    if args.model == "fgwuot_fsl":
+        FGWUOTFewShot = _load_symbol("net.fgwuot_fsl", "FGWUOTFewShot")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return FGWUOTFewShot(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "fgwuot_token_dim", 128)),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            tau=float(getattr(args, "fgwuot_tau", 0.5)),
+            eps_sinkhorn=float(getattr(args, "fgwuot_eps_sinkhorn", 0.1)),
+            fgw_iters=int(getattr(args, "fgwuot_fgw_iters", 8)),
+            sinkhorn_iters=int(getattr(args, "fgwuot_sinkhorn_iters", 60)),
+            sinkhorn_tol=float(getattr(args, "fgwuot_sinkhorn_tol", 1e-5)),
+            alpha_init=float(getattr(args, "fgwuot_alpha_init", 0.5)),
+            score_scale_init=float(getattr(args, "fgwuot_score_scale_init", 16.0)),
+            rho_head_hidden=int(getattr(args, "fgwuot_rho_head_hidden", 32)),
+            lambda_rho=float(getattr(args, "fgwuot_lambda_rho", 0.01)),
+            rho_target=float(getattr(args, "fgwuot_rho_target", 0.8)),
+            normalize_tokens=_bool_flag(
+                getattr(args, "fgwuot_normalize_tokens", "true"), default=True),
+            eps=float(getattr(args, "fgwuot_eps", 1e-8)),
         )
     if args.model == "jsc_wdro":
         JSCWDRO = _load_symbol("net.jsc_wdro", "JSCWDRO")

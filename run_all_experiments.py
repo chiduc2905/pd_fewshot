@@ -48,7 +48,7 @@ def get_args():
     parser.add_argument(
         "--models",
         type=str,
-        default="covamnet,protonet,cosine,relationnet,matchingnet,dn4,feat,deepemd,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net",
+        default="covamnet,protonet,cosine,relationnet,matchingnet,dn4,feat,deepemd,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net,fgwuot_fsl",
         help="Comma-separated model registry names to run",
     )
     parser.add_argument(
@@ -108,6 +108,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "warn",
     "pars_net",
     "hrot_fsl",
+    "fgwuot_fsl",
     "jsc_wdro",
 }
 

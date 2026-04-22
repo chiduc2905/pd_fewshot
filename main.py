@@ -1858,6 +1858,14 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
+    if args.model == "fgwuot_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
     if args.model == "jsc_wdro":
         return net(
             query,
