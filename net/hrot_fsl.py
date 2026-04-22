@@ -103,7 +103,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -129,9 +129,9 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
@@ -142,9 +142,11 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
         self.uses_geodesic_shot_pooling = variant == "S"
-        self.uses_noise_calibrated_transport = variant in {"Q", "R", "T"}
-        self.uses_structure_consistent_transport = variant in {"R", "T"}
-        self.uses_structural_cover_objective = variant == "T"
+        self.uses_noise_calibrated_transport = variant in {"Q", "R", "T", "U"}
+        self.uses_structure_consistent_transport = variant in {"R", "T", "U"}
+        self.uses_structural_cover_objective = variant in {"T", "U"}
+        self.uses_coverage_regularized_cover = variant == "U"
+        self.coverage_penalty_weight = 0.5 if self.uses_coverage_regularized_cover else 0.0
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
@@ -1046,9 +1048,19 @@ class HROTFSL(BaseConv64FewShotModel):
         self,
         shot_transport_cost: torch.Tensor,
         shot_transport_mass: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        shot_rho: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         explained_mass = shot_transport_mass.clamp_min(self.eps)
         shot_explanation_distance = shot_transport_cost / explained_mass
+        shot_coverage_ratio = None
+        if self.uses_coverage_regularized_cover:
+            if shot_rho is None:
+                raise ValueError("Coverage-regularized structural cover requires shot-wise rho budgets.")
+            shot_rho = shot_rho.to(device=shot_transport_mass.device, dtype=shot_transport_mass.dtype)
+            shot_coverage_ratio = (shot_transport_mass / shot_rho.clamp_min(self.eps)).clamp(0.0, 1.0)
+            shot_explanation_distance = shot_explanation_distance + self.coverage_penalty_weight * (
+                1.0 - shot_coverage_ratio
+            )
         shot_logits = -self.score_scale * shot_explanation_distance
         if shot_logits.shape[-1] == 1:
             shot_cover_weights = torch.ones_like(shot_logits)
@@ -1058,7 +1070,14 @@ class HROTFSL(BaseConv64FewShotModel):
         cover_logits = torch.logsumexp(shot_logits, dim=-1) - math.log(float(max(shot_logits.shape[-1], 1)))
         cover_distance = -cover_logits / float(self.score_scale)
         cover_mass = (shot_cover_weights * shot_transport_mass).sum(dim=-1)
-        return cover_logits, cover_distance, cover_mass, shot_cover_weights, shot_explanation_distance
+        return (
+            cover_logits,
+            cover_distance,
+            cover_mass,
+            shot_cover_weights,
+            shot_explanation_distance,
+            shot_coverage_ratio,
+        )
 
     def _compute_hyperbolic_token_marginals(
         self,
@@ -1327,11 +1346,17 @@ class HROTFSL(BaseConv64FewShotModel):
                 shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
                 shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
                 if self.uses_structural_cover_objective:
-                    logits, transport_cost, transport_mass, shot_cover_weights, shot_explanation_distance = (
-                        self._compute_structural_cover_logits(
-                            shot_transport_cost,
-                            shot_transport_mass,
-                        )
+                    (
+                        logits,
+                        transport_cost,
+                        transport_mass,
+                        shot_cover_weights,
+                        shot_explanation_distance,
+                        shot_coverage_ratio,
+                    ) = self._compute_structural_cover_logits(
+                        shot_transport_cost,
+                        shot_transport_mass,
+                        shot_rho=shot_rho,
                     )
                     shot_logits = -self.score_scale * shot_explanation_distance
                 else:
@@ -1518,6 +1543,8 @@ class HROTFSL(BaseConv64FewShotModel):
                             "shot_explanation_distance": shot_explanation_distance,
                         }
                     )
+                    if shot_coverage_ratio is not None:
+                        transport_probe_payload["shot_coverage_ratio"] = shot_coverage_ratio
                 else:
                     transport_probe_payload.update(
                         {
@@ -1811,6 +1838,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "structure_probe_mass",
             "shot_cover_weights",
             "shot_explanation_distance",
+            "shot_coverage_ratio",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)

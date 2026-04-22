@@ -805,7 +805,7 @@ def get_args():
         "--hrot_variant",
         type=str,
         default="E",
-        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"],
+        choices=["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"],
     )
     parser.add_argument("--hrot_eam_hidden_dim", type=int, default=256)
     parser.add_argument("--hrot_curvature_init", type=float, default=1.0)
