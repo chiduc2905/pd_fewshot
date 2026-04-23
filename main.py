@@ -1660,6 +1660,167 @@ def strip_module_prefix(state_dict):
     }
 
 
+def get_checkpoint_args_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return {}
+    raw_args = checkpoint.get("args")
+    if isinstance(raw_args, argparse.Namespace):
+        return vars(raw_args)
+    if isinstance(raw_args, dict):
+        return raw_args
+    return {}
+
+
+def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
+    checkpoint_args = checkpoint_args or {}
+    checkpoint_variant = checkpoint_args.get("hrot_variant")
+    if checkpoint_variant is not None:
+        normalized = str(checkpoint_variant).strip().upper().replace("-", "").replace("_", "")
+        if normalized == "RL":
+            normalized = "T"
+        if normalized in {
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F",
+            "G",
+            "H",
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N",
+            "O",
+            "P",
+            "Q",
+            "R",
+            "S",
+            "T",
+            "U",
+            "V",
+        }:
+            return normalized
+
+    if not isinstance(state_dict, dict):
+        return None
+
+    keys = set(state_dict.keys())
+
+    def has_param(prefix):
+        return any(key == prefix or key.startswith(f"{prefix}.") for key in keys)
+
+    eam_in_dim = None
+    eam_weight = state_dict.get("eam.network.0.weight")
+    if torch.is_tensor(eam_weight) and eam_weight.dim() == 2:
+        eam_in_dim = int(eam_weight.shape[1])
+
+    if "w_q" in keys or "raw_tau_token" in keys:
+        return "V"
+    if has_param("q_eam"):
+        if "raw_structure_cost_weight" in keys:
+            if "raw_transport_cost_threshold" in keys:
+                return "R"
+            return "T"
+        return "Q"
+    if has_param("euclidean_eam") and has_param("reduced_geodesic_eam"):
+        return "M"
+    if "raw_transport_cost_threshold" in keys:
+        if has_param("q_shot_pool_scorer") and not has_param("q_threshold_scorer"):
+            return "S"
+        if "raw_token_temperature" in keys and not has_param("q_eam"):
+            return "P"
+        if eam_in_dim == 8:
+            return "O"
+        if eam_in_dim == 3:
+            return "L"
+        if eam_in_dim == 4:
+            return "H"
+        return "J"
+    if eam_in_dim == 4:
+        return "K"
+    return "E"
+
+
+def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
+    checkpoint_args = checkpoint_args or {}
+    overrides = {}
+    variant = infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+    if variant is not None:
+        overrides["hrot_variant"] = variant
+
+    if "hrot_use_raw_backbone_tokens" in checkpoint_args:
+        raw_flag = _bool_flag(checkpoint_args.get("hrot_use_raw_backbone_tokens"), default=False)
+        overrides["hrot_use_raw_backbone_tokens"] = "true" if raw_flag else "false"
+    else:
+        uses_raw = not any(key.startswith("token_projector.") for key in state_dict)
+        overrides["hrot_use_raw_backbone_tokens"] = "true" if uses_raw else "false"
+
+    token_dim = None
+    if checkpoint_args.get("hrot_token_dim") is not None:
+        token_dim = int(checkpoint_args["hrot_token_dim"])
+    elif checkpoint_args.get("token_dim") is not None:
+        token_dim = int(checkpoint_args["token_dim"])
+    else:
+        projector_weight = state_dict.get("token_projector.1.weight")
+        if torch.is_tensor(projector_weight) and projector_weight.dim() == 2:
+            token_dim = int(projector_weight.shape[0])
+        else:
+            for vector_key in ("query_token_attention_vector", "support_token_attention_vector", "w_q", "w_s"):
+                vector = state_dict.get(vector_key)
+                if torch.is_tensor(vector) and vector.dim() == 1:
+                    token_dim = int(vector.shape[0])
+                    break
+            if token_dim is None:
+                eam_weight = state_dict.get("eam.network.0.weight")
+                if torch.is_tensor(eam_weight) and eam_weight.dim() == 2:
+                    in_dim = int(eam_weight.shape[1])
+                    if in_dim >= 5 and (in_dim - 3) % 2 == 0:
+                        token_dim = (in_dim - 3) // 2
+    if token_dim is not None:
+        overrides["hrot_token_dim"] = int(token_dim)
+
+    eam_hidden = None
+    if checkpoint_args.get("hrot_eam_hidden_dim") is not None:
+        eam_hidden = int(checkpoint_args["hrot_eam_hidden_dim"])
+    else:
+        eam_weight = state_dict.get("eam.network.0.weight")
+        if torch.is_tensor(eam_weight) and eam_weight.dim() == 2:
+            eam_hidden = int(eam_weight.shape[0])
+    if eam_hidden is not None:
+        overrides["hrot_eam_hidden_dim"] = int(eam_hidden)
+
+    return overrides
+
+
+def maybe_autoconfigure_hrot_from_checkpoint(args):
+    if getattr(args, "model", None) != "hrot_fsl":
+        return args
+
+    checkpoint_path = getattr(args, "resume", None) or getattr(args, "weights", None)
+    if not checkpoint_path:
+        return args
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = strip_module_prefix(unwrap_model_state(checkpoint))
+    checkpoint_args = get_checkpoint_args_dict(checkpoint)
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+
+    changed = []
+    for key, value in overrides.items():
+        current = getattr(args, key, None)
+        if current != value:
+            setattr(args, key, value)
+            changed.append((key, value))
+
+    if changed:
+        changed_text = ", ".join(f"{key}={value}" for key, value in changed)
+        print(f"HROT checkpoint-aligned config from {checkpoint_path}: {changed_text}")
+    return args
+
+
 def load_model_weights(model, checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = strip_module_prefix(unwrap_model_state(checkpoint))
@@ -3313,6 +3474,7 @@ def log_model_parameters(model, model_name, device="cuda", image_size=84):
 def main():
     args = get_args()
     args = apply_optional_env_overrides(args)
+    args = maybe_autoconfigure_hrot_from_checkpoint(args)
     if _bool_flag(getattr(args, "cudnn_deterministic", "true"), default=True):
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     args.device = resolve_runtime_device(args)
