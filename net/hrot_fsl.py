@@ -52,7 +52,7 @@ def _normalize_hrot_variant_name(variant: str) -> str:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-S."""
+    """Vectorized HROT few-shot model with ablation variants A-V."""
 
     def __init__(
         self,
@@ -103,7 +103,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -128,11 +128,12 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("rho_rank_temperature must be positive")
 
         self.variant = variant
+        self.uses_hrot_v = variant == "V"
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}
-        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
@@ -317,6 +318,26 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_transport_cost_threshold = None
             self.mass_bonus = nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
 
+        if self.uses_hrot_v:
+            self.w_q = nn.Parameter(torch.randn(token_dim, dtype=torch.float32) * 0.01)
+            self.w_s = nn.Parameter(torch.randn(token_dim, dtype=torch.float32) * 0.01)
+            self.raw_tau_token = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+            self.raw_structure_weight = nn.Parameter(
+                torch.tensor(_inverse_softplus(max(float(structure_cost_init), 1e-4)), dtype=torch.float32)
+            )
+            self.raw_threshold_offset = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+            self.raw_threshold_scale = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
+            self.raw_noise_sink_cost = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
+            self.raw_transport_cost_threshold = None
+            self.mass_bonus = None
+        else:
+            self.w_q = None
+            self.w_s = None
+            self.raw_tau_token = None
+            self.raw_structure_weight = None
+            self.raw_threshold_offset = None
+            self.raw_threshold_scale = None
+
     @property
     def curvature(self) -> torch.Tensor:
         if self.manifold is not None:
@@ -348,6 +369,12 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_token_temperature is not None:
             return F.softplus(self.raw_token_temperature).clamp_min(self.eps)
         return self.curvature.new_tensor(self.default_token_temperature)
+
+    @property
+    def tau_token(self) -> torch.Tensor:
+        if self.raw_tau_token is None:
+            return self.token_temperature
+        return F.softplus(self.raw_tau_token).clamp_min(self.eps)
 
     @property
     def consensus_temperature(self) -> torch.Tensor:
@@ -405,6 +432,8 @@ class HROTFSL(BaseConv64FewShotModel):
 
     @property
     def structure_cost_weight(self) -> torch.Tensor:
+        if self.raw_structure_weight is not None:
+            return F.softplus(self.raw_structure_weight).clamp_min(self.eps)
         if self.raw_structure_cost_weight is None:
             return self.curvature.new_tensor(0.0)
         return F.softplus(self.raw_structure_cost_weight).clamp_min(self.eps)
@@ -910,6 +939,74 @@ class HROTFSL(BaseConv64FewShotModel):
         )
         return query_mass, support_mass, payload
 
+    def _compute_token_marginals(
+        self,
+        query_euc: torch.Tensor,
+        support_euc: torch.Tensor,
+        flat_rho: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute HROT-V learned token marginals from dot-product attention."""
+        if self.w_q is None or self.w_s is None:
+            raise RuntimeError("HROT-V token marginals require w_q and w_s parameters")
+        if query_euc.dim() != 3 or support_euc.dim() != 3:
+            raise ValueError("HROT-V token marginals expect query/support shaped (N, Tokens, Dim)")
+        if tuple(flat_rho.shape) != (query_euc.shape[0], support_euc.shape[0]):
+            raise ValueError(
+                "flat_rho must have shape (NumQuery, NumPairs), "
+                f"got {tuple(flat_rho.shape)} vs {(query_euc.shape[0], support_euc.shape[0])}"
+            )
+
+        tau = self.tau_token.to(device=query_euc.device, dtype=query_euc.dtype)
+        w_q = self.w_q.to(device=query_euc.device, dtype=query_euc.dtype)
+        w_s = self.w_s.to(device=support_euc.device, dtype=support_euc.dtype)
+
+        q_logits = torch.einsum("qtd,d->qt", query_euc, w_q)
+        s_logits = torch.einsum("ptd,d->pt", support_euc, w_s)
+        q_attn = F.softmax(q_logits / tau, dim=-1)
+        s_attn = F.softmax(s_logits / tau, dim=-1)
+
+        rho = flat_rho.to(device=query_euc.device, dtype=query_euc.dtype)
+        query_mass = q_attn[:, None, :] * rho[:, :, None]
+        support_mass = s_attn[None, :, :].to(device=query_euc.device, dtype=query_euc.dtype) * rho[:, :, None]
+        return query_mass, support_mass
+
+    def _compute_gw_structure_cost(
+        self,
+        query_euc: torch.Tensor,
+        support_euc: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute HROT-V differentiable linearized FGW neighborhood cost."""
+        if self.raw_structure_weight is None:
+            raise RuntimeError("HROT-V structure cost requires raw_structure_weight")
+        if query_euc.dim() != 3 or support_euc.dim() != 3:
+            raise ValueError("HROT-V structure cost expects query/support shaped (N, Tokens, Dim)")
+        if query_euc.shape[-2] != support_euc.shape[-2]:
+            raise ValueError(
+                "HROT-V structure cost requires equal query/support token counts, "
+                f"got {query_euc.shape[-2]} vs {support_euc.shape[-2]}"
+            )
+
+        D_q = torch.cdist(query_euc, query_euc, p=2)
+        D_s = torch.cdist(support_euc, support_euc, p=2)
+        D_q = D_q / D_q.mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        D_s = D_s / D_s.mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+
+        term_q = D_q.pow(2).sum(dim=-1)[:, None, :, None]
+        term_s = D_s.pow(2).sum(dim=-1)[None, :, None, :]
+        cross = torch.einsum("qik,pjk->qpij", D_q, D_s)
+        structure_cost = (term_q + term_s - 2.0 * cross).clamp_min(0.0)
+        structure_cost = structure_cost / structure_cost.mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        weight = self.structure_cost_weight.to(device=query_euc.device, dtype=query_euc.dtype)
+        return weight * structure_cost
+
+    def _compute_threshold(self, flat_rho: torch.Tensor) -> torch.Tensor:
+        """Compute HROT-V positive adaptive threshold from pairwise rho."""
+        if self.raw_threshold_offset is None or self.raw_threshold_scale is None:
+            raise RuntimeError("HROT-V threshold requires raw_threshold_offset and raw_threshold_scale")
+        offset = self.raw_threshold_offset.to(device=flat_rho.device, dtype=flat_rho.dtype)
+        scale = F.softplus(self.raw_threshold_scale.to(device=flat_rho.device, dtype=flat_rho.dtype)) + self.eps
+        return F.softplus(offset + scale * flat_rho)
+
     def _pairwise_token_distance(self, tokens: torch.Tensor) -> torch.Tensor:
         token_norm = tokens.pow(2).sum(dim=-1)
         pairwise = token_norm.unsqueeze(-1) + token_norm.unsqueeze(-2) - 2.0 * torch.matmul(
@@ -1246,6 +1343,121 @@ class HROTFSL(BaseConv64FewShotModel):
         per_query_loss = (penalty * order_weight).sum(dim=(1, 2)) / order_weight.sum(dim=(1, 2)).clamp_min(self.eps)
         return per_query_loss.mean()
 
+    def _forward_hrot_v_episode(
+        self,
+        query: torch.Tensor,
+        support: torch.Tensor,
+        *,
+        needs_payload: bool = False,
+        return_aux: bool = False,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        way_num, shot_num = support.shape[:2]
+        query_num = query.shape[0]
+        num_pairs = way_num * shot_num
+
+        query_euc, query_hyp, query_hw = self._encode_images(query)
+        support_flat = support.reshape(num_pairs, *support.shape[-3:])
+        support_euc, support_hyp, support_hw = self._encode_images(support_flat)
+        if query_hw != support_hw:
+            raise ValueError(f"Query/support token grids must match, got {query_hw} vs {support_hw}")
+
+        flat_cost = self._euclidean_cost(query_euc, support_euc)
+
+        support_hyp_by_shot = support_hyp.reshape(
+            way_num,
+            shot_num,
+            support_hyp.shape[-2],
+            support_hyp.shape[-1],
+        )
+        geodesic_features = self._build_geodesic_eam_features(query_hyp, support_hyp_by_shot)
+        flat_geodesic_features = geodesic_features.reshape(query_num, num_pairs, geodesic_features.shape[-1])
+        flat_rho = self.eam.forward_features(flat_geodesic_features).to(dtype=query_euc.dtype)
+
+        query_mass, support_mass = self._compute_token_marginals(query_euc, support_euc, flat_rho)
+        structure_cost = self._compute_gw_structure_cost(query_euc, support_euc)
+        final_cost = flat_cost + structure_cost
+
+        cost_with_sink, query_mass_with_sink, support_mass_with_sink = self._append_noise_sink(
+            final_cost,
+            query_mass,
+            support_mass,
+            flat_rho,
+        )
+        plan_with_sink, _, _ = self._transport_match(
+            cost_with_sink,
+            flat_rho,
+            a=query_mass_with_sink,
+            b=support_mass_with_sink,
+        )
+        plan = plan_with_sink[..., :-1, :-1]
+        flat_transport_cost = (plan * final_cost).sum(dim=(-1, -2))
+        flat_transport_mass = plan.sum(dim=(-1, -2))
+
+        adaptive_threshold = self._compute_threshold(flat_rho)
+        shot_logits_flat = self.score_scale * (adaptive_threshold * flat_transport_mass - flat_transport_cost)
+
+        shot_logits = shot_logits_flat.reshape(query_num, way_num, shot_num)
+        shot_transport_cost = flat_transport_cost.reshape(query_num, way_num, shot_num)
+        shot_transport_mass = flat_transport_mass.reshape(query_num, way_num, shot_num)
+        shot_rho = flat_rho.reshape(query_num, way_num, shot_num)
+
+        logits = shot_logits.mean(dim=-1)
+        transport_cost = shot_transport_cost.mean(dim=-1)
+        transport_mass = shot_transport_mass.mean(dim=-1)
+
+        rho_regularization = (flat_rho - self.rho_target).pow(2).mean()
+        curvature_regularization = logits.new_zeros(())
+        if self.lambda_curvature > 0.0:
+            curvature_regularization = (self.min_curvature - self.curvature).clamp_min(0.0).pow(2)
+        aux_loss = self.lambda_rho * rho_regularization + self.lambda_curvature * curvature_regularization
+
+        if not needs_payload:
+            return logits
+
+        zero = logits.new_zeros(())
+        outputs: dict[str, torch.Tensor] = {
+            "logits": logits,
+            "aux_loss": aux_loss,
+            "class_scores": logits,
+            "total_distance": transport_cost,
+            "transport_cost": transport_cost,
+            "transported_mass": transport_mass,
+            "rho": flat_rho,
+            "rho_regularization": rho_regularization,
+            "rho_rank_loss": zero,
+            "curvature_regularization": curvature_regularization,
+            "curvature": self.curvature.detach().to(device=logits.device, dtype=logits.dtype),
+            "hyperbolic_backend": logits.new_tensor(0.0 if self.hyperbolic_backend == "native" else 1.0),
+            "ot_backend": logits.new_tensor(0.0 if self.ot_backend == "native" else 1.0),
+            "shot_transport_cost": shot_transport_cost,
+            "shot_transported_mass": shot_transport_mass,
+            "shot_rho": shot_rho,
+        }
+
+        if return_aux:
+            outputs.update(
+                {
+                    "transport_plan": plan,
+                    "base_cost_matrix": flat_cost,
+                    "structure_cost": structure_cost,
+                    "cost_matrix": final_cost,
+                    "adaptive_threshold": adaptive_threshold,
+                    "shot_logits": shot_logits,
+                    "query_token_mass": query_mass,
+                    "support_token_mass": support_mass,
+                    "structure_cost_weight": self.structure_cost_weight.to(
+                        device=logits.device,
+                        dtype=logits.dtype,
+                    ),
+                    "noise_sink_cost": self.noise_sink_cost.to(device=logits.device, dtype=logits.dtype),
+                    "query_euclidean_tokens": query_euc,
+                    "support_euclidean_tokens": support_euc,
+                    "query_hyperbolic_tokens": query_hyp,
+                    "support_hyperbolic_tokens": support_hyp,
+                }
+            )
+        return outputs
+
     def _forward_episode(
         self,
         query: torch.Tensor,
@@ -1254,6 +1466,9 @@ class HROTFSL(BaseConv64FewShotModel):
         needs_payload: bool = False,
         return_aux: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if self.uses_hrot_v:
+            return self._forward_hrot_v_episode(query, support, needs_payload=needs_payload, return_aux=return_aux)
+
         way_num, shot_num = support.shape[:2]
         query_euclidean, query_hyperbolic, query_hw = self._encode_images(query)
         support_euclidean, support_hyperbolic, support_hw = self._encode_images(
@@ -1781,10 +1996,6 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho_rank_loss": torch.stack([item["rho_rank_loss"] for item in batch_outputs]).mean(),
             "curvature_regularization": torch.stack([item["curvature_regularization"] for item in batch_outputs]).mean(),
             "curvature": torch.stack([item["curvature"] for item in batch_outputs]).mean(),
-            "mass_bonus": torch.stack([item["mass_bonus"] for item in batch_outputs]).mean(),
-            "transport_cost_threshold": torch.stack(
-                [item["transport_cost_threshold"] for item in batch_outputs]
-            ).mean(),
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),
             "ot_backend": torch.stack([item["ot_backend"] for item in batch_outputs]).mean(),
         }
@@ -1820,6 +2031,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "support_consensus",
             "query_hyperbolic_token_prior",
             "support_hyperbolic_token_prior",
+            "adaptive_threshold",
             "adaptive_transport_cost_threshold",
             "shot_logits",
             "shot_pool_weights",
@@ -1853,6 +2065,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "shot_pool_mix",
             "q_enhancement_mix",
             "structure_cost_weight",
+            "mass_bonus",
+            "transport_cost_threshold",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

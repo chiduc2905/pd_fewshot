@@ -140,7 +140,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -157,11 +157,16 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["total_distance"].shape == (2, 3)
     assert outputs["transport_cost"].shape == (2, 3)
     assert outputs["transported_mass"].shape == (2, 3)
-    if variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    if variant == "V":
+        assert outputs["rho"].shape == (2, 6)
+    elif variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
-    assert outputs["transport_plan"].shape[:2] == (2, 3)
+    if variant == "V":
+        assert outputs["transport_plan"].shape[:2] == (2, 6)
+    else:
+        assert outputs["transport_plan"].shape[:2] == (2, 3)
     assert outputs["cost_matrix"].shape == outputs["transport_plan"].shape
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["transport_plan"]).all()
@@ -1084,6 +1089,144 @@ def test_hrot_fsl_variant_r_backpropagates_structure_weight():
     assert model.raw_structure_cost_weight.grad.abs().sum().item() > 0.0
 
 
+def test_hrot_v_cost_equals_base_plus_structure():
+    torch.manual_seed(35)
+    model = _build_model(variant="V", token_temperature=0.2, structure_cost_init=0.05)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    expected = outputs["base_cost_matrix"] + outputs["structure_cost"]
+
+    assert model.uses_hrot_v
+    assert model.q_eam is None
+    assert torch.allclose(outputs["cost_matrix"], expected, atol=1e-5, rtol=1e-5)
+    assert outputs["rho"].shape == (2, 6)
+    assert outputs["transport_plan"].shape[:2] == (2, 6)
+
+
+def test_hrot_v_token_marginals_sum_to_rho():
+    torch.manual_seed(36)
+    model = _build_model(variant="V")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    rho = outputs["rho"]
+    query_mass = outputs["query_token_mass"]
+    support_mass = outputs["support_token_mass"]
+
+    assert torch.allclose(query_mass.sum(dim=-1), rho, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(support_mass.sum(dim=-1), rho, atol=1e-5, rtol=1e-5)
+
+
+def test_hrot_v_structure_cost_is_nonnegative():
+    torch.manual_seed(37)
+    model = _build_model(variant="V")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert (outputs["structure_cost"] >= 0.0).all()
+    assert outputs["structure_cost_weight"].item() > 0.0
+
+
+def test_hrot_v_structure_weight_receives_gradient():
+    torch.manual_seed(38)
+    model = _build_model(variant="V", lambda_rho=0.1, structure_cost_init=0.05)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    outputs = model(query, support)
+    model.zero_grad(set_to_none=True)
+    outputs["logits"].sum().backward()
+
+    assert model.raw_structure_weight is not None
+    assert model.raw_structure_weight.grad is not None
+    assert torch.isfinite(model.raw_structure_weight.grad).all()
+    assert model.raw_structure_weight.grad.abs().item() > 1e-10
+
+
+def test_hrot_v_w_q_w_s_receive_gradients():
+    torch.manual_seed(39)
+    model = _build_model(variant="V", lambda_rho=0.1)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    outputs = model(query, support)
+    model.zero_grad(set_to_none=True)
+    outputs["logits"].sum().backward()
+
+    assert model.w_q is not None and model.w_q.grad is not None
+    assert model.w_s is not None and model.w_s.grad is not None
+    assert torch.isfinite(model.w_q.grad).all()
+    assert torch.isfinite(model.w_s.grad).all()
+    assert model.w_q.grad.abs().max().item() > 1e-10
+    assert model.w_s.grad.abs().max().item() > 1e-10
+
+
+def test_hrot_v_exactly_one_transport_solve():
+    from unittest.mock import patch
+
+    torch.manual_seed(40)
+    model = _build_model(variant="V")
+    model.eval()
+    original_fn = model._transport_match
+    call_log = []
+
+    def counting_fn(*args, **kwargs):
+        call_log.append(1)
+        return original_fn(*args, **kwargs)
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with patch.object(model, "_transport_match", side_effect=counting_fn):
+        with torch.no_grad():
+            model(query, support)
+
+    assert len(call_log) == 1
+
+
+def test_hrot_v_shot_logits_scoring_formula():
+    torch.manual_seed(41)
+    model = _build_model(variant="V")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    query_num, num_pairs = outputs["rho"].shape
+    way_num, shot_num = outputs["shot_logits"].shape[-2:]
+    assert num_pairs == way_num * shot_num
+
+    threshold = outputs["adaptive_threshold"].reshape(query_num, way_num, shot_num)
+    expected = model.score_scale * (
+        threshold * outputs["shot_transported_mass"] - outputs["shot_transport_cost"]
+    )
+
+    assert torch.allclose(outputs["shot_logits"], expected, atol=1e-5, rtol=1e-5)
+
+
 def test_hrot_fsl_normalize_rho_keeps_episode_budget_mean():
     torch.manual_seed(22)
     model = _build_model(variant="O", normalize_rho=True)
@@ -1177,7 +1320,7 @@ def test_hrot_fsl_pot_backend_runs_for_debug_path():
     assert torch.isfinite(outputs["transport_plan"]).all()
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S", "T", "U"])
+@pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",
@@ -1241,6 +1384,10 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         assert outputs["shot_cover_weights"].shape == (2, 3, 2)
         assert outputs["shot_explanation_distance"].shape == (2, 3, 2)
         assert outputs["shot_coverage_ratio"].shape == (2, 3, 2)
+    if factory_variant == "V":
+        assert outputs["rho"].shape == (2, 6)
+        assert outputs["adaptive_threshold"].shape == (2, 6)
+        assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
 
 
 def test_hrot_fsl_raw_backbone_tokens_bypass_projector():
