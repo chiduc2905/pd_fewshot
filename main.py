@@ -33,6 +33,12 @@ from function.function import (
     seed_func,
 )
 from net.model_factory import build_model_from_args, get_model_choices, get_model_metadata, resolve_fewshot_backbone
+from visualization import (
+    compute_support_episode_distribution,
+    export_dataset_noise_profile,
+    export_episode_q1_figure,
+    export_support_distribution_figure,
+)
 
 
 def _bool_flag(value, default=False):
@@ -1013,6 +1019,11 @@ def get_args():
     parser.add_argument("--mode", type=str, default="train", choices=["train", "test"])
     parser.add_argument("--save_misclf_report", action="store_true")
     parser.add_argument("--misclf_topk", type=int, default=30)
+    parser.add_argument("--export_q1_report", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--q1_num_episodes", type=int, default=8)
+    parser.add_argument("--q1_queries_per_episode", type=int, default=1)
+    parser.add_argument("--q1_misclassified_only", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--export_dataset_profile", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--save_last_checkpoint", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--skip_final_test", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_train_sfc", type=str, default="false", choices=["true", "false"])
@@ -2838,6 +2849,24 @@ def extract_model_features(net, x):
     return F.normalize(feat, p=2, dim=-1)
 
 
+def write_rows_csv(path, rows):
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fieldnames = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key in seen:
+                continue
+            seen.add(key)
+            fieldnames.append(key)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None):
     import time
 
@@ -2857,15 +2886,26 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     query_seen = Counter()
     query_mis = Counter()
     query_pair = defaultdict(Counter)
+    q1_enabled = _bool_flag(getattr(args, "export_q1_report", "false"), default=False)
+    q1_limit = max(0, int(getattr(args, "q1_num_episodes", 0)))
+    q1_queries_per_episode = max(1, int(getattr(args, "q1_queries_per_episode", 1)))
+    q1_misclassified_only = _bool_flag(getattr(args, "q1_misclassified_only", "true"), default=True)
+    q1_rows = []
+    q1_figure_paths = []
+    support_distribution_rows = []
+    support_summary_sums = defaultdict(float)
+    support_summary_count = 0.0
+    exported_q1 = 0
 
     with torch.no_grad():
-        for batch in tqdm(loader, desc="Testing"):
+        for episode_idx, batch in enumerate(tqdm(loader, desc="Testing")):
             if len(batch) == 6:
-                query, q_labels, support, support_labels, q_indices, _ = batch
+                query, q_labels, support, support_labels, q_indices, support_indices = batch
                 q_indices_np = q_indices.view(-1).cpu().numpy()
             else:
                 query, q_labels, support, support_labels = batch
                 q_indices_np = None
+                support_indices = None
 
             start_time = time.perf_counter()
 
@@ -2887,6 +2927,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 phase="test",
                 query_targets=targets,
                 support_targets=support_targets,
+                collect_diagnostics=q1_enabled,
             )
             logits = extract_logits(scores)
             preds = logits.argmax(dim=1)
@@ -2897,6 +2938,70 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
+
+            if args.shot_num > 1:
+                support_rows_episode, support_summary = compute_support_episode_distribution(
+                    support[0].detach().cpu(),
+                    class_names=args.class_names,
+                    episode_index=episode_idx,
+                    outputs=scores if isinstance(scores, dict) else None,
+                )
+                support_distribution_rows.extend(support_rows_episode)
+                for key, value in support_summary.items():
+                    support_summary_sums[key] += float(value)
+                support_summary_count += 1.0
+
+            if q1_enabled and exported_q1 < q1_limit:
+                if q1_misclassified_only:
+                    selected_query_indices = preds.ne(targets).nonzero(as_tuple=True)[0].tolist()
+                else:
+                    selected_query_indices = list(range(int(preds.shape[0])))
+                selected_query_indices = selected_query_indices[:q1_queries_per_episode]
+
+                if selected_query_indices:
+                    q1_query_paths = None
+                    if q_indices_np is not None and test_file_paths is not None:
+                        q1_query_paths = []
+                        for local_query_idx in range(len(q_indices_np)):
+                            dataset_idx = int(q_indices_np[local_query_idx])
+                            if 0 <= dataset_idx < len(test_file_paths):
+                                q1_query_paths.append(test_file_paths[dataset_idx])
+                            else:
+                                q1_query_paths.append(None)
+                    q1_base = os.path.join(
+                        args.path_results,
+                        f"q1_focus_{args.dataset_name}_{args.model}_{args.shot_num}shot_ep{episode_idx:04d}{get_test_protocol_suffix(args)}.png",
+                    )
+                    q1_rows.extend(
+                        export_episode_q1_figure(
+                            model=net,
+                            outputs=scores if isinstance(scores, dict) else {"logits": logits},
+                            query_images=query[0].detach().cpu(),
+                            support_images=support[0].detach().cpu(),
+                            logits=logits.detach().cpu(),
+                            preds=preds.detach().cpu(),
+                            targets=targets.detach().cpu(),
+                            class_names=args.class_names,
+                            save_path=q1_base,
+                            episode_index=episode_idx,
+                            query_indices=selected_query_indices,
+                            query_file_paths=q1_query_paths,
+                        )
+                    )
+                    q1_figure_paths.append(q1_base)
+                    if args.shot_num > 1:
+                        support_fig_path = os.path.join(
+                            args.path_results,
+                            f"q1_support_distribution_{args.dataset_name}_{args.model}_{args.shot_num}shot_ep{episode_idx:04d}{get_test_protocol_suffix(args)}.png",
+                        )
+                        export_support_distribution_figure(
+                            support[0].detach().cpu(),
+                            class_names=args.class_names,
+                            episode_index=episode_idx,
+                            outputs=scores if isinstance(scores, dict) else None,
+                            save_path=support_fig_path,
+                        )
+                    exported_q1 += 1
 
             if q_indices_np is not None:
                 preds_np = preds.cpu().numpy()
@@ -2944,6 +3049,12 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     print(f"  F1-Score      : {f1:.4f}")
     print(f"  p-value       : {p_val:.2e}")
     print(f"\nInference Time  : {time_mean:.2f} +/- {time_std:.2f} ms/episode")
+    if support_summary_count > 0.0:
+        print("\nSUPPORT-SHOT DIAGNOSTICS")
+        print("=" * 60)
+        print(f"  Mean pairwise distance : {support_summary_sums['support_pairwise_distance_mean'] / support_summary_count:.4f}")
+        print(f"  Max outlier score      : {support_summary_sums['support_outlier_score_max'] / support_summary_count:.4f}")
+        print(f"  Mean entropy std       : {support_summary_sums['support_entropy_std_mean'] / support_summary_count:.4f}")
 
     wandb.log(
         {
@@ -2967,6 +3078,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     wandb.run.summary["merge_val_into_train"] = _bool_flag(getattr(args, "merge_val_into_train", "false"), default=False)
     wandb.run.summary["test_protocol"] = getattr(args, "effective_test_protocol", getattr(args, "test_protocol", "clean"))
 
+    support_summary = {}
+    if support_summary_count > 0.0:
+        support_summary = {
+            key: value / support_summary_count
+            for key, value in support_summary_sums.items()
+        }
+        wandb.log({f"support/{key}": value for key, value in support_summary.items()})
+
     samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
     protocol_suffix = get_test_protocol_suffix(args)
@@ -2980,6 +3099,34 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
     except RuntimeError as exc:
         print(f"Skipping confusion matrix plot: {exc}")
+
+    if q1_rows:
+        q1_csv_path = os.path.join(
+            args.path_results,
+            f"q1_focus_summary_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.csv",
+        )
+        write_rows_csv(q1_csv_path, q1_rows)
+        q1_signal_mean = float(np.mean([row["pred_signal_focus_ratio"] for row in q1_rows]))
+        q1_background_mean = float(np.mean([row["pred_background_focus_ratio"] for row in q1_rows]))
+        wandb.log(
+            {
+                "q1/pred_signal_focus_ratio_mean": q1_signal_mean,
+                "q1/pred_background_focus_ratio_mean": q1_background_mean,
+            }
+        )
+        for idx, figure_path in enumerate(q1_figure_paths[: min(3, len(q1_figure_paths))]):
+            if os.path.exists(figure_path):
+                wandb.log({f"q1/example_{idx}": wandb.Image(figure_path)})
+        print(f"Saved Q1 focus summary: {q1_csv_path}")
+        print(f"Saved {len(q1_figure_paths)} Q1 figure(s)")
+
+    if support_distribution_rows:
+        support_csv_path = os.path.join(
+            args.path_results,
+            f"support_episode_distribution_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.csv",
+        )
+        write_rows_csv(support_csv_path, support_distribution_rows)
+        print(f"Saved support-shot distribution summary: {support_csv_path}")
 
     if args.save_misclf_report and query_seen:
         pair_totals = Counter()
@@ -3110,6 +3257,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         handle.write(f"Recall : {rec:.4f}\n")
         handle.write(f"F1-Score : {f1:.4f}\n")
         handle.write(f"Inference Time: {time_mean:.2f} +/- {time_std:.2f} ms/episode\n")
+        if support_summary:
+            handle.write("-" * 40 + "\n")
+            handle.write(f"Support Pairwise Distance Mean: {support_summary['support_pairwise_distance_mean']:.4f}\n")
+            handle.write(f"Support Outlier Score Max: {support_summary['support_outlier_score_max']:.4f}\n")
+            handle.write(f"Support Entropy Std Mean: {support_summary['support_entropy_std_mean']:.4f}\n")
     print(f"Results saved to {txt_path}")
 
 
@@ -3301,6 +3453,32 @@ def main():
             )
             args.way_num = len(args.class_names)
 
+    if _bool_flag(getattr(args, "export_dataset_profile", "false"), default=False):
+        profile_stem = f"{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}".strip("_")
+        profile_splits = {
+            "train": (train_X, train_y, train_file_paths),
+            "val": (val_X, val_y, val_file_paths),
+            "test": (test_X, test_y, test_file_paths),
+        }
+        for split_name, pool in robust_pools.items():
+            profile_splits[split_name] = (pool["images"], pool["labels"], pool["files"])
+        profile_payload = export_dataset_noise_profile(
+            profile_splits,
+            class_names=args.class_names,
+            save_dir=args.path_results,
+            run_stem=profile_stem,
+        )
+        dataset_metrics = {
+            f"dataset/{metric_name}": metric_value
+            for metric_name, metric_value in profile_payload["metrics"].items()
+        }
+        if dataset_metrics:
+            wandb.log(dataset_metrics)
+        if os.path.exists(profile_payload["figure_path"]):
+            wandb.log({"dataset_noise_profile": wandb.Image(profile_payload["figure_path"])})
+        print(f"Saved dataset profile figure: {profile_payload['figure_path']}")
+        print(f"Saved dataset profile summary: {profile_payload['summary_csv_path']}")
+
     wandb.config.update(
         {
             "way_num": args.way_num,
@@ -3356,7 +3534,7 @@ def main():
             clean_y=test_y,
             clean_file_paths=test_file_paths,
             robust_pools=robust_pools,
-            return_indices=args.save_misclf_report,
+            return_indices=args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False),
         )
         print(
             "Robust final test: "
@@ -3372,7 +3550,7 @@ def main():
             args.shot_num,
             args.query_num_test,
             final_test_seed,
-            return_indices=args.save_misclf_report,
+            return_indices=args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False),
         )
     test_loader = DataLoader(
         test_ds,
