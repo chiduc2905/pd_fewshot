@@ -748,6 +748,22 @@ def _write_csv(path: str, rows: Sequence[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _build_non_empty_split_groups(
+    records: Sequence[dict[str, Any]],
+    splits: Sequence[str],
+    metric_name: str,
+) -> tuple[list[list[float]], list[str]]:
+    groups: list[list[float]] = []
+    labels: list[str] = []
+    for split_name in splits:
+        values = [float(record[metric_name]) for record in records if record["split"] == split_name]
+        if not values:
+            continue
+        groups.append(values)
+        labels.append(split_name)
+    return groups, labels
+
+
 def _plot_dataset_profile(
     records: Sequence[dict[str, Any]],
     summary: Sequence[dict[str, Any]],
@@ -762,6 +778,23 @@ def _plot_dataset_profile(
 
     fig, axes = plt.subplots(2, 2, figsize=(18, 13))
     fig.patch.set_facecolor("white")
+
+    if not records:
+        for ax in axes.flat:
+            ax.axis("off")
+        axes[0, 0].text(
+            0.5,
+            0.5,
+            "No dataset profile records available",
+            ha="center",
+            va="center",
+            fontsize=14,
+        )
+        fig.suptitle(title, fontsize=16, weight="bold")
+        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+        fig.savefig(save_path, dpi=220, bbox_inches="tight")
+        plt.close(fig)
+        return
 
     counts = np.zeros((len(splits), len(class_ids)), dtype=np.float32)
     for summary_row in summary:
@@ -785,22 +818,24 @@ def _plot_dataset_profile(
     axes[0, 0].set_xticklabels(class_names, rotation=25, ha="right")
     axes[0, 0].set_title("Per-Class Sample Count", fontsize=12, weight="bold")
     axes[0, 0].set_ylabel("Samples")
-    axes[0, 0].legend(frameon=False, fontsize=9)
+    legend_handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+    if legend_handles:
+        axes[0, 0].legend(frameon=False, fontsize=9)
 
-    noise_proxy_groups = [
-        [float(record["noise_proxy"]) for record in records if record["split"] == split_name]
-        for split_name in splits
-    ]
-    axes[0, 1].boxplot(noise_proxy_groups, labels=splits, patch_artist=True)
+    noise_proxy_groups, noise_proxy_labels = _build_non_empty_split_groups(records, splits, "noise_proxy")
+    if noise_proxy_groups:
+        axes[0, 1].boxplot(noise_proxy_groups, labels=noise_proxy_labels, patch_artist=True)
+    else:
+        axes[0, 1].text(0.5, 0.5, "No noise proxy values", ha="center", va="center", fontsize=12)
     axes[0, 1].set_title("Noise Proxy Distribution", fontsize=12, weight="bold")
     axes[0, 1].set_ylabel("entropy * (1 - top20)")
     axes[0, 1].tick_params(axis="x", rotation=20)
 
-    top20_groups = [
-        [float(record["top20_ratio"]) for record in records if record["split"] == split_name]
-        for split_name in splits
-    ]
-    axes[1, 0].boxplot(top20_groups, labels=splits, patch_artist=True)
+    top20_groups, top20_labels = _build_non_empty_split_groups(records, splits, "top20_ratio")
+    if top20_groups:
+        axes[1, 0].boxplot(top20_groups, labels=top20_labels, patch_artist=True)
+    else:
+        axes[1, 0].text(0.5, 0.5, "No energy concentration values", ha="center", va="center", fontsize=12)
     axes[1, 0].set_title("Energy Concentration Distribution", fontsize=12, weight="bold")
     axes[1, 0].set_ylabel("Top-20% energy ratio")
     axes[1, 0].tick_params(axis="x", rotation=20)

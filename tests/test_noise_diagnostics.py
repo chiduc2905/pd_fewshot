@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import torch
 
 from visualization.noise_diagnostics import (
     compute_scalogram_statistics,
     compute_support_episode_distribution,
+    export_dataset_noise_profile,
     extract_focus_maps,
     infer_token_hw,
 )
@@ -80,3 +83,28 @@ def test_compute_support_episode_distribution_flags_outlier_shot():
     assert shot2["outlier_score"] > shot0["outlier_score"]
     assert shot2["shot_rho"] < shot0["shot_rho"]
     assert summary["support_outlier_score_max"] >= shot2["outlier_score"]
+
+
+def test_export_dataset_noise_profile_handles_empty_splits():
+    train_images = torch.rand(4, 1, 8, 8)
+    train_labels = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    empty_images = torch.empty(0, 1, 8, 8)
+    empty_labels = torch.empty(0, dtype=torch.long)
+    with patch("visualization.noise_diagnostics._write_csv") as write_csv_mock, patch(
+        "visualization.noise_diagnostics._plot_dataset_profile"
+    ) as plot_mock:
+        payload = export_dataset_noise_profile(
+            {
+                "train": (train_images, train_labels, None),
+                "val": (empty_images, empty_labels, None),
+                "test_clean": (empty_images, empty_labels, None),
+            },
+            class_names=["A", "B"],
+            save_dir="ignored_dir",
+            run_stem="robust_profile",
+        )
+
+        assert payload["metrics"]["train_count"] == 4.0
+        assert "val_count" not in payload["metrics"]
+        assert write_csv_mock.call_count == 2
+        assert plot_mock.call_count == 1
