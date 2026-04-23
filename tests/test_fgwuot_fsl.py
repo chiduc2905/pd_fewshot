@@ -12,7 +12,7 @@ from net.fgwuot_fsl import FGWUOTFewShot
 from net.modules.fgw_uot_solver import (
     pairwise_sq_l2,
     normalize_intra_dist,
-    _sinkhorn_uot_log_wrapper,
+    sinkhorn_uot_log,
     fgw_uot_solve,
 )
 
@@ -84,7 +84,7 @@ class TestSolverPrimitives:
         cost  = torch.rand(B, N, M)
         log_a = torch.full((B, N), -math.log(N))
         log_b = torch.full((B, M), -math.log(M))
-        P = _sinkhorn_uot_log_wrapper(cost, log_a, log_b, tau=0.5, eps=0.1, max_iter=30)
+        P = sinkhorn_uot_log(cost, log_a, log_b, tau=0.5, eps=0.1, max_iter=30)
         assert P.shape == (B, N, M)
         assert (P >= 0).all(), "Transport plan must be non-negative"
 
@@ -94,7 +94,7 @@ class TestSolverPrimitives:
         cost  = torch.rand(B, N, M)
         log_a = torch.full((B, N), -math.log(N))
         log_b = torch.full((B, M), -math.log(M))
-        P = _sinkhorn_uot_log_wrapper(cost, log_a, log_b, tau=1000.0, eps=0.01, max_iter=200)
+        P = sinkhorn_uot_log(cost, log_a, log_b, tau=1000.0, eps=0.01, max_iter=200)
         row_sums = P.sum(dim=-1)
         col_sums = P.sum(dim=-2)
         a = torch.full((B, N), 1.0 / N)
@@ -142,29 +142,40 @@ class TestFGWUOTModel:
     def test_forward_shapes_1shot(self, model):
         way, shot, nq = 4, 1, 2
         q, s, qt, st = make_episode(way=way, shot=shot, nq=nq)
-        logits, aux_loss = model(q, s)
+        logits = model(q, s)
         assert logits.shape == (nq, way), f"Expected ({nq},{way}), got {logits.shape}"
-        assert aux_loss.ndim == 0, "aux_loss must be scalar"
         assert torch.isfinite(logits).all()
-        assert torch.isfinite(aux_loss)
 
     def test_forward_shapes_5shot(self, model):
         way, shot, nq = 4, 5, 1
         q, s, qt, st = make_episode(way=way, shot=shot, nq=nq)
-        logits, aux_loss = model(q, s)
+        logits = model(q, s)
         assert logits.shape == (nq, way)
 
     def test_forward_batched_episodes(self, model):
-        way, shot, nq, B = 4, 1, 1, 3
+        way, shot, nq, B = 4, 1, 2, 3
         torch.manual_seed(42)
-        query   = torch.randn(B * nq, 3, 84, 84)
+        query   = torch.randn(B, nq, 3, 84, 84)
         support = torch.randn(B, way, shot, 3, 84, 84)
-        logits, aux_loss = model(query, support)
+        logits = model(query, support)
         assert logits.shape == (B * nq, way)
+
+    def test_training_output_is_dict_for_main_loss(self, model):
+        way, shot, nq, B = 4, 1, 2, 2
+        model.train()
+        torch.manual_seed(43)
+        query = torch.randn(B, nq, 3, 84, 84)
+        support = torch.randn(B, way, shot, 3, 84, 84)
+        query_targets = torch.zeros(B * nq, dtype=torch.long)
+        support_targets = torch.arange(way).view(1, way, 1).expand(B, way, shot)
+        outputs = model(query, support, query_targets=query_targets, support_targets=support_targets)
+        assert isinstance(outputs, dict)
+        assert outputs["logits"].shape == (B * nq, way)
+        assert outputs["aux_loss"].ndim == 0
 
     def test_return_aux_keys(self, model):
         q, s, qt, st = make_episode()
-        logits, aux_loss, aux_dict = model(q, s, return_aux=True)
+        aux_dict = model(q, s, return_aux=True)
         required_keys = {
             "logits", "aux_loss", "rho", "alpha", "score_scale",
             "transport_cost", "transport_plan", "C_feat", "C_final",
@@ -176,7 +187,7 @@ class TestFGWUOTModel:
         """score = score_scale * (-transport_cost / rho) — verify formula."""
         q, s, qt, st = make_episode(way=4, shot=1, nq=1)
         with torch.no_grad():
-            _, _, aux = model(q, s, return_aux=True)
+            aux = model(q, s, return_aux=True)
 
         tc = aux["transport_cost"]          # (NQ, Way)
         rho = aux["rho"]                    # (NQ, Way)
@@ -192,7 +203,7 @@ class TestFGWUOTModel:
         with torch.no_grad():
             model.raw_alpha.fill_(-100.0)   # sigmoid(-100) ≈ 0
             q, s, _, _ = make_episode()
-            _, _, aux = model(q, s, return_aux=True)
+            aux = model(q, s, return_aux=True)
             C_feat  = aux["C_feat"]
             C_final = aux["C_final"]
         assert torch.allclose(C_feat, C_final, atol=1e-5), \
@@ -202,8 +213,8 @@ class TestFGWUOTModel:
         """All parameters must receive non-zero finite gradients."""
         model.train()
         q, s, qt, st = make_episode()
-        logits, aux_loss = model(q, s, qt, st)
-        loss = logits.mean() + aux_loss
+        outputs = model(q, s, qt, st)
+        loss = outputs["logits"].mean() + outputs["aux_loss"]
         loss.backward()
 
         for name, param in model.named_parameters():
@@ -219,12 +230,12 @@ class TestFGWUOTModel:
         with torch.no_grad():
             # alpha ≈ 0
             model.raw_alpha.fill_(-100.0)
-            _, _, aux0 = model(q, s, return_aux=True)
+            aux0 = model(q, s, return_aux=True)
             P0 = aux0["transport_plan"].clone()
 
             # alpha ≈ 0.8
             model.raw_alpha.fill_(1.386)  # sigmoid(1.386) ≈ 0.8
-            _, _, aux1 = model(q, s, return_aux=True)
+            aux1 = model(q, s, return_aux=True)
             P1 = aux1["transport_plan"].clone()
 
         assert not torch.allclose(P0, P1, atol=1e-4), \
@@ -234,7 +245,7 @@ class TestFGWUOTModel:
         """Rho must be in (0, 1) for all pairs."""
         q, s, _, _ = make_episode()
         with torch.no_grad():
-            _, _, aux = model(q, s, return_aux=True)
+            aux = model(q, s, return_aux=True)
         rho = aux["rho"]
         assert (rho > 0).all() and (rho < 1).all(), \
             f"rho out of range: min={rho.min():.4f}, max={rho.max():.4f}"
@@ -243,6 +254,6 @@ class TestFGWUOTModel:
         """aux_loss must equal lambda_rho * rho_reg."""
         q, s, _, _ = make_episode()
         model.train()
-        _, _, aux = model(q, s, return_aux=True)
+        aux = model(q, s, return_aux=True)
         expected_aux = model.lambda_rho * aux["rho_regularization"]
         assert torch.allclose(aux["aux_loss"], expected_aux, atol=1e-6)
