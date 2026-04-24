@@ -2,6 +2,7 @@
 
 from .distribution_alignment_head import HierarchicalQueryMatcher, HierarchicalSWMetricHead
 from .hierarchical_support_sw_head import HSSWSupportState, HierarchicalSupportSlicedWassersteinHead
+from .rada_head import RADAFewShotHead
 from .token_sw_head import TokenSetProjector
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "HierarchicalQueryMatcher",
     "HierarchicalSWMetricHead",
     "HierarchicalSupportSlicedWassersteinHead",
+    "RADAFewShotHead",
     "TokenSetProjector",
 ]

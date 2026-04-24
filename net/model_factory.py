@@ -58,6 +58,11 @@ MODEL_REGISTRY = {
         "architecture": "Conv4 embedding + prototype Euclidean metric",
         "metric": "Squared Euclidean Distance",
     },
+    "rada_fsl": {
+        "display_name": "RADA-FSL",
+        "architecture": "Backbone pooled embeddings -> reliability-aware query-conditioned prototypes -> diagonal dispersion-aware matching",
+        "metric": "Reliability-Weighted Prototype + Diagonal Mahalanobis Distance",
+    },
     "covamnet": {
         "display_name": "CovaMNet",
         "architecture": "Conv64F + covariance similarity",
@@ -318,6 +323,11 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT/native robust query-class OT score",
         "metric": "Barycentric Wasserstein DRO Distance",
     },
+    "cbcr_fsl": {
+        "display_name": "CBCR-FSL",
+        "architecture": "Backbone spatial tokens -> class-internal cross-reference masses -> balanced class barycenter -> dynamic Wasserstein uncertainty radius -> competitive query evidence allocation -> unbalanced OT robust score",
+        "metric": "Class-Barycentric Competitive Robust Transport",
+    },
     "transport_prior_replay_mamba_net": {
         "display_name": "TPR-MambaNet",
         "architecture": "Conv64F -> multi-atom support prior calibration -> replay-controlled query reader -> trajectory transport head",
@@ -400,6 +410,52 @@ def build_model_from_args(args):
     if args.model == "protonet":
         ProtoNet = _load_symbol("net.protonet", "ProtoNet")
         return ProtoNet(image_size=image_size, device=device)
+    if args.model == "rada_fsl":
+        RADAFSL = _load_symbol("net.rada_fsl", "RADAFSL")
+        fsl_mamba_output_dim = int(getattr(args, "rada_fsl_mamba_output_dim", 320) or 320)
+        hidden_dim = int(
+            getattr(
+                args,
+                "rada_feat_dim",
+                fewshot_backbone_output_dim(fewshot_backbone, fsl_mamba_output_dim=fsl_mamba_output_dim),
+            )
+            or fewshot_backbone_output_dim(fewshot_backbone, fsl_mamba_output_dim=fsl_mamba_output_dim)
+        )
+        disp_clamp_max = getattr(args, "rada_disp_clamp_max", None)
+        if disp_clamp_max is not None and float(disp_clamp_max) <= 0.0:
+            disp_clamp_max = None
+        return RADAFSL(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            fsl_mamba_base_dim=int(getattr(args, "rada_fsl_mamba_base_dim", 48) or 48),
+            fsl_mamba_output_dim=fsl_mamba_output_dim,
+            fsl_mamba_drop_path=float(getattr(args, "rada_fsl_mamba_drop_path", 0.02)),
+            fsl_mamba_perturb_sigma=float(getattr(args, "rada_fsl_mamba_perturb_sigma", 0.0)),
+            tau_r=float(getattr(args, "rada_tau_r", 0.5)),
+            lambda_proto=float(getattr(args, "rada_lambda_proto", 0.7)),
+            gamma_disp=float(getattr(args, "rada_gamma_disp", 0.5)),
+            eps=float(getattr(args, "rada_eps", 1e-6)),
+            reliability_head=str(getattr(args, "rada_reliability_head", "linear")),
+            reliability_hidden_dim=getattr(args, "rada_reliability_hidden_dim", None),
+            l2_normalize=_bool_flag(getattr(args, "rada_l2_normalize", "true"), default=True),
+            entropy_reg_weight=float(getattr(args, "rada_entropy_reg_weight", 0.0)),
+            use_reliability=_bool_flag(getattr(args, "rada_use_reliability", "true"), default=True),
+            use_dispersion_metric=_bool_flag(
+                getattr(args, "rada_use_dispersion_metric", "true"),
+                default=True,
+            ),
+            query_conditioned=_bool_flag(getattr(args, "rada_query_conditioned", "true"), default=True),
+            use_residual_anchor=_bool_flag(
+                getattr(args, "rada_use_residual_anchor", "true"),
+                default=True,
+            ),
+            use_shrinkage=_bool_flag(getattr(args, "rada_use_shrinkage", "true"), default=True),
+            disp_clamp_max=disp_clamp_max,
+        )
     if args.model == "covamnet":
         CovaMNet = _load_symbol("net.covamnet", "CovaMNet")
         return CovaMNet(device=device)
@@ -1866,6 +1922,33 @@ def build_model_from_args(args):
             profile=_bool_flag(getattr(args, "jsc_wdro_profile", "false"), default=False),
             ot_backend=str(getattr(args, "jsc_wdro_ot_backend", "pot")),
             eps=float(getattr(args, "jsc_wdro_eps", 1e-8)),
+        )
+    if args.model == "cbcr_fsl":
+        CBCRFSL = _load_symbol("net.cbcr_fsl", "CBCRFSL")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return CBCRFSL(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "cbcr_fsl_token_dim", getattr(args, "token_dim", 128)) or 128),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            sinkhorn_epsilon=float(getattr(args, "cbcr_fsl_sinkhorn_epsilon", 0.05)),
+            sinkhorn_iterations=int(getattr(args, "cbcr_fsl_sinkhorn_iterations", 80)),
+            sinkhorn_tolerance=float(getattr(args, "cbcr_fsl_sinkhorn_tolerance", 1e-5)),
+            barycenter_iterations=int(getattr(args, "cbcr_fsl_barycenter_iterations", 40)),
+            barycenter_tolerance=float(getattr(args, "cbcr_fsl_barycenter_tolerance", 1e-5)),
+            barycenter_method=str(getattr(args, "cbcr_fsl_barycenter_method", "sinkhorn")),
+            alpha=float(getattr(args, "cbcr_fsl_alpha", 0.3)),
+            beta=float(getattr(args, "cbcr_fsl_beta", 0.1)),
+            tau=float(getattr(args, "cbcr_fsl_tau", 0.5)),
+            rho=float(getattr(args, "cbcr_fsl_rho", 1.0)),
+            normalize_tokens=_bool_flag(getattr(args, "cbcr_fsl_normalize_tokens", "true"), default=True),
+            cost_power=float(getattr(args, "cbcr_fsl_cost_power", 2.0)),
+            profile=_bool_flag(getattr(args, "cbcr_fsl_profile", "false"), default=False),
+            ot_backend=str(getattr(args, "cbcr_fsl_ot_backend", "pot")),
+            eps=float(getattr(args, "cbcr_fsl_eps", 1e-8)),
         )
     if args.model in {"warn", "pars_net"}:
         WassersteinRoutedAttentiveReconstructionNet = _load_symbol(

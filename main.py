@@ -665,6 +665,25 @@ def get_args():
     parser.add_argument("--spif_rdp_fsl_mamba_perturb_sigma", type=float, default=0.0)
     parser.add_argument("--spif_rdp_use_fsl_mamba_global_prior", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--spif_rdp_fsl_mamba_global_mix_init", type=float, default=0.35)
+    parser.add_argument("--rada_feat_dim", type=int, default=None)
+    parser.add_argument("--rada_tau_r", type=float, default=0.5)
+    parser.add_argument("--rada_lambda_proto", type=float, default=0.7)
+    parser.add_argument("--rada_gamma_disp", type=float, default=0.5)
+    parser.add_argument("--rada_eps", type=float, default=1e-6)
+    parser.add_argument("--rada_reliability_head", type=str, default="linear", choices=["linear", "mlp"])
+    parser.add_argument("--rada_reliability_hidden_dim", type=int, default=16)
+    parser.add_argument("--rada_l2_normalize", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_entropy_reg_weight", type=float, default=0.0)
+    parser.add_argument("--rada_use_reliability", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_use_dispersion_metric", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_query_conditioned", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_use_residual_anchor", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_use_shrinkage", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_disp_clamp_max", type=float, default=0.0)
+    parser.add_argument("--rada_fsl_mamba_base_dim", type=int, default=48)
+    parser.add_argument("--rada_fsl_mamba_output_dim", type=int, default=320)
+    parser.add_argument("--rada_fsl_mamba_drop_path", type=float, default=0.02)
+    parser.add_argument("--rada_fsl_mamba_perturb_sigma", type=float, default=0.0)
     parser.add_argument("--spif_ota_transport_dim", type=int, default=None)
     parser.add_argument("--spif_ota_projector_hidden_dim", type=int, default=None)
     parser.add_argument("--spif_ota_mass_hidden_dim", type=int, default=None)
@@ -922,6 +941,22 @@ def get_args():
     parser.add_argument("--jsc_wdro_profile", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--jsc_wdro_ot_backend", type=str, default="pot", choices=["auto", "native", "pot"])
     parser.add_argument("--jsc_wdro_eps", type=float, default=1e-8)
+    parser.add_argument("--cbcr_fsl_token_dim", type=int, default=None)
+    parser.add_argument("--cbcr_fsl_sinkhorn_epsilon", type=float, default=0.05)
+    parser.add_argument("--cbcr_fsl_sinkhorn_iterations", type=int, default=80)
+    parser.add_argument("--cbcr_fsl_sinkhorn_tolerance", type=float, default=1e-5)
+    parser.add_argument("--cbcr_fsl_barycenter_iterations", type=int, default=40)
+    parser.add_argument("--cbcr_fsl_barycenter_tolerance", type=float, default=1e-5)
+    parser.add_argument("--cbcr_fsl_barycenter_method", type=str, default="sinkhorn")
+    parser.add_argument("--cbcr_fsl_alpha", type=float, default=0.3)
+    parser.add_argument("--cbcr_fsl_beta", type=float, default=0.1)
+    parser.add_argument("--cbcr_fsl_tau", type=float, default=0.5)
+    parser.add_argument("--cbcr_fsl_rho", type=float, default=1.0)
+    parser.add_argument("--cbcr_fsl_normalize_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--cbcr_fsl_cost_power", type=float, default=2.0)
+    parser.add_argument("--cbcr_fsl_profile", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--cbcr_fsl_ot_backend", type=str, default="pot", choices=["auto", "native", "pot"])
+    parser.add_argument("--cbcr_fsl_eps", type=float, default=1e-8)
 
     parser.add_argument(
         "--training_samples",
@@ -1227,6 +1262,28 @@ def get_model(args):
             "  note: `spif_rdp_top_r` is accepted only for backward compatibility. "
             "`spif_global_only` and `spif_local_only` still work. "
             "`spif_rdp_beta0_init` remains accepted as a legacy alias of `spif_rdp_beta_init`."
+        )
+    if args.model == "rada_fsl":
+        print(
+            "  rada_fsl: backbone pooled embeddings -> query-conditioned reliability weights -> "
+            "residual prototypes -> diagonal dispersion-aware metric "
+            f"(feat_dim={getattr(args, 'rada_feat_dim', None) or 'backbone'}, "
+            f"tau_r={getattr(args, 'rada_tau_r', 0.5)}, "
+            f"lambda_proto={getattr(args, 'rada_lambda_proto', 0.7)}, "
+            f"gamma_disp={getattr(args, 'rada_gamma_disp', 0.5)}, "
+            f"reliability_head={getattr(args, 'rada_reliability_head', 'linear')}, "
+            f"reliability_hidden_dim={getattr(args, 'rada_reliability_hidden_dim', 16)}, "
+            f"l2_normalize={getattr(args, 'rada_l2_normalize', 'true')}, "
+            f"use_reliability={getattr(args, 'rada_use_reliability', 'true')}, "
+            f"use_dispersion_metric={getattr(args, 'rada_use_dispersion_metric', 'true')}, "
+            f"query_conditioned={getattr(args, 'rada_query_conditioned', 'true')}, "
+            f"use_residual_anchor={getattr(args, 'rada_use_residual_anchor', 'true')}, "
+            f"use_shrinkage={getattr(args, 'rada_use_shrinkage', 'true')}, "
+            f"entropy_reg_weight={getattr(args, 'rada_entropy_reg_weight', 0.0)})"
+        )
+        print(
+            "  note: default training remains episodic cross-entropy only; "
+            "`rada_entropy_reg_weight` is optional and off by default."
         )
     if args.model == "spif_ota":
         print(
@@ -1571,6 +1628,21 @@ def get_model(args):
             f"unbalanced_score={getattr(args, 'jsc_wdro_unbalanced_score_mode', 'uot_objective')}, "
             f"token_weighting={getattr(args, 'jsc_wdro_token_weighting', 'uniform')}, "
             f"ot_backend={getattr(args, 'jsc_wdro_ot_backend', 'pot')})"
+        )
+    if args.model == "cbcr_fsl":
+        print(
+            "  cbcr_fsl: backbone spatial tokens -> class-internal cross-reference masses -> "
+            "class barycenter -> dynamic uncertainty radius -> competitive query allocation -> "
+            "unbalanced robust transport score "
+            f"(token_dim={getattr(args, 'cbcr_fsl_token_dim', None) or getattr(args, 'token_dim', 128)}, "
+            f"sinkhorn_eps={getattr(args, 'cbcr_fsl_sinkhorn_epsilon', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'cbcr_fsl_sinkhorn_iterations', 80)}, "
+            f"bary_iters={getattr(args, 'cbcr_fsl_barycenter_iterations', 40)}, "
+            f"alpha={getattr(args, 'cbcr_fsl_alpha', 0.3)}, "
+            f"beta={getattr(args, 'cbcr_fsl_beta', 0.1)}, "
+            f"tau={getattr(args, 'cbcr_fsl_tau', 0.5)}, "
+            f"rho={getattr(args, 'cbcr_fsl_rho', 1.0)}, "
+            f"ot_backend={getattr(args, 'cbcr_fsl_ot_backend', 'pot')})"
         )
     return model
 
@@ -2082,6 +2154,16 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
+    if args.model == "cbcr_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
+    if args.model == "rada_fsl":
+        return net(query, support, return_aux=collect_diagnostics)
     if args.model in {
         "spifce",
         "spifmax",
@@ -2440,6 +2522,11 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "tau_local_value",
         "support_energy_entropy",
         "mean_attention_entropy",
+        "alpha_entropy",
+        "alpha_max_mean",
+        "dispersion_mean",
+        "dispersion_min",
+        "prototype_shift_norm",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
