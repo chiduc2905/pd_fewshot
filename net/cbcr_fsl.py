@@ -1,7 +1,13 @@
-"""CBCR-FSL: exact class-barycentric competitive robust transport model."""
+"""UBT-FSL: uncertain barycentric transport for few-shot learning.
+
+The public method is UBT-FSL (Uncertain Barycentric Transport).  The old
+CBCR-FSL import path is kept as a compatibility alias because existing
+experiments and checkpoints may still refer to it.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import math
 import time
 from typing import Any
@@ -24,13 +30,75 @@ from net.modules.unbalanced_ot import (
 )
 
 
-class CBCRFSLResult(dict):
+UBT_ABLATION_MODES = frozenset(
+    {
+        "deepemd_pairwise",
+        "barycentric_only",
+        "uncertain_barycentric",
+        "ubt_full",
+        "fixed_radius",
+        "dynamic_radius",
+        "balanced_ot",
+        "unbalanced_ot",
+        "no_beta_floor",
+        "tau_sensitivity",
+        "alpha_sensitivity",
+    }
+)
+
+
+@dataclass
+class TokenMeasure:
+    """Discrete token measure used by UBT-FSL transport routines."""
+
+    tokens: torch.Tensor
+    weights: torch.Tensor
+
+
+@dataclass
+class UncertainBarycentricClass:
+    """Class object P_c = (nu_c_hat, epsilon_c).
+
+    The radius estimates the support-side transport dispersion around the
+    barycentric class measure. It defines an episode-specific and
+    class-specific robust transport envelope.
+    """
+
+    barycenter_measure: TokenMeasure
+    radius: torch.Tensor
+    support_dispersion: torch.Tensor
+    class_id: int | None = None
+    diagnostics: dict[str, torch.Tensor] = field(default_factory=dict)
+
+    @property
+    def barycenter_tokens(self) -> torch.Tensor:
+        return self.barycenter_measure.tokens
+
+    @property
+    def barycenter_weights(self) -> torch.Tensor:
+        return self.barycenter_measure.weights
+
+    @property
+    def transport_radius(self) -> torch.Tensor:
+        return self.radius
+
+    @property
+    def epsilon(self) -> torch.Tensor:
+        """Compatibility alias for older CBCR-FSL diagnostics."""
+
+        return self.radius
+
+
+class UBTFSLResult(dict):
     """Dict-like container that exposes `.shape` via logits."""
 
     @property
     def shape(self):
         logits = self.get("logits")
         return None if logits is None else logits.shape
+
+
+CBCRFSLResult = UBTFSLResult
 
 
 def _normalize_weights(weights: torch.Tensor, eps: float) -> torch.Tensor:
@@ -41,17 +109,25 @@ def _normalize_weights(weights: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.where(total > eps, normalized, uniform)
 
 
-class CBCRFSL(BaseConv64FewShotModel):
-    """Closed-form CBCR-FSL implementation from the design document.
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+class UBTFSL(BaseConv64FewShotModel):
+    """Uncertain Barycentric Transport for few-shot learning.
 
     Pipeline:
-    1. backbone spatial tokens
-    2. class-internal cross-reference token masses on supports
-    3. fixed-support Wasserstein barycenter on the union of support tokens
-    4. dynamic class uncertainty radius from shot-to-barycenter OT distance
-    5. competitive token-to-class allocation on the query
-    6. class-specific unbalanced OT score with rejectable mass
-    7. robust logit `-max(0, D_c(q) - epsilon_c)`
+    1. build an uncertain barycentric class object P_c = (nu_c_hat, epsilon_c)
+    2. build query token measures, optionally with query ambiguity correction
+    3. score classes with robust transport `-max(0, OT(nu_q^c, nu_c_hat) - epsilon_c)`
+
+    We use balanced or unbalanced OT only as the transport backend. The core
+    formulation is the class-level uncertain transport object and its robust
+    scoring envelope.
     """
 
     def __init__(
@@ -77,6 +153,11 @@ class CBCRFSL(BaseConv64FewShotModel):
         normalize_tokens: bool = True,
         cost_power: float = 2.0,
         profile: bool = False,
+        transport_backend: str = "unbalanced_ot",
+        scoring: str = "robust_transport_envelope",
+        use_query_competition: bool = True,
+        query_competition_temperature: float | None = None,
+        ablation_mode: str = "ubt_full",
         ot_backend: str = "native",
         eps: float = 1e-8,
     ) -> None:
@@ -96,15 +177,35 @@ class CBCRFSL(BaseConv64FewShotModel):
             raise ValueError("sinkhorn_iterations must be positive")
         if barycenter_iterations <= 0:
             raise ValueError("barycenter_iterations must be positive")
-        if alpha <= 0.0 or beta <= 0.0 or tau <= 0.0 or rho <= 0.0:
-            raise ValueError("alpha, beta, tau, and rho must be positive")
+        query_temperature = tau if query_competition_temperature is None else query_competition_temperature
+        if alpha <= 0.0 or beta <= 0.0 or tau <= 0.0 or query_temperature <= 0.0 or rho <= 0.0:
+            raise ValueError("alpha, beta, tau, query_competition_temperature, and rho must be positive")
         if score_scale <= 0.0:
             raise ValueError("score_scale must be positive")
         if cost_power <= 0.0:
             raise ValueError("cost_power must be positive")
+        transport_backend = str(transport_backend).lower().replace("-", "_")
+        transport_backend_aliases = {
+            "balanced": "balanced_ot",
+            "balanced_ot": "balanced_ot",
+            "ot": "balanced_ot",
+            "unbalanced": "unbalanced_ot",
+            "unbalanced_ot": "unbalanced_ot",
+            "uot": "unbalanced_ot",
+        }
+        if transport_backend not in transport_backend_aliases:
+            raise ValueError("transport_backend must be one of {'balanced_ot', 'unbalanced_ot'}")
+        scoring = str(scoring).lower()
+        if scoring not in {"robust_transport_envelope", "negative_transport_distance", "raw_ot_score"}:
+            raise ValueError(
+                "scoring must be 'robust_transport_envelope', 'negative_transport_distance', or 'raw_ot_score'"
+            )
+        ablation_mode = str(ablation_mode).lower()
+        if ablation_mode not in UBT_ABLATION_MODES:
+            raise ValueError(f"ablation_mode must be one of {sorted(UBT_ABLATION_MODES)}")
         ot_backend = "native" if str(ot_backend).lower() == "auto" else str(ot_backend).lower()
         if ot_backend not in {"native", "pot"}:
-            raise ValueError("CBCR-FSL ot_backend must be 'native', 'pot', or 'auto'")
+            raise ValueError("UBT-FSL ot_backend must be 'native', 'pot', or 'auto'")
 
         self.token_dim = int(token_dim)
         self.sinkhorn_epsilon = float(sinkhorn_epsilon)
@@ -116,11 +217,18 @@ class CBCRFSL(BaseConv64FewShotModel):
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.tau = float(tau)
+        self.query_competition_temperature = float(query_temperature)
         self.rho = float(rho)
         self.score_scale = float(score_scale)
         self.normalize_tokens = bool(normalize_tokens)
         self.cost_power = float(cost_power)
         self.profile = bool(profile)
+        self.transport_backend = transport_backend_aliases[transport_backend]
+        self.scoring = scoring
+        self.use_query_competition = _as_bool(use_query_competition, default=True)
+        self.ablation_mode = ablation_mode
+        self.method_name = "UBT-FSL"
+        self.class_object = "uncertain_barycentric"
         self.ot_backend = resolve_ot_backend(ot_backend)
         self.eps = float(eps)
 
@@ -205,11 +313,13 @@ class CBCRFSL(BaseConv64FewShotModel):
             histograms[shot_idx, start : start + token_num] = token_weights[shot_idx]
         return histograms
 
-    def compute_barycenter(
+    def compute_barycentric_measure(
         self,
         support_tokens: torch.Tensor,
         support_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Estimate the barycentric token measure nu_c_hat from support shots."""
+
         support_tokens = self._as_support_token_sets(support_tokens)
         support_weights = _normalize_weights(
             support_weights.to(device=support_tokens.device, dtype=support_tokens.dtype),
@@ -248,9 +358,24 @@ class CBCRFSL(BaseConv64FewShotModel):
         )
         return barycenter_tokens, barycenter_weights
 
+    def compute_barycenter(
+        self,
+        support_tokens: torch.Tensor,
+        support_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compatibility alias for the old CBCR-FSL method name."""
+
+        return self.compute_barycentric_measure(support_tokens, support_weights)
+
     def _prepare_query_uniform_weights(self, query_tokens: torch.Tensor) -> torch.Tensor:
         query_num, token_num = query_tokens.shape[:2]
         return query_tokens.new_full((query_num, token_num), 1.0 / float(token_num))
+
+    def build_query_measure(self, query_tokens: torch.Tensor) -> TokenMeasure:
+        """Build the query measure nu_q with uniform token mass."""
+
+        query_tokens = self._as_query_batch(query_tokens)
+        return TokenMeasure(tokens=query_tokens, weights=self._prepare_query_uniform_weights(query_tokens))
 
     def _expand_class_weights(
         self,
@@ -371,13 +496,52 @@ class CBCRFSL(BaseConv64FewShotModel):
             return objective.squeeze(0), plan.squeeze(0), cost.squeeze(0), transported_mass.squeeze(0)
         return objective, plan, cost, transported_mass
 
-    def estimate_epsilon(
+    def _effective_transport_backend(self) -> str:
+        if self.ablation_mode == "balanced_ot":
+            return "balanced_ot"
+        if self.ablation_mode == "unbalanced_ot":
+            return "unbalanced_ot"
+        return self.transport_backend
+
+    def compute_transport_details(
+        self,
+        query_measure: TokenMeasure,
+        class_measure: TokenMeasure,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute query-class transport distance using the selected backend.
+
+        We use unbalanced OT as a partial matching backend. The methodological
+        contribution is the uncertain barycentric class object and robust
+        transport scoring.
+        """
+
+        if self._effective_transport_backend() == "balanced_ot":
+            return self._compute_balanced_transport_details(
+                query_measure.tokens,
+                query_measure.weights,
+                class_measure.tokens,
+                class_measure.weights,
+            )
+        return self._compute_unbalanced_transport_details(
+            query_measure.tokens,
+            query_measure.weights,
+            class_measure.tokens,
+            class_measure.weights,
+        )
+
+    def compute_transport_radius(
         self,
         support_tokens: torch.Tensor,
         barycenter_tokens: torch.Tensor,
         barycenter_weights: torch.Tensor,
         support_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Estimate the class transport radius from barycentric dispersion.
+
+        d_c = mean_k W(mu_{c,k}, nu_c_hat) and
+        epsilon_c = max(alpha * d_c, beta / sqrt(K)).
+        """
+
         support_tokens = self._as_support_token_sets(support_tokens)
         support_weights = _normalize_weights(
             support_weights.to(device=support_tokens.device, dtype=support_tokens.dtype),
@@ -405,14 +569,71 @@ class CBCRFSL(BaseConv64FewShotModel):
         shot_distance_tensor = torch.stack(shot_distances, dim=0)
         dispersion = shot_distance_tensor.mean()
         floor = support_tokens.new_tensor(self.beta / math.sqrt(float(support_tokens.shape[0])))
-        epsilon = torch.maximum(support_tokens.new_tensor(self.alpha) * dispersion, floor)
-        return epsilon, dispersion, shot_distance_tensor
+        dynamic_radius = support_tokens.new_tensor(self.alpha) * dispersion
+        if self.ablation_mode in {"barycentric_only"}:
+            transport_radius = torch.zeros_like(dynamic_radius)
+        elif self.ablation_mode == "fixed_radius":
+            transport_radius = floor
+        elif self.ablation_mode == "no_beta_floor":
+            transport_radius = dynamic_radius
+        else:
+            transport_radius = torch.maximum(dynamic_radius, floor)
+        return transport_radius, dispersion, shot_distance_tensor
 
-    def compute_competitive_allocation(
+    def estimate_epsilon(
+        self,
+        support_tokens: torch.Tensor,
+        barycenter_tokens: torch.Tensor,
+        barycenter_weights: torch.Tensor,
+        support_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compatibility alias for the old epsilon helper."""
+
+        return self.compute_transport_radius(
+            support_tokens,
+            barycenter_tokens,
+            barycenter_weights,
+            support_weights,
+        )
+
+    def build_uncertain_class_measure(
+        self,
+        support_measures_for_class: torch.Tensor,
+        *,
+        class_id: int | None = None,
+    ) -> UncertainBarycentricClass:
+        """Construct P_c = (nu_c_hat, epsilon_c) from support shot measures."""
+
+        support_tokens = self._as_support_token_sets(support_measures_for_class)
+        support_weights = self.compute_support_token_weights(support_tokens)
+        barycenter_tokens, barycenter_weights = self.compute_barycentric_measure(
+            support_tokens,
+            support_weights,
+        )
+        radius, support_dispersion, shot_distances = self.compute_transport_radius(
+            support_tokens,
+            barycenter_tokens,
+            barycenter_weights,
+            support_weights,
+        )
+        return UncertainBarycentricClass(
+            barycenter_measure=TokenMeasure(tokens=barycenter_tokens, weights=barycenter_weights),
+            radius=radius,
+            support_dispersion=support_dispersion,
+            class_id=class_id,
+            diagnostics={
+                "support_token_weights": support_weights,
+                "shot_barycenter_distance": shot_distances,
+            },
+        )
+
+    def compute_query_class_affinities(
         self,
         query_tokens: torch.Tensor,
         barycenter_tokens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute query-token affinities to class barycenters for correction."""
+
         if query_tokens.dim() != 3:
             raise ValueError(f"query_tokens must have shape (NumQuery, Tokens, Dim), got {tuple(query_tokens.shape)}")
         nearest_distances = []
@@ -420,8 +641,121 @@ class CBCRFSL(BaseConv64FewShotModel):
             cost = self._pairwise_cost(query_tokens, barycenter_tokens[class_idx])
             nearest_distances.append(cost.min(dim=-1).values)
         raw_distance = torch.stack(nearest_distances, dim=-1)
-        assignment = torch.softmax(-raw_distance / self.tau, dim=-1)
+        assignment = torch.softmax(-raw_distance / self.query_competition_temperature, dim=-1)
         return assignment, raw_distance
+
+    def apply_query_ambiguity_correction(
+        self,
+        query_measure: TokenMeasure,
+        class_assignment: torch.Tensor,
+    ) -> TokenMeasure:
+        """Optionally reallocate query mass across classes before transport."""
+
+        return TokenMeasure(
+            tokens=query_measure.tokens,
+            weights=query_measure.weights * class_assignment.to(
+                device=query_measure.weights.device,
+                dtype=query_measure.weights.dtype,
+            ),
+        )
+
+    def compute_competitive_allocation(
+        self,
+        query_tokens: torch.Tensor,
+        barycenter_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compatibility alias for the old competitive allocation helper."""
+
+        return self.compute_query_class_affinities(query_tokens, barycenter_tokens)
+
+    def _effective_use_query_competition(self) -> bool:
+        if self.ablation_mode in {"barycentric_only", "uncertain_barycentric"}:
+            return False
+        return self.use_query_competition
+
+    def robust_transport_score(
+        self,
+        transport_distance: torch.Tensor,
+        class_object: UncertainBarycentricClass,
+    ) -> torch.Tensor:
+        """Compute s_c(q) = -[D_c(q) - epsilon_c]_+."""
+
+        if self.scoring in {"negative_transport_distance", "raw_ot_score"}:
+            return -self.score_scale * transport_distance
+        robust_distance = (transport_distance - class_object.radius).clamp_min(0.0)
+        return -self.score_scale * robust_distance
+
+    def robust_transport_residual(
+        self,
+        transport_distance: torch.Tensor,
+        class_object: UncertainBarycentricClass,
+    ) -> torch.Tensor:
+        if self.scoring in {"negative_transport_distance", "raw_ot_score"}:
+            return transport_distance
+        return (transport_distance - class_object.radius).clamp_min(0.0)
+
+    def _forward_pairwise_support_episode(
+        self,
+        supports: torch.Tensor,
+        query_tokens: torch.Tensor,
+        *,
+        return_aux: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """Pairwise query-support transport baseline for the ablation table.
+
+        This path is intentionally kept simple; the full DeepEMD implementation
+        remains available as `--model deepemd` for exact baseline runs.
+        """
+
+        del return_aux
+        way_num, shot_num = supports.shape[:2]
+        query_measure = self.build_query_measure(query_tokens)
+        class_distances = []
+        class_masses = []
+        per_shot_distances = []
+        for class_idx in range(way_num):
+            support_weights = self.compute_support_token_weights(supports[class_idx])
+            shot_distances = []
+            shot_masses = []
+            for shot_idx in range(shot_num):
+                support_measure = TokenMeasure(
+                    tokens=supports[class_idx, shot_idx],
+                    weights=support_weights[shot_idx],
+                )
+                distance, _, _, transported_mass = self.compute_transport_details(
+                    query_measure,
+                    support_measure,
+                )
+                shot_distances.append(distance)
+                shot_masses.append(transported_mass)
+            shot_distance_tensor = torch.stack(shot_distances, dim=-1)
+            class_distances.append(shot_distance_tensor.mean(dim=-1))
+            class_masses.append(torch.stack(shot_masses, dim=-1).mean(dim=-1))
+            per_shot_distances.append(shot_distance_tensor.mean(dim=0))
+
+        distance_tensor = torch.stack(class_distances, dim=-1)
+        transported_mass = torch.stack(class_masses, dim=-1)
+        logits = -self.score_scale * distance_tensor
+        zero_radius = distance_tensor.new_zeros(way_num)
+        shot_distance_tensor = torch.stack(per_shot_distances, dim=0)
+        aux_loss = logits.new_zeros(())
+        return {
+            "logits": logits,
+            "aux_loss": aux_loss,
+            "class_scores": logits,
+            "total_distance": distance_tensor,
+            "robust_distance": distance_tensor,
+            "transport_cost": distance_tensor,
+            "query_class_distance": distance_tensor,
+            "transported_mass": transported_mass,
+            "transport_radius": zero_radius,
+            "class_radius": zero_radius,
+            "epsilon": zero_radius,
+            "support_dispersion": zero_radius,
+            "shot_barycenter_distance": shot_distance_tensor,
+            "query_token_weights": query_measure.weights,
+            "query_measure_weights": query_measure.weights,
+        }
 
     def _forward_feature_episode(
         self,
@@ -439,47 +773,49 @@ class CBCRFSL(BaseConv64FewShotModel):
             )
         query_tokens = self._as_query_batch(query)
         way_num = supports.shape[0]
+        if self.ablation_mode == "deepemd_pairwise":
+            return self._forward_pairwise_support_episode(
+                supports,
+                query_tokens,
+                return_aux=return_aux,
+            )
 
         bary_start = time.perf_counter()
-        barycenter_tokens = []
-        barycenter_weights = []
-        support_weight_items = []
-        epsilons = []
-        dispersions = []
-        shot_distance_items = []
+        class_objects: list[UncertainBarycentricClass] = []
         for class_idx in range(way_num):
-            class_support_weights = self.compute_support_token_weights(supports[class_idx])
-            class_tokens, class_weights = self.compute_barycenter(
-                supports[class_idx],
-                class_support_weights,
+            class_objects.append(
+                self.build_uncertain_class_measure(
+                    supports[class_idx],
+                    class_id=class_idx,
+                )
             )
-            epsilon, dispersion, shot_distances = self.estimate_epsilon(
-                supports[class_idx],
-                class_tokens,
-                class_weights,
-                class_support_weights,
-            )
-            barycenter_tokens.append(class_tokens)
-            barycenter_weights.append(class_weights)
-            support_weight_items.append(class_support_weights)
-            epsilons.append(epsilon)
-            dispersions.append(dispersion)
-            shot_distance_items.append(shot_distances)
         bary_ms = (time.perf_counter() - bary_start) * 1000.0
 
-        bary_tokens_tensor = torch.stack(barycenter_tokens, dim=0)
-        bary_weights_tensor = torch.stack(barycenter_weights, dim=0)
-        support_weight_tensor = torch.stack(support_weight_items, dim=0)
-        epsilon_tensor = torch.stack(epsilons, dim=0)
-        dispersion_tensor = torch.stack(dispersions, dim=0)
-        shot_distance_tensor = torch.stack(shot_distance_items, dim=0)
+        bary_tokens_tensor = torch.stack([class_object.barycenter_tokens for class_object in class_objects], dim=0)
+        bary_weights_tensor = torch.stack([class_object.barycenter_weights for class_object in class_objects], dim=0)
+        support_weight_tensor = torch.stack(
+            [class_object.diagnostics["support_token_weights"] for class_object in class_objects],
+            dim=0,
+        )
+        radius_tensor = torch.stack([class_object.radius for class_object in class_objects], dim=0)
+        dispersion_tensor = torch.stack([class_object.support_dispersion for class_object in class_objects], dim=0)
+        shot_distance_tensor = torch.stack(
+            [class_object.diagnostics["shot_barycenter_distance"] for class_object in class_objects],
+            dim=0,
+        )
 
         competition_start = time.perf_counter()
-        base_query_weights = self._prepare_query_uniform_weights(query_tokens)
-        competitive_assignment, competitive_distance = self.compute_competitive_allocation(
-            query_tokens,
-            bary_tokens_tensor,
-        )
+        query_measure = self.build_query_measure(query_tokens)
+        base_query_weights = query_measure.weights
+        use_query_competition = self._effective_use_query_competition()
+        if use_query_competition:
+            query_ambiguity_assignment, query_ambiguity_distance = self.compute_query_class_affinities(
+                query_tokens,
+                bary_tokens_tensor,
+            )
+        else:
+            query_ambiguity_assignment = base_query_weights.new_ones(*base_query_weights.shape, way_num)
+            query_ambiguity_distance = base_query_weights.new_zeros(*base_query_weights.shape, way_num)
         competition_ms = (time.perf_counter() - competition_start) * 1000.0
 
         ot_start = time.perf_counter()
@@ -487,31 +823,47 @@ class CBCRFSL(BaseConv64FewShotModel):
         plans = []
         costs = []
         masses = []
-        competitive_query_weight_items = []
-        for class_idx in range(way_num):
-            class_query_weights = base_query_weights * competitive_assignment[..., class_idx]
-            distance, plan, cost, transported_mass = self._compute_unbalanced_transport_details(
-                query_tokens,
-                class_query_weights,
-                bary_tokens_tensor[class_idx],
-                bary_weights_tensor[class_idx],
+        query_measure_c_items = []
+        for class_idx, class_object in enumerate(class_objects):
+            if use_query_competition:
+                query_measure_c = self.apply_query_ambiguity_correction(
+                    query_measure,
+                    query_ambiguity_assignment[..., class_idx],
+                )
+            else:
+                query_measure_c = query_measure
+            distance, plan, cost, transported_mass = self.compute_transport_details(
+                query_measure_c,
+                class_object.barycenter_measure,
             )
             distances.append(distance)
             plans.append(plan)
             costs.append(cost)
             masses.append(transported_mass)
-            competitive_query_weight_items.append(class_query_weights)
+            query_measure_c_items.append(query_measure_c.weights)
         ot_ms = (time.perf_counter() - ot_start) * 1000.0
 
         distance_tensor = torch.stack(distances, dim=-1)
         transport_plan = torch.stack(plans, dim=1)
         cost_matrix = torch.stack(costs, dim=1)
         transported_mass = torch.stack(masses, dim=-1)
-        competitive_query_weights = torch.stack(competitive_query_weight_items, dim=-1)
+        query_measure_c_weights = torch.stack(query_measure_c_items, dim=-1)
 
         score_start = time.perf_counter()
-        robust_distance = (distance_tensor - epsilon_tensor.unsqueeze(0)).clamp_min(0.0)
-        logits = -self.score_scale * robust_distance
+        robust_distance = torch.stack(
+            [
+                self.robust_transport_residual(distance_tensor[..., class_idx], class_objects[class_idx])
+                for class_idx in range(way_num)
+            ],
+            dim=-1,
+        )
+        logits = torch.stack(
+            [
+                self.robust_transport_score(distance_tensor[..., class_idx], class_objects[class_idx])
+                for class_idx in range(way_num)
+            ],
+            dim=-1,
+        )
         aux_loss = logits.new_zeros(())
         score_ms = (time.perf_counter() - score_start) * 1000.0
 
@@ -524,7 +876,9 @@ class CBCRFSL(BaseConv64FewShotModel):
             "transport_cost": distance_tensor,
             "query_class_distance": distance_tensor,
             "transported_mass": transported_mass,
-            "epsilon": epsilon_tensor,
+            "class_radius": radius_tensor,
+            "transport_radius": radius_tensor,
+            "epsilon": radius_tensor,
             "support_dispersion": dispersion_tensor,
             "shot_barycenter_distance": shot_distance_tensor,
         }
@@ -536,10 +890,14 @@ class CBCRFSL(BaseConv64FewShotModel):
                     "support_token_weights": support_weight_tensor,
                     "transport_plan": transport_plan,
                     "cost_matrix": cost_matrix,
-                    "competitive_assignment": competitive_assignment,
-                    "competitive_distance": competitive_distance,
-                    "competitive_query_weights": competitive_query_weights,
+                    "query_ambiguity_assignment": query_ambiguity_assignment,
+                    "query_ambiguity_distance": query_ambiguity_distance,
+                    "query_ambiguity_corrected_weights": query_measure_c_weights,
+                    "competitive_assignment": query_ambiguity_assignment,
+                    "competitive_distance": query_ambiguity_distance,
+                    "competitive_query_weights": query_measure_c_weights,
                     "query_token_weights": base_query_weights,
+                    "query_measure_weights": base_query_weights,
                 }
             )
         if self.profile or return_aux:
@@ -569,7 +927,7 @@ class CBCRFSL(BaseConv64FewShotModel):
         return outputs if return_aux else outputs["logits"]
 
     @staticmethod
-    def _stack_outputs(batch_outputs: list[dict[str, torch.Tensor]]) -> CBCRFSLResult:
+    def _stack_outputs(batch_outputs: list[dict[str, torch.Tensor]]) -> UBTFSLResult:
         stacked: dict[str, Any] = {
             "logits": torch.cat([item["logits"] for item in batch_outputs], dim=0),
             "aux_loss": torch.stack([item["aux_loss"] for item in batch_outputs]).mean(),
@@ -579,6 +937,8 @@ class CBCRFSL(BaseConv64FewShotModel):
             "transport_cost": torch.cat([item["transport_cost"] for item in batch_outputs], dim=0),
             "query_class_distance": torch.cat([item["query_class_distance"] for item in batch_outputs], dim=0),
             "transported_mass": torch.cat([item["transported_mass"] for item in batch_outputs], dim=0),
+            "class_radius": torch.stack([item["class_radius"] for item in batch_outputs], dim=0),
+            "transport_radius": torch.stack([item["transport_radius"] for item in batch_outputs], dim=0),
             "epsilon": torch.stack([item["epsilon"] for item in batch_outputs], dim=0),
             "support_dispersion": torch.stack([item["support_dispersion"] for item in batch_outputs], dim=0),
             "shot_barycenter_distance": torch.stack(
@@ -589,10 +949,14 @@ class CBCRFSL(BaseConv64FewShotModel):
         optional_cat_keys = (
             "transport_plan",
             "cost_matrix",
+            "query_ambiguity_assignment",
+            "query_ambiguity_distance",
+            "query_ambiguity_corrected_weights",
             "competitive_assignment",
             "competitive_distance",
             "competitive_query_weights",
             "query_token_weights",
+            "query_measure_weights",
         )
         for key in optional_cat_keys:
             if key in batch_outputs[0]:
@@ -610,7 +974,7 @@ class CBCRFSL(BaseConv64FewShotModel):
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
-        return CBCRFSLResult(stacked)
+        return UBTFSLResult(stacked)
 
     def forward(
         self,
@@ -660,4 +1024,19 @@ class CBCRFSL(BaseConv64FewShotModel):
         stacked["logits"] = logits
         if return_aux:
             return stacked
-        return CBCRFSLResult({"logits": logits, "aux_loss": stacked["aux_loss"]})
+        return UBTFSLResult({"logits": logits, "aux_loss": stacked["aux_loss"]})
+
+
+# Backward compatibility for existing CBCR-FSL imports and checkpoints.
+CBCRFSL = UBTFSL
+
+
+__all__ = [
+    "TokenMeasure",
+    "UncertainBarycentricClass",
+    "UBT_ABLATION_MODES",
+    "UBTFSL",
+    "UBTFSLResult",
+    "CBCRFSL",
+    "CBCRFSLResult",
+]

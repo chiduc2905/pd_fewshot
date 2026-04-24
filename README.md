@@ -6,9 +6,27 @@
 
 A comprehensive framework for **Few-Shot Learning** applied to Partial Discharge (PD) pattern classification in high-voltage electrical systems. This project implements a unified benchmark suite spanning classical few-shot baselines, local-descriptor methods, and recent A*-style meta-learning models.
 
+## UBT-FSL Method
+
+**UBT-FSL (Uncertain Barycentric Transport for Few-Shot Learning)** reformulates DeepEMD-style pairwise local matching as robust transport to an uncertain barycentric class measure.
+
+DeepEMD performs pairwise support matching. UBT-FSL performs robust transport to an uncertain barycentric class object:
+
+```text
+support set -> uncertain barycentric class object -> robust class transport scoring
+```
+
+Each class is represented as `P_c = (nu_c_hat, epsilon_c)`, where `nu_c_hat` is a Wasserstein barycentric token measure estimated from support shots and `epsilon_c` is a class-specific transport radius estimated from support dispersion around that barycenter. Query classification uses:
+
+```text
+s_c(q) = -max(0, OT(nu_q^c, nu_c_hat) - epsilon_c)
+```
+
+Query competition is exposed as optional query ambiguity correction via `--ubt_fsl_use_query_competition`. Unbalanced OT is an internal partial-matching backend selected with `--ubt_fsl_transport_backend unbalanced_ot`; it is not treated as a separate contribution. The legacy `cbcr_fsl` model name and `cbcr_fsl_*` flags remain available as aliases for older scripts.
+
 ## 🎯 Highlights
 
-- **12 benchmark models**: ProtoNet, MatchingNet, RelationNet, CovaMNet, DN4, FEAT, DeepEMD, MAML, CAN, FRN, DeepBDC, Cosine
+- **Benchmark models**: ProtoNet, MatchingNet, RelationNet, CovaMNet, DN4, FEAT, DeepEMD, UBT-FSL, MAML, CAN, FRN, DeepBDC, Cosine
 - **98.67% accuracy** with only 1-shot learning (1 sample per class)
 - **Episodic meta-learning** framework with N-way K-shot configuration
 - **Paper-aligned backbones**: Conv4, Conv64F, Conv4-32, ResNet12
@@ -77,6 +95,9 @@ python main.py --model protonet --shot_num 5 --mode train
 
 # Train with limited samples (60 total)
 python main.py --model covamnet --shot_num 1 --training_samples 60 --mode train
+
+# Train UBT-FSL with the compact uncertainty-aware class transport formulation
+python main.py --model ubt_fsl --shot_num 1 --mode train --ubt_fsl_ablation_mode ubt_full
 ```
 
 ### Testing
@@ -90,7 +111,7 @@ python main.py --model relationnet --shot_num 1 --mode test --weights checkpoint
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model` | covamnet | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, can, frn, deepbdc, maml, cosine |
+| `--model` | covamnet | Model: protonet, matchingnet, relationnet, covamnet, dn4, feat, deepemd, ubt_fsl, cbcr_fsl, can, frn, deepbdc, maml, cosine |
 | `--way_num` | 3 | Number of classes per episode |
 | `--shot_num` | 1 | Support samples per class |
 | `--query_num` | 1 | Query samples per class |
@@ -98,6 +119,10 @@ python main.py --model relationnet --shot_num 1 --mode test --weights checkpoint
 | `--training_samples` | all | Limit training samples |
 | `--loss` | contrastive | Loss: contrastive, triplet |
 | `--num_epochs` | 100/70 | Training epochs (1-shot/5-shot) |
+| `--ubt_fsl_scoring` | robust_transport_envelope | UBT-FSL score: `-max(0, distance - class_radius)` |
+| `--ubt_fsl_transport_backend` | unbalanced_ot | Transport backend: balanced_ot or unbalanced_ot |
+| `--ubt_fsl_use_query_competition` | true | Optional query-side ambiguity correction |
+| `--ubt_fsl_ablation_mode` | ubt_full | UBT-FSL ablation: deepemd_pairwise, barycentric_only, uncertain_barycentric, ubt_full, fixed_radius, no_beta_floor, balanced_ot, unbalanced_ot |
 
 ## 📁 Dataset Preparation
 
@@ -142,6 +167,7 @@ Input images should be RGB (default: 128×128).
 
 ### Optimal Transport Methods
 - **DeepEMD** (Zhang et al., CVPR 2020) - Earth Mover's Distance with ResNet12 local descriptors
+- **UBT-FSL** - Uncertain Barycentric Transport with robust class-level OT scoring. The old `cbcr_fsl` name is kept as a backward-compatible alias.
 
 ### Optimization-based Methods
 - **MAML** (Finn et al., ICML 2017) - Gradient-based task adaptation

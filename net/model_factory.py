@@ -11,6 +11,15 @@ def _bool_flag(value, default=False):
     return str(value).lower() == "true"
 
 
+def _first_attr(args, *names, default=None):
+    for name in names:
+        if hasattr(args, name):
+            value = getattr(args, name)
+            if value is not None:
+                return value
+    return default
+
+
 def _parse_csv_ints(value, default):
     if value is None:
         return tuple(default)
@@ -323,10 +332,15 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT/native robust query-class OT score",
         "metric": "Barycentric Wasserstein DRO Distance",
     },
+    "ubt_fsl": {
+        "display_name": "UBT-FSL",
+        "architecture": "Backbone spatial tokens -> uncertain barycentric class object -> optional query ambiguity correction -> robust class transport scoring",
+        "metric": "Uncertain Barycentric Transport",
+    },
     "cbcr_fsl": {
-        "display_name": "CBCR-FSL",
-        "architecture": "Backbone spatial tokens -> class-internal cross-reference masses -> balanced class barycenter -> dynamic Wasserstein uncertainty radius -> competitive query evidence allocation -> unbalanced OT robust score",
-        "metric": "Class-Barycentric Competitive Robust Transport",
+        "display_name": "UBT-FSL (CBCR alias)",
+        "architecture": "Backward-compatible alias for UBT-FSL: uncertain barycentric class object with robust class transport scoring",
+        "metric": "Uncertain Barycentric Transport",
     },
     "transport_prior_replay_mamba_net": {
         "display_name": "TPR-MambaNet",
@@ -1927,33 +1941,55 @@ def build_model_from_args(args):
             ot_backend=str(getattr(args, "jsc_wdro_ot_backend", "pot")),
             eps=float(getattr(args, "jsc_wdro_eps", 1e-8)),
         )
-    if args.model == "cbcr_fsl":
-        CBCRFSL = _load_symbol("net.cbcr_fsl", "CBCRFSL")
+    if args.model in {"ubt_fsl", "cbcr_fsl"}:
+        UBTFSL = _load_symbol("net.ubt_fsl", "UBTFSL")
         hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
-        return CBCRFSL(
+        primary_prefix = "cbcr_fsl" if args.model == "cbcr_fsl" else "ubt_fsl"
+        fallback_prefix = "ubt_fsl" if primary_prefix == "cbcr_fsl" else "cbcr_fsl"
+
+        def _method_arg(suffix, default=None, *extra_names):
+            return _first_attr(
+                args,
+                f"{primary_prefix}_{suffix}",
+                f"{fallback_prefix}_{suffix}",
+                *extra_names,
+                default=default,
+            )
+
+        return UBTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,
-            token_dim=int(getattr(args, "cbcr_fsl_token_dim", getattr(args, "token_dim", 128)) or 128),
+            token_dim=int(_method_arg("token_dim", 128, "token_dim") or 128),
             backbone_name=fewshot_backbone,
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
-            sinkhorn_epsilon=float(getattr(args, "cbcr_fsl_sinkhorn_epsilon", 0.05)),
-            sinkhorn_iterations=int(getattr(args, "cbcr_fsl_sinkhorn_iterations", 80)),
-            sinkhorn_tolerance=float(getattr(args, "cbcr_fsl_sinkhorn_tolerance", 1e-5)),
-            barycenter_iterations=int(getattr(args, "cbcr_fsl_barycenter_iterations", 40)),
-            barycenter_tolerance=float(getattr(args, "cbcr_fsl_barycenter_tolerance", 1e-5)),
-            barycenter_method=str(getattr(args, "cbcr_fsl_barycenter_method", "mixture")),
-            alpha=float(getattr(args, "cbcr_fsl_alpha", 0.3)),
-            beta=float(getattr(args, "cbcr_fsl_beta", 0.1)),
-            tau=float(getattr(args, "cbcr_fsl_tau", 0.5)),
-            rho=float(getattr(args, "cbcr_fsl_rho", 1.0)),
-            score_scale=float(getattr(args, "cbcr_fsl_score_scale", 8.0)),
-            normalize_tokens=_bool_flag(getattr(args, "cbcr_fsl_normalize_tokens", "true"), default=True),
-            cost_power=float(getattr(args, "cbcr_fsl_cost_power", 2.0)),
-            profile=_bool_flag(getattr(args, "cbcr_fsl_profile", "false"), default=False),
-            ot_backend=str(getattr(args, "cbcr_fsl_ot_backend", "native")),
-            eps=float(getattr(args, "cbcr_fsl_eps", 1e-8)),
+            sinkhorn_epsilon=float(_method_arg("sinkhorn_epsilon", 0.05)),
+            sinkhorn_iterations=int(_method_arg("sinkhorn_iterations", 80)),
+            sinkhorn_tolerance=float(_method_arg("sinkhorn_tolerance", 1e-5)),
+            barycenter_iterations=int(_method_arg("barycenter_iterations", 40)),
+            barycenter_tolerance=float(_method_arg("barycenter_tolerance", 1e-5)),
+            barycenter_method=str(_method_arg("barycenter_method", "mixture")),
+            alpha=float(_method_arg("alpha", 0.3)),
+            beta=float(_method_arg("beta", 0.1)),
+            tau=float(_method_arg("query_competition_temperature", None) or _method_arg("tau", 0.5)),
+            rho=float(_method_arg("rho", 1.0)),
+            score_scale=float(_method_arg("score_scale", 8.0)),
+            normalize_tokens=_bool_flag(_method_arg("normalize_tokens", "true"), default=True),
+            cost_power=float(_method_arg("cost_power", 2.0)),
+            profile=_bool_flag(_method_arg("profile", "false"), default=False),
+            transport_backend=str(_method_arg("transport_backend", "unbalanced_ot")),
+            scoring=str(_method_arg("scoring", "robust_transport_envelope")),
+            use_query_competition=_bool_flag(
+                _method_arg("use_query_competition", "true"),
+                default=True,
+            ),
+            query_competition_temperature=float(
+                _method_arg("query_competition_temperature", None) or _method_arg("tau", 0.5)
+            ),
+            ablation_mode=str(_method_arg("ablation_mode", "ubt_full")),
+            ot_backend=str(_method_arg("solver_backend", None) or _method_arg("ot_backend", "native")),
+            eps=float(_method_arg("eps", 1e-8)),
         )
     if args.model in {"warn", "pars_net"}:
         WassersteinRoutedAttentiveReconstructionNet = _load_symbol(

@@ -945,23 +945,82 @@ def get_args():
     parser.add_argument("--jsc_wdro_profile", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--jsc_wdro_ot_backend", type=str, default="pot", choices=["auto", "native", "pot"])
     parser.add_argument("--jsc_wdro_eps", type=float, default=1e-8)
+    parser.add_argument("--ubt_fsl_token_dim", type=int, default=None)
+    parser.add_argument("--ubt_fsl_sinkhorn_epsilon", type=float, default=None)
+    parser.add_argument("--ubt_fsl_sinkhorn_iterations", type=int, default=None)
+    parser.add_argument("--ubt_fsl_sinkhorn_tolerance", type=float, default=None)
+    parser.add_argument("--ubt_fsl_barycenter_iterations", type=int, default=None)
+    parser.add_argument("--ubt_fsl_barycenter_tolerance", type=float, default=None)
+    parser.add_argument("--ubt_fsl_barycenter_method", type=str, default=None)
+    parser.add_argument("--ubt_fsl_alpha", type=float, default=None)
+    parser.add_argument("--ubt_fsl_beta", type=float, default=None)
+    parser.add_argument("--ubt_fsl_tau", type=float, default=None)
+    parser.add_argument("--ubt_fsl_query_competition_temperature", type=float, default=None)
+    parser.add_argument("--ubt_fsl_rho", type=float, default=None)
+    parser.add_argument("--ubt_fsl_score_scale", type=float, default=None)
+    parser.add_argument("--ubt_fsl_normalize_tokens", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--ubt_fsl_cost_power", type=float, default=None)
+    parser.add_argument("--ubt_fsl_profile", type=str, default=None, choices=["true", "false"])
+    parser.add_argument(
+        "--ubt_fsl_transport_backend",
+        type=str,
+        default=None,
+        choices=["balanced", "balanced_ot", "unbalanced", "unbalanced_ot", "uot"],
+    )
+    parser.add_argument(
+        "--ubt_fsl_scoring",
+        type=str,
+        default=None,
+        choices=["robust_transport_envelope", "negative_transport_distance", "raw_ot_score"],
+    )
+    parser.add_argument("--ubt_fsl_use_query_competition", type=str, default=None, choices=["true", "false"])
+    parser.add_argument(
+        "--ubt_fsl_ablation_mode",
+        type=str,
+        default=None,
+        choices=[
+            "deepemd_pairwise",
+            "barycentric_only",
+            "uncertain_barycentric",
+            "ubt_full",
+            "fixed_radius",
+            "dynamic_radius",
+            "balanced_ot",
+            "unbalanced_ot",
+            "no_beta_floor",
+            "tau_sensitivity",
+            "alpha_sensitivity",
+        ],
+    )
+    parser.add_argument("--ubt_fsl_solver_backend", type=str, default=None, choices=["auto", "native", "pot"])
+    parser.add_argument("--ubt_fsl_ot_backend", type=str, default=None, choices=["auto", "native", "pot"])
+    parser.add_argument("--ubt_fsl_eps", type=float, default=None)
     parser.add_argument("--cbcr_fsl_token_dim", type=int, default=None)
-    parser.add_argument("--cbcr_fsl_sinkhorn_epsilon", type=float, default=0.05)
-    parser.add_argument("--cbcr_fsl_sinkhorn_iterations", type=int, default=80)
-    parser.add_argument("--cbcr_fsl_sinkhorn_tolerance", type=float, default=1e-5)
-    parser.add_argument("--cbcr_fsl_barycenter_iterations", type=int, default=40)
-    parser.add_argument("--cbcr_fsl_barycenter_tolerance", type=float, default=1e-5)
-    parser.add_argument("--cbcr_fsl_barycenter_method", type=str, default="mixture")
-    parser.add_argument("--cbcr_fsl_alpha", type=float, default=0.3)
-    parser.add_argument("--cbcr_fsl_beta", type=float, default=0.1)
-    parser.add_argument("--cbcr_fsl_tau", type=float, default=0.5)
-    parser.add_argument("--cbcr_fsl_rho", type=float, default=1.0)
-    parser.add_argument("--cbcr_fsl_score_scale", type=float, default=8.0)
-    parser.add_argument("--cbcr_fsl_normalize_tokens", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--cbcr_fsl_cost_power", type=float, default=2.0)
-    parser.add_argument("--cbcr_fsl_profile", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--cbcr_fsl_ot_backend", type=str, default="native", choices=["auto", "native", "pot"])
-    parser.add_argument("--cbcr_fsl_eps", type=float, default=1e-8)
+    parser.add_argument("--cbcr_fsl_sinkhorn_epsilon", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_sinkhorn_iterations", type=int, default=None)
+    parser.add_argument("--cbcr_fsl_sinkhorn_tolerance", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_barycenter_iterations", type=int, default=None)
+    parser.add_argument("--cbcr_fsl_barycenter_tolerance", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_barycenter_method", type=str, default=None)
+    parser.add_argument("--cbcr_fsl_alpha", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_beta", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_tau", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_rho", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_score_scale", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_normalize_tokens", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--cbcr_fsl_cost_power", type=float, default=None)
+    parser.add_argument("--cbcr_fsl_profile", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--cbcr_fsl_ot_backend", type=str, default=None, choices=["auto", "native", "pot"])
+    parser.add_argument(
+        "--cbcr_fsl_transport_backend",
+        type=str,
+        default=None,
+        choices=["balanced", "balanced_ot", "unbalanced", "unbalanced_ot", "uot"],
+    )
+    parser.add_argument("--cbcr_fsl_scoring", type=str, default=None)
+    parser.add_argument("--cbcr_fsl_use_query_competition", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--cbcr_fsl_ablation_mode", type=str, default=None)
+    parser.add_argument("--cbcr_fsl_eps", type=float, default=None)
 
     parser.add_argument(
         "--training_samples",
@@ -1639,22 +1698,35 @@ def get_model(args):
             f"token_weighting={getattr(args, 'jsc_wdro_token_weighting', 'uniform')}, "
             f"ot_backend={getattr(args, 'jsc_wdro_ot_backend', 'pot')})"
         )
-    if args.model == "cbcr_fsl":
+    if args.model in {"ubt_fsl", "cbcr_fsl"}:
+        primary_prefix = "cbcr_fsl" if args.model == "cbcr_fsl" else "ubt_fsl"
+        fallback_prefix = "ubt_fsl" if primary_prefix == "cbcr_fsl" else "cbcr_fsl"
+
+        def _method_arg(suffix, default=None):
+            value = getattr(args, f"{primary_prefix}_{suffix}", None)
+            if value is not None:
+                return value
+            value = getattr(args, f"{fallback_prefix}_{suffix}", None)
+            return default if value is None else value
+
         print(
-            "  cbcr_fsl: backbone spatial tokens -> class-internal cross-reference masses -> "
-            "class barycenter -> dynamic uncertainty radius -> competitive query allocation -> "
-            "unbalanced robust transport score "
-            f"(token_dim={getattr(args, 'cbcr_fsl_token_dim', None) or getattr(args, 'token_dim', 128)}, "
-            f"sinkhorn_eps={getattr(args, 'cbcr_fsl_sinkhorn_epsilon', 0.05)}, "
-            f"sinkhorn_iters={getattr(args, 'cbcr_fsl_sinkhorn_iterations', 80)}, "
-            f"bary_iters={getattr(args, 'cbcr_fsl_barycenter_iterations', 40)}, "
-            f"alpha={getattr(args, 'cbcr_fsl_alpha', 0.3)}, "
-            f"beta={getattr(args, 'cbcr_fsl_beta', 0.1)}, "
-            f"tau={getattr(args, 'cbcr_fsl_tau', 0.5)}, "
-            f"rho={getattr(args, 'cbcr_fsl_rho', 1.0)}, "
-            f"score_scale={getattr(args, 'cbcr_fsl_score_scale', 8.0)}, "
-            f"bary_method={getattr(args, 'cbcr_fsl_barycenter_method', 'mixture')}, "
-            f"ot_backend={getattr(args, 'cbcr_fsl_ot_backend', 'native')})"
+            f"  {args.model}: UBT-FSL uncertain barycentric class object -> "
+            "optional query ambiguity correction -> robust class transport scoring "
+            f"(token_dim={_method_arg('token_dim', None) or getattr(args, 'token_dim', 128)}, "
+            f"sinkhorn_eps={_method_arg('sinkhorn_epsilon', 0.05)}, "
+            f"sinkhorn_iters={_method_arg('sinkhorn_iterations', 80)}, "
+            f"bary_iters={_method_arg('barycenter_iterations', 40)}, "
+            f"alpha={_method_arg('alpha', 0.3)}, "
+            f"beta={_method_arg('beta', 0.1)}, "
+            f"query_tau={_method_arg('query_competition_temperature', None) or _method_arg('tau', 0.5)}, "
+            f"rho={_method_arg('rho', 1.0)}, "
+            f"score_scale={_method_arg('score_scale', 8.0)}, "
+            f"bary_method={_method_arg('barycenter_method', 'mixture')}, "
+            f"scoring={_method_arg('scoring', 'robust_transport_envelope')}, "
+            f"use_query_competition={_method_arg('use_query_competition', 'true')}, "
+            f"transport_backend={_method_arg('transport_backend', 'unbalanced_ot')}, "
+            f"solver_backend={_method_arg('solver_backend', None) or _method_arg('ot_backend', 'native')}, "
+            f"ablation={_method_arg('ablation_mode', 'ubt_full')})"
         )
     return model
 
@@ -2166,7 +2238,7 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
-    if args.model == "cbcr_fsl":
+    if args.model in {"ubt_fsl", "cbcr_fsl"}:
         return net(
             query,
             support,

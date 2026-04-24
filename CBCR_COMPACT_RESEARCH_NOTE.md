@@ -1,104 +1,142 @@
-# Compact CBCR-FSL Research Note
+# UBT-FSL Compact Research Note
+
+This note supersedes the earlier CBCR-FSL wording. The implementation keeps the old filename and `CBCRFSL` alias for compatibility, but the paper-facing method name is:
+
+```text
+UBT-FSL: Uncertain Barycentric Transport for Few-Shot Learning
+```
 
 ## 1. Diagnosis
 
-The current exact CBCR version is too solver-heavy for training:
+The old CBCR framing made the method look like a stack of modules:
 
-- POT unbalanced Sinkhorn can produce `Numerical errors at iteration 0` when the cost scale, entropy, or marginal mass becomes ill-conditioned.
-- The exact class barycenter solves an additional Sinkhorn barycenter for every class in every episode.
-- The uncertainty radius then solves more transport problems from each shot to the barycenter.
+- class Wasserstein barycenter;
+- dynamic uncertainty radius;
+- competitive query allocation;
+- unbalanced OT as a partial matching mechanism.
 
-This makes the model look ambitious, but it weakens the paper story: reviewers may see a stack of OT machinery rather than a clean few-shot contribution.
+That story is too fragmented. Reviewers can read it as "DeepEMD plus several add-ons" rather than a compact class-level transport formulation.
 
-## 2. Compact Core Claim
+## 2. Core Claim
 
-The defensible contribution should be:
+The defensible contribution is:
 
-> Few-shot local matching should compare a query against a class-level support measure with uncertainty-calibrated and class-competitive evidence, instead of independently matching every query to every support shot.
+```text
+From pairwise support matching to uncertainty-aware class transport.
+```
 
-Everything else is implementation detail.
+DeepEMD performs pairwise support matching. UBT-FSL performs robust transport to an uncertain barycentric class object.
 
-## 3. Compact Model
+## 3. Unified Class Object
 
-Use the name **CBCR-Lite** or keep **CBCR-FSL** and describe it as the compact implementation.
+Each support shot is a token measure `mu_{c,k}`. UBT-FSL represents class `c` as:
 
-### Module A: Consensus Class Measure
+```text
+P_c = (nu_c_hat, epsilon_c)
+```
 
-Each support shot remains a token distribution. Token masses are estimated by cross-shot consensus inside the same class.
+where `nu_c_hat` is a barycentric token measure estimated from the support shots, and `epsilon_c` is a transport radius estimated from support dispersion around that barycenter.
 
-Instead of solving a Wasserstein barycenter, build a fixed-support class measure by a weighted mixture over the union of support tokens:
+The radius is tied to the barycenter:
 
-`nu_c = sum_k pi_ck sum_j a_ckj delta(v_ckj)`
+```text
+d_c = (1 / K) sum_k W_epsilon(mu_{c,k}, nu_c_hat)
+epsilon_c = max(alpha d_c, beta / sqrt(K))
+```
 
-This preserves the key idea, "class as distribution", but removes the expensive barycenter solver.
+This makes the radius an episode-specific and class-specific robust transport envelope, not an arbitrary threshold.
 
-### Module B: Dispersion Radius
+## 4. Robust Class Transport Score
 
-Estimate class uncertainty from shot disagreement around the class measure:
+Classification uses:
 
-`epsilon_c = max(alpha * dispersion_c, beta / sqrt(K))`
+```text
+D_c(q) = OT(nu_q^c, nu_c_hat)
+s_c(q) = -[D_c(q) - epsilon_c]_+
+```
 
-For speed, dispersion can be computed with weighted nearest-neighbor cost from each shot to the other shots in the same class. This keeps the uncertainty story without adding K extra Sinkhorn solves, and it avoids the trivial zero distance caused by matching a shot to its own tokens.
+The default scoring mode is `robust_transport_envelope`. Raw OT scores should appear only as ablations.
 
-### Module C: Competitive Query Allocation
+## 5. Optional Query Ambiguity Correction
 
-For each query token, compute its relative evidence for all class measures and assign a soft class budget:
+Query competition should be described as a query-side correction, not as a main contribution. It prevents ambiguous query tokens from independently supporting multiple classes before transport.
 
-`r_ic = softmax_c(-d(u_i, nu_c) / tau)`
+Implementation names:
 
-Then each class only receives the fraction of query evidence it wins. This is the most reviewer-visible novelty because it prevents ambiguous scalogram background from helping all classes equally.
+- `use_query_competition`
+- `query_competition_temperature`
+- `compute_query_class_affinities(...)`
+- `apply_query_ambiguity_correction(...)`
 
-### Module D: Robust Partial Transport Score
+Avoid presenting this as the central novelty.
 
-Score each class with native log-domain unbalanced Sinkhorn:
+## 6. Transport Backend
 
-`score(q,c) = -[D_uot(q_c, nu_c) - epsilon_c]_+`
+Unbalanced OT is an implementation backend for partial matching:
 
-Use the native PyTorch solver by default, not POT. POT remains an optional diagnostic baseline.
+```text
+transport_backend = "unbalanced_ot"
+```
 
-## 4. What To Remove From The Main Claim
+Balanced OT remains available for ablation:
 
-Do not sell these as separate major contributions:
+```text
+transport_backend = "balanced_ot"
+```
 
-- exact Wasserstein barycenter;
-- unbalanced barycenter;
-- sink/noise mechanism as a standalone novelty;
-- many learned scalar hyperparameters;
-- multiple OT variants in the main model.
+Do not present the sink or unbalanced solver as a separate contribution. The contribution is the uncertain barycentric class object and robust class transport scoring.
 
-They can appear as optional ablations or appendix variants. The paper should not look parameter-greedy.
+## 7. Recommended Paper Text
 
-## 5. Paper Story For Neurocomputing/Q1
+DeepEMD-style few-shot classifiers preserve local structure by computing optimal transport between query and support images, but they still perform inference through independent query-support comparisons. We instead represent each few-shot class as an uncertain barycentric transport object: a Wasserstein barycenter of support token measures equipped with a transport dispersion radius. Classification is performed by robust transport scoring, which penalizes only the query evidence that lies outside the class transport envelope. An optional query ambiguity correction allocates query token mass across classes before transport to reduce ambiguous matches. This yields a compact class-level OT formulation for uncertainty-aware few-shot recognition.
 
-Recommended contribution paragraph:
+Contributions:
 
-> We propose a compact class-barycentric robust transport classifier for few-shot partial-discharge scalogram recognition. The method first converts the support set of each class into a consensus-weighted class measure, then estimates an episode-adaptive uncertainty radius from support dispersion, and finally performs class-competitive query evidence allocation before robust partial transport scoring. Unlike pairwise local matching methods, the proposed formulation treats the few-shot class itself as the inference object and prevents ambiguous query regions from being over-explained by multiple classes.
+1. We reformulate local OT-based few-shot recognition from pairwise support matching to class-level transport inference by representing each class as a Wasserstein barycentric token measure.
 
-## 6. Ablation Plan
+2. We introduce an uncertain barycentric class object that augments the barycenter with a class-specific transport radius estimated from support dispersion, yielding an episode-adaptive robust transport envelope.
 
-Minimal ablations:
+3. We instantiate query classification with a robust transport score and an optional query-side ambiguity correction, improving robustness to noisy or ambiguous local evidence.
 
-1. Pairwise query-support OT vs class measure.
-2. Uniform support mass vs cross-shot consensus mass.
-3. No radius vs dispersion radius.
-4. Independent class scoring vs competitive query allocation.
-5. POT exact barycenter vs compact mixture barycenter.
+## 8. Ablation Plan
 
-The most important runtime table should report:
+Main ablations:
 
-- ms/episode;
-- GPU memory;
-- number of Sinkhorn solves per episode;
-- accuracy and confidence interval.
+1. `deepemd_pairwise`: pairwise query-support transport baseline.
+2. `barycentric_only`: class barycenter without radius.
+3. `uncertain_barycentric`: barycenter plus transport radius, no query competition.
+4. `ubt_full`: uncertain barycentric class object plus robust score and optional query ambiguity correction.
 
-## 7. Default Implementation Recipe
+Appendix ablations:
+
+- `fixed_radius`
+- `dynamic_radius`
+- `balanced_ot`
+- `unbalanced_ot`
+- `no_beta_floor`
+- `tau_sensitivity`
+- `alpha_sensitivity`
+
+The main table should read:
+
+```text
+DeepEMD pairwise
++ Barycentric class measure
++ Transport radius
++ Query ambiguity correction
+```
+
+## 9. Default Implementation Recipe
 
 Use:
 
-- `--cbcr_fsl_barycenter_method mixture`
-- `--cbcr_fsl_ot_backend native`
-- `--cbcr_fsl_score_scale 8.0`
-- moderate `--cbcr_fsl_sinkhorn_epsilon`, e.g. `0.08` or `0.1` if costs are normalized;
-- fewer Sinkhorn iterations, e.g. `30-50`, then only increase if validation improves.
+- `--model ubt_fsl`
+- `--ubt_fsl_barycenter_method mixture`
+- `--ubt_fsl_transport_backend unbalanced_ot`
+- `--ubt_fsl_scoring robust_transport_envelope`
+- `--ubt_fsl_use_query_competition true`
+- `--ubt_fsl_score_scale 8.0`
+- `--ubt_fsl_solver_backend native`
+- moderate `--ubt_fsl_sinkhorn_epsilon`, for example `0.08` or `0.1` if costs are normalized.
 
-This default removes the POT warning path and reduces the number of episode-level Sinkhorn solves.
+Legacy scripts can continue to use `--model cbcr_fsl` and `cbcr_fsl_*` flags.
