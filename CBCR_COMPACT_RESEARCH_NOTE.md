@@ -97,6 +97,7 @@ Use:
 
 - `--cbcr_fsl_barycenter_method mixture`
 - `--cbcr_fsl_ot_backend native`
+- `--cbcr_fsl_score_scale 8.0`
 - moderate `--cbcr_fsl_sinkhorn_epsilon`, e.g. `0.08` or `0.1` if costs are normalized;
 - fewer Sinkhorn iterations, e.g. `30-50`, then only increase if validation improves.
 

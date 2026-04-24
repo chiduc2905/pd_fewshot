@@ -956,6 +956,7 @@ def get_args():
     parser.add_argument("--cbcr_fsl_beta", type=float, default=0.1)
     parser.add_argument("--cbcr_fsl_tau", type=float, default=0.5)
     parser.add_argument("--cbcr_fsl_rho", type=float, default=1.0)
+    parser.add_argument("--cbcr_fsl_score_scale", type=float, default=8.0)
     parser.add_argument("--cbcr_fsl_normalize_tokens", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--cbcr_fsl_cost_power", type=float, default=2.0)
     parser.add_argument("--cbcr_fsl_profile", type=str, default="false", choices=["true", "false"])
@@ -1651,6 +1652,7 @@ def get_model(args):
             f"beta={getattr(args, 'cbcr_fsl_beta', 0.1)}, "
             f"tau={getattr(args, 'cbcr_fsl_tau', 0.5)}, "
             f"rho={getattr(args, 'cbcr_fsl_rho', 1.0)}, "
+            f"score_scale={getattr(args, 'cbcr_fsl_score_scale', 8.0)}, "
             f"bary_method={getattr(args, 'cbcr_fsl_barycenter_method', 'mixture')}, "
             f"ot_backend={getattr(args, 'cbcr_fsl_ot_backend', 'native')})"
         )

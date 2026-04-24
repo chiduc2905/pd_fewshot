@@ -1948,6 +1948,7 @@ def build_model_from_args(args):
             beta=float(getattr(args, "cbcr_fsl_beta", 0.1)),
             tau=float(getattr(args, "cbcr_fsl_tau", 0.5)),
             rho=float(getattr(args, "cbcr_fsl_rho", 1.0)),
+            score_scale=float(getattr(args, "cbcr_fsl_score_scale", 8.0)),
             normalize_tokens=_bool_flag(getattr(args, "cbcr_fsl_normalize_tokens", "true"), default=True),
             cost_power=float(getattr(args, "cbcr_fsl_cost_power", 2.0)),
             profile=_bool_flag(getattr(args, "cbcr_fsl_profile", "false"), default=False),

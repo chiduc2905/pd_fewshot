@@ -73,6 +73,7 @@ class CBCRFSL(BaseConv64FewShotModel):
         beta: float = 0.1,
         tau: float = 0.5,
         rho: float = 1.0,
+        score_scale: float = 1.0,
         normalize_tokens: bool = True,
         cost_power: float = 2.0,
         profile: bool = False,
@@ -97,6 +98,8 @@ class CBCRFSL(BaseConv64FewShotModel):
             raise ValueError("barycenter_iterations must be positive")
         if alpha <= 0.0 or beta <= 0.0 or tau <= 0.0 or rho <= 0.0:
             raise ValueError("alpha, beta, tau, and rho must be positive")
+        if score_scale <= 0.0:
+            raise ValueError("score_scale must be positive")
         if cost_power <= 0.0:
             raise ValueError("cost_power must be positive")
         ot_backend = "native" if str(ot_backend).lower() == "auto" else str(ot_backend).lower()
@@ -114,6 +117,7 @@ class CBCRFSL(BaseConv64FewShotModel):
         self.beta = float(beta)
         self.tau = float(tau)
         self.rho = float(rho)
+        self.score_scale = float(score_scale)
         self.normalize_tokens = bool(normalize_tokens)
         self.cost_power = float(cost_power)
         self.profile = bool(profile)
@@ -507,7 +511,7 @@ class CBCRFSL(BaseConv64FewShotModel):
 
         score_start = time.perf_counter()
         robust_distance = (distance_tensor - epsilon_tensor.unsqueeze(0)).clamp_min(0.0)
-        logits = -robust_distance
+        logits = -self.score_scale * robust_distance
         aux_loss = logits.new_zeros(())
         score_ms = (time.perf_counter() - score_start) * 1000.0
 
