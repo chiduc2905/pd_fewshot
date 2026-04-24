@@ -68,7 +68,7 @@ class CBCRFSL(BaseConv64FewShotModel):
         sinkhorn_tolerance: float = 1e-5,
         barycenter_iterations: int = 40,
         barycenter_tolerance: float = 1e-5,
-        barycenter_method: str = "sinkhorn",
+        barycenter_method: str = "mixture",
         alpha: float = 0.3,
         beta: float = 0.1,
         tau: float = 0.5,
@@ -76,7 +76,7 @@ class CBCRFSL(BaseConv64FewShotModel):
         normalize_tokens: bool = True,
         cost_power: float = 2.0,
         profile: bool = False,
-        ot_backend: str = "pot",
+        ot_backend: str = "native",
         eps: float = 1e-8,
     ) -> None:
         super().__init__(
@@ -124,6 +124,9 @@ class CBCRFSL(BaseConv64FewShotModel):
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, token_dim, bias=False),
         )
+
+    def _uses_fast_barycenter(self) -> bool:
+        return self.barycenter_method.lower() in {"mixture", "support_mixture", "closed_form"}
 
     def _encode_images(self, images: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
         feature_map = self.encode(images)
@@ -218,11 +221,16 @@ class CBCRFSL(BaseConv64FewShotModel):
             return support_tokens[0], support_weights[0]
 
         barycenter_tokens = support_tokens.reshape(-1, support_tokens.shape[-1])
-        histograms = self._build_sparse_common_histograms(support_weights).clamp_min(self.eps)
-        support_cost = self._pairwise_cost(barycenter_tokens, barycenter_tokens)
+        histograms = self._build_sparse_common_histograms(support_weights)
         shot_weights = support_tokens.new_full((support_tokens.shape[0],), 1.0 / float(support_tokens.shape[0]))
+        if self._uses_fast_barycenter():
+            barycenter_weights = torch.matmul(shot_weights.unsqueeze(0), histograms).squeeze(0)
+            barycenter_weights = _normalize_weights(barycenter_weights, self.eps)
+            return barycenter_tokens, barycenter_weights
+
+        support_cost = self._pairwise_cost(barycenter_tokens, barycenter_tokens)
         barycenter_weights = barycenter_balanced_pot(
-            histograms,
+            histograms.clamp_min(self.eps),
             support_cost,
             shot_weights,
             eps=self.sinkhorn_epsilon,
@@ -373,12 +381,22 @@ class CBCRFSL(BaseConv64FewShotModel):
         )
         shot_distances = []
         for shot_idx in range(support_tokens.shape[0]):
-            distance, _, _, _ = self._compute_balanced_transport_details(
-                support_tokens[shot_idx],
-                support_weights[shot_idx],
-                barycenter_tokens,
-                barycenter_weights,
-            )
+            if self._uses_fast_barycenter():
+                cost = self._pairwise_cost(support_tokens[shot_idx], barycenter_tokens)
+                if support_tokens.shape[0] > 1:
+                    token_num = support_tokens.shape[1]
+                    start = shot_idx * token_num
+                    cost = cost.clone()
+                    cost[:, start : start + token_num] = torch.finfo(cost.dtype).max
+                nearest_cost = cost.min(dim=-1).values
+                distance = (support_weights[shot_idx] * nearest_cost).sum()
+            else:
+                distance, _, _, _ = self._compute_balanced_transport_details(
+                    support_tokens[shot_idx],
+                    support_weights[shot_idx],
+                    barycenter_tokens,
+                    barycenter_weights,
+                )
             shot_distances.append(distance)
         shot_distance_tensor = torch.stack(shot_distances, dim=0)
         dispersion = shot_distance_tensor.mean()

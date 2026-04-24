@@ -680,6 +680,10 @@ def get_args():
     parser.add_argument("--rada_use_residual_anchor", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--rada_use_shrinkage", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--rada_disp_clamp_max", type=float, default=0.0)
+    parser.add_argument("--rada_use_evidence_bound", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rada_evidence_temperature", type=float, default=1.0)
+    parser.add_argument("--rada_min_reliability_mix", type=float, default=0.25)
+    parser.add_argument("--rada_dispersion_inflation", type=float, default=0.25)
     parser.add_argument("--rada_fsl_mamba_base_dim", type=int, default=48)
     parser.add_argument("--rada_fsl_mamba_output_dim", type=int, default=320)
     parser.add_argument("--rada_fsl_mamba_drop_path", type=float, default=0.02)
@@ -947,7 +951,7 @@ def get_args():
     parser.add_argument("--cbcr_fsl_sinkhorn_tolerance", type=float, default=1e-5)
     parser.add_argument("--cbcr_fsl_barycenter_iterations", type=int, default=40)
     parser.add_argument("--cbcr_fsl_barycenter_tolerance", type=float, default=1e-5)
-    parser.add_argument("--cbcr_fsl_barycenter_method", type=str, default="sinkhorn")
+    parser.add_argument("--cbcr_fsl_barycenter_method", type=str, default="mixture")
     parser.add_argument("--cbcr_fsl_alpha", type=float, default=0.3)
     parser.add_argument("--cbcr_fsl_beta", type=float, default=0.1)
     parser.add_argument("--cbcr_fsl_tau", type=float, default=0.5)
@@ -955,7 +959,7 @@ def get_args():
     parser.add_argument("--cbcr_fsl_normalize_tokens", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--cbcr_fsl_cost_power", type=float, default=2.0)
     parser.add_argument("--cbcr_fsl_profile", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--cbcr_fsl_ot_backend", type=str, default="pot", choices=["auto", "native", "pot"])
+    parser.add_argument("--cbcr_fsl_ot_backend", type=str, default="native", choices=["auto", "native", "pot"])
     parser.add_argument("--cbcr_fsl_eps", type=float, default=1e-8)
 
     parser.add_argument(
@@ -1279,10 +1283,15 @@ def get_model(args):
             f"query_conditioned={getattr(args, 'rada_query_conditioned', 'true')}, "
             f"use_residual_anchor={getattr(args, 'rada_use_residual_anchor', 'true')}, "
             f"use_shrinkage={getattr(args, 'rada_use_shrinkage', 'true')}, "
+            f"use_evidence_bound={getattr(args, 'rada_use_evidence_bound', 'true')}, "
+            f"evidence_temperature={getattr(args, 'rada_evidence_temperature', 1.0)}, "
+            f"min_reliability_mix={getattr(args, 'rada_min_reliability_mix', 0.25)}, "
+            f"dispersion_inflation={getattr(args, 'rada_dispersion_inflation', 0.25)}, "
             f"entropy_reg_weight={getattr(args, 'rada_entropy_reg_weight', 0.0)})"
         )
         print(
             "  note: default training remains episodic cross-entropy only; "
+            "evidence-bound stabilizes shot reliability without an extra branch; "
             "`rada_entropy_reg_weight` is optional and off by default."
         )
     if args.model == "spif_ota":
@@ -1642,7 +1651,8 @@ def get_model(args):
             f"beta={getattr(args, 'cbcr_fsl_beta', 0.1)}, "
             f"tau={getattr(args, 'cbcr_fsl_tau', 0.5)}, "
             f"rho={getattr(args, 'cbcr_fsl_rho', 1.0)}, "
-            f"ot_backend={getattr(args, 'cbcr_fsl_ot_backend', 'pot')})"
+            f"bary_method={getattr(args, 'cbcr_fsl_barycenter_method', 'mixture')}, "
+            f"ot_backend={getattr(args, 'cbcr_fsl_ot_backend', 'native')})"
         )
     return model
 
@@ -2524,6 +2534,9 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "mean_attention_entropy",
         "alpha_entropy",
         "alpha_max_mean",
+        "reliability_mix",
+        "effective_support_size",
+        "dispersion_inflation",
         "dispersion_mean",
         "dispersion_min",
         "prototype_shift_norm",
@@ -2634,6 +2647,14 @@ def format_diagnostic_summary(metrics):
         "support_energy_entropy",
         "mean_attention_entropy",
         "mean_shot_weight_entropy",
+        "alpha_entropy",
+        "alpha_max_mean",
+        "reliability_mix",
+        "effective_support_size",
+        "dispersion_inflation",
+        "dispersion_mean",
+        "dispersion_min",
+        "prototype_shift_norm",
         "true_distance",
         "best_negative_distance",
         "distance_gap",

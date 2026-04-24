@@ -25,6 +25,10 @@ def _build_head(**overrides) -> RADAFewShotHead:
         query_conditioned=True,
         use_residual_anchor=True,
         use_shrinkage=True,
+        use_evidence_bound=True,
+        evidence_temperature=1.0,
+        min_reliability_mix=0.25,
+        dispersion_inflation=0.25,
     )
     kwargs.update(overrides)
     return RADAFewShotHead(**kwargs)
@@ -120,6 +124,68 @@ def test_rada_head_no_reliability_ablation_uses_uniform_alpha():
     assert torch.allclose(aux["alpha"], expected, atol=1e-6, rtol=0.0)
 
 
+def test_rada_evidence_bound_prevents_peaky_alpha_under_weak_evidence():
+    support = F.normalize(
+        torch.tensor([[[[1.0, 0.0], [-1.0, 0.0]]]], dtype=torch.float32),
+        dim=-1,
+    )
+    query = F.normalize(torch.tensor([[[1.0, 0.0]]], dtype=torch.float32), dim=-1)
+    bounded = _build_head(
+        feat_dim=2,
+        use_evidence_bound=True,
+        evidence_temperature=0.01,
+        min_reliability_mix=0.2,
+        dispersion_inflation=0.0,
+    )
+    unbounded = _build_head(feat_dim=2, use_evidence_bound=False, dispersion_inflation=0.0)
+    for head in (bounded, unbounded):
+        with torch.no_grad():
+            head.reliability_head.weight.zero_()
+            head.reliability_head.bias.zero_()
+            head.reliability_head.weight[0, 1] = 20.0
+
+    _, bounded_aux = bounded(support, query)
+    _, unbounded_aux = unbounded(support, query)
+
+    assert bounded_aux["alpha"].max() < unbounded_aux["alpha"].max()
+    assert bounded_aux["alpha"].max() <= 0.61
+    assert torch.allclose(bounded_aux["alpha"].sum(dim=-1), torch.ones(1, 1, 1), atol=1e-6)
+
+
+def test_rada_dispersion_inflates_when_effective_support_is_small():
+    support = F.normalize(
+        torch.tensor([[[[1.0, 0.0], [-1.0, 0.0]]]], dtype=torch.float32),
+        dim=-1,
+    )
+    query = F.normalize(torch.tensor([[[1.0, 0.0]]], dtype=torch.float32), dim=-1)
+    inflated = _build_head(
+        feat_dim=2,
+        use_evidence_bound=True,
+        evidence_temperature=0.01,
+        min_reliability_mix=1.0,
+        dispersion_inflation=0.5,
+    )
+    plain = _build_head(
+        feat_dim=2,
+        use_evidence_bound=True,
+        evidence_temperature=0.01,
+        min_reliability_mix=1.0,
+        dispersion_inflation=0.0,
+    )
+    for head in (inflated, plain):
+        with torch.no_grad():
+            head.reliability_head.weight.zero_()
+            head.reliability_head.bias.zero_()
+            head.reliability_head.weight[0, 1] = 20.0
+
+    _, inflated_aux = inflated(support, query)
+    _, plain_aux = plain(support, query)
+
+    assert inflated_aux["effective_support_size"].mean() < 1.1
+    assert inflated_aux["dispersion_inflation"].mean() > 1.0
+    assert inflated_aux["disp"].mean() > plain_aux["disp"].mean()
+
+
 def test_rada_model_factory_builds_and_returns_aux():
     args = SimpleNamespace(
         model="rada_fsl",
@@ -141,6 +207,10 @@ def test_rada_model_factory_builds_and_returns_aux():
         rada_use_residual_anchor="true",
         rada_use_shrinkage="true",
         rada_disp_clamp_max=0.0,
+        rada_use_evidence_bound="true",
+        rada_evidence_temperature=1.0,
+        rada_min_reliability_mix=0.25,
+        rada_dispersion_inflation=0.25,
         rada_fsl_mamba_base_dim=16,
         rada_fsl_mamba_output_dim=64,
         rada_fsl_mamba_drop_path=0.0,
@@ -163,5 +233,8 @@ def test_rada_model_factory_builds_and_returns_aux():
     assert outputs["disp"].shape == (1, 2, 3, 32)
     assert outputs["mu"].shape == (1, 3, 32)
     assert outputs["raw_scatter"].shape == (1, 3)
+    assert outputs["reliability_mix_tensor"].shape == (1, 2, 3)
+    assert outputs["effective_support_size_tensor"].shape == (1, 2, 3)
+    assert outputs["dispersion_inflation_tensor"].shape == (1, 2, 3, 32)
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["disp"]).all()

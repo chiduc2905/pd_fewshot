@@ -30,6 +30,10 @@ class RADAFewShotHead(nn.Module):
         use_residual_anchor: bool = True,
         use_shrinkage: bool = True,
         disp_clamp_max: float | None = None,
+        use_evidence_bound: bool = True,
+        evidence_temperature: float = 1.0,
+        min_reliability_mix: float = 0.25,
+        dispersion_inflation: float = 0.25,
     ) -> None:
         super().__init__()
         if int(feat_dim) <= 0:
@@ -44,6 +48,12 @@ class RADAFewShotHead(nn.Module):
             raise ValueError("eps must be positive")
         if disp_clamp_max is not None and float(disp_clamp_max) <= float(eps):
             raise ValueError("disp_clamp_max must be greater than eps when provided")
+        if float(evidence_temperature) <= 0.0:
+            raise ValueError("evidence_temperature must be positive")
+        if not (0.0 <= float(min_reliability_mix) <= 1.0):
+            raise ValueError("min_reliability_mix must be in [0, 1]")
+        if float(dispersion_inflation) < 0.0:
+            raise ValueError("dispersion_inflation must be non-negative")
 
         self.feat_dim = int(feat_dim)
         self.tau_r = float(tau_r)
@@ -57,6 +67,10 @@ class RADAFewShotHead(nn.Module):
         self.use_residual_anchor = bool(use_residual_anchor)
         self.use_shrinkage = bool(use_shrinkage)
         self.disp_clamp_max = None if disp_clamp_max is None else float(disp_clamp_max)
+        self.use_evidence_bound = bool(use_evidence_bound)
+        self.evidence_temperature = float(evidence_temperature)
+        self.min_reliability_mix = float(min_reliability_mix)
+        self.dispersion_inflation = float(dispersion_inflation)
 
         reliability_head = str(reliability_head).lower()
         if reliability_head not in {"linear", "mlp"}:
@@ -150,10 +164,23 @@ class RADAFewShotHead(nn.Module):
                 dim=-1,
             )
             reliability_logits = self.reliability_head(reliability_feat).squeeze(-1)
-            alpha = F.softmax(reliability_logits / self.tau_r, dim=-1)
+            learned_alpha = F.softmax(reliability_logits / self.tau_r, dim=-1)
+            uniform_alpha = self._uniform_alpha(support_feat, batch_size, num_query, num_way, num_shot)
+            if self.use_evidence_bound:
+                class_compactness = torch.exp(-raw_scatter / self.evidence_temperature).clamp(0.0, 1.0)
+                query_mu_cos = self.cosine(query_feat.unsqueeze(2), mu.unsqueeze(1))
+                query_alignment = (0.5 * (query_mu_cos + 1.0)).clamp(0.0, 1.0)
+                reliability_mix = class_compactness.unsqueeze(1) * query_alignment
+                reliability_mix = self.min_reliability_mix + (1.0 - self.min_reliability_mix) * reliability_mix
+                reliability_mix = reliability_mix.clamp(0.0, 1.0)
+                alpha = reliability_mix.unsqueeze(-1) * learned_alpha + (1.0 - reliability_mix).unsqueeze(-1) * uniform_alpha
+            else:
+                reliability_mix = support_feat.new_ones((batch_size, num_query, num_way))
+                alpha = learned_alpha
         else:
             reliability_logits = support_feat.new_zeros((batch_size, num_query, num_way, num_shot))
             alpha = self._uniform_alpha(support_feat, batch_size, num_query, num_way, num_shot)
+            reliability_mix = support_feat.new_zeros((batch_size, num_query, num_way))
 
         weighted_proto = (alpha.unsqueeze(-1) * support_e).sum(dim=3)
         mu_q = mu.unsqueeze(1).expand(-1, num_query, -1, -1)
@@ -170,6 +197,17 @@ class RADAFewShotHead(nn.Module):
             disp = self.gamma_disp * delta + (1.0 - self.gamma_disp) * global_disp
         else:
             disp = delta
+
+        alpha_concentration = alpha.pow(2).sum(dim=-1)
+        effective_support_size = alpha_concentration.clamp_min(self.eps).reciprocal()
+        if self.use_evidence_bound and self.dispersion_inflation > 0.0 and num_shot > 1:
+            evidence_uncertainty = (float(num_shot) - effective_support_size) / float(num_shot - 1)
+            evidence_uncertainty = evidence_uncertainty.clamp(0.0, 1.0)
+            inflation = 1.0 + self.dispersion_inflation * evidence_uncertainty.unsqueeze(-1)
+            disp = disp * inflation
+        else:
+            inflation = support_feat.new_ones((batch_size, num_query, num_way, 1))
+
         if self.disp_clamp_max is None:
             disp = disp.clamp(min=self.eps)
         else:
@@ -190,10 +228,13 @@ class RADAFewShotHead(nn.Module):
             "mu": mu,
             "raw_scatter": raw_scatter,
             "reliability_logits": reliability_logits,
+            "reliability_mix": reliability_mix,
             "delta": delta,
             "global_disp": global_disp.expand(batch_size, num_query, num_way, feat_dim),
             "alpha_entropy": -(alpha_safe * alpha_safe.log()).sum(dim=-1),
             "alpha_max": alpha.max(dim=-1).values,
+            "effective_support_size": effective_support_size,
+            "dispersion_inflation": inflation.expand(batch_size, num_query, num_way, feat_dim),
             "prototype_shift_norm": (proto - mu_q).norm(dim=-1),
         }
         return logits, aux

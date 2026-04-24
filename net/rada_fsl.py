@@ -38,6 +38,10 @@ class RADAFSL(nn.Module):
         use_residual_anchor: bool = True,
         use_shrinkage: bool = True,
         disp_clamp_max: float | None = None,
+        use_evidence_bound: bool = True,
+        evidence_temperature: float = 1.0,
+        min_reliability_mix: float = 0.25,
+        dispersion_inflation: float = 0.25,
     ) -> None:
         super().__init__()
         self.backbone_model = BaseConv64FewShotModel(
@@ -69,6 +73,10 @@ class RADAFSL(nn.Module):
             use_residual_anchor=use_residual_anchor,
             use_shrinkage=use_shrinkage,
             disp_clamp_max=disp_clamp_max,
+            use_evidence_bound=use_evidence_bound,
+            evidence_temperature=evidence_temperature,
+            min_reliability_mix=min_reliability_mix,
+            dispersion_inflation=dispersion_inflation,
         )
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
@@ -121,13 +129,19 @@ class RADAFSL(nn.Module):
             "raw_scatter": aux["raw_scatter"],
             "support_dispersion": aux["raw_scatter"],
             "reliability_logits": aux["reliability_logits"],
+            "reliability_mix_tensor": aux["reliability_mix"],
             "delta": aux["delta"],
             "global_disp": aux["global_disp"],
             "alpha_entropy_tensor": aux["alpha_entropy"],
             "alpha_max_tensor": aux["alpha_max"],
+            "effective_support_size_tensor": aux["effective_support_size"],
+            "dispersion_inflation_tensor": aux["dispersion_inflation"],
             "prototype_shift_norm_tensor": aux["prototype_shift_norm"],
             "alpha_entropy": aux["alpha_entropy"].mean().detach(),
             "alpha_max_mean": aux["alpha_max"].mean().detach(),
+            "reliability_mix": aux["reliability_mix"].mean().detach(),
+            "effective_support_size": aux["effective_support_size"].mean().detach(),
+            "dispersion_inflation": aux["dispersion_inflation"].mean().detach(),
             "dispersion_mean": aux["disp"].mean().detach(),
             "dispersion_min": aux["disp"].min().detach(),
             "prototype_shift_norm": aux["prototype_shift_norm"].mean().detach(),

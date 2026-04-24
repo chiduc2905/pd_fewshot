@@ -60,8 +60,8 @@ MODEL_REGISTRY = {
     },
     "rada_fsl": {
         "display_name": "RADA-FSL",
-        "architecture": "Backbone pooled embeddings -> reliability-aware query-conditioned prototypes -> diagonal dispersion-aware matching",
-        "metric": "Reliability-Weighted Prototype + Diagonal Mahalanobis Distance",
+        "architecture": "Backbone pooled embeddings -> evidence-bounded query-conditioned reliability prototypes -> adaptive diagonal dispersion matching",
+        "metric": "Evidence-Bounded Reliability Prototype + Diagonal Mahalanobis Distance",
     },
     "covamnet": {
         "display_name": "CovaMNet",
@@ -455,6 +455,10 @@ def build_model_from_args(args):
             ),
             use_shrinkage=_bool_flag(getattr(args, "rada_use_shrinkage", "true"), default=True),
             disp_clamp_max=disp_clamp_max,
+            use_evidence_bound=_bool_flag(getattr(args, "rada_use_evidence_bound", "true"), default=True),
+            evidence_temperature=float(getattr(args, "rada_evidence_temperature", 1.0)),
+            min_reliability_mix=float(getattr(args, "rada_min_reliability_mix", 0.25)),
+            dispersion_inflation=float(getattr(args, "rada_dispersion_inflation", 0.25)),
         )
     if args.model == "covamnet":
         CovaMNet = _load_symbol("net.covamnet", "CovaMNet")
@@ -1939,7 +1943,7 @@ def build_model_from_args(args):
             sinkhorn_tolerance=float(getattr(args, "cbcr_fsl_sinkhorn_tolerance", 1e-5)),
             barycenter_iterations=int(getattr(args, "cbcr_fsl_barycenter_iterations", 40)),
             barycenter_tolerance=float(getattr(args, "cbcr_fsl_barycenter_tolerance", 1e-5)),
-            barycenter_method=str(getattr(args, "cbcr_fsl_barycenter_method", "sinkhorn")),
+            barycenter_method=str(getattr(args, "cbcr_fsl_barycenter_method", "mixture")),
             alpha=float(getattr(args, "cbcr_fsl_alpha", 0.3)),
             beta=float(getattr(args, "cbcr_fsl_beta", 0.1)),
             tau=float(getattr(args, "cbcr_fsl_tau", 0.5)),
@@ -1947,7 +1951,7 @@ def build_model_from_args(args):
             normalize_tokens=_bool_flag(getattr(args, "cbcr_fsl_normalize_tokens", "true"), default=True),
             cost_power=float(getattr(args, "cbcr_fsl_cost_power", 2.0)),
             profile=_bool_flag(getattr(args, "cbcr_fsl_profile", "false"), default=False),
-            ot_backend=str(getattr(args, "cbcr_fsl_ot_backend", "pot")),
+            ot_backend=str(getattr(args, "cbcr_fsl_ot_backend", "native")),
             eps=float(getattr(args, "cbcr_fsl_eps", 1e-8)),
         )
     if args.model in {"warn", "pars_net"}:
