@@ -24,6 +24,60 @@ def _validate_transport_inputs(cost: torch.Tensor, a: torch.Tensor, b: torch.Ten
         raise ValueError(f"b must have shape {tuple(cost.shape[:-2] + (cost.shape[-1],))}, got {tuple(b.shape)}")
     if eps <= 0.0:
         raise ValueError("eps must be positive")
+    if torch.any(a < 0.0) or torch.any(b < 0.0):
+        raise ValueError("a and b must be non-negative")
+
+
+def validate_balanced_marginals(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    tol: float = 1e-5,
+) -> None:
+    """Validate that balanced OT marginals have equal total mass."""
+    if a.shape[:-1] != b.shape[:-1]:
+        raise ValueError(f"a and b leading shapes must match, got {tuple(a.shape)} and {tuple(b.shape)}")
+    if tol < 0.0:
+        raise ValueError("tol must be non-negative")
+    residual = (a.sum(dim=-1) - b.sum(dim=-1)).abs()
+    if torch.any(residual > tol):
+        raise ValueError("balanced Sinkhorn requires equal total mass in a and b")
+
+
+def balanced_transport_plan_residuals(
+    plan: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Return per-problem row/column residuals for a balanced OT plan."""
+    if plan.shape != a.shape + (b.shape[-1],):
+        raise ValueError(f"plan must have shape {tuple(a.shape + (b.shape[-1],))}, got {tuple(plan.shape)}")
+    if b.shape != plan.shape[:-2] + (plan.shape[-1],):
+        raise ValueError(f"b must have shape {tuple(plan.shape[:-2] + (plan.shape[-1],))}, got {tuple(b.shape)}")
+    row_residual = (plan.sum(dim=-1) - a).abs().amax(dim=-1)
+    column_residual = (plan.sum(dim=-2) - b).abs().amax(dim=-1)
+    mass_residual = (plan.sum(dim=(-1, -2)) - a.sum(dim=-1)).abs()
+    return {
+        "row_residual": row_residual,
+        "column_residual": column_residual,
+        "mass_residual": mass_residual,
+    }
+
+
+def validate_balanced_transport_plan(
+    plan: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    tol: float = 1e-5,
+) -> dict[str, torch.Tensor]:
+    """Validate row and column marginals for a balanced Sinkhorn plan."""
+    residuals = balanced_transport_plan_residuals(plan, a, b)
+    if torch.any(residuals["row_residual"] > tol):
+        raise FloatingPointError("balanced Sinkhorn row marginal residual exceeds tolerance")
+    if torch.any(residuals["column_residual"] > tol):
+        raise FloatingPointError("balanced Sinkhorn column marginal residual exceeds tolerance")
+    if torch.any(residuals["mass_residual"] > tol):
+        raise FloatingPointError("balanced Sinkhorn total mass residual exceeds tolerance")
+    return residuals
 
 
 def resolve_ot_backend(backend: str = "native") -> str:
@@ -56,6 +110,7 @@ def sinkhorn_balanced_log(
     marginal `a` and column marginal `b`.
     """
     _validate_transport_inputs(cost, a, b, eps)
+    validate_balanced_marginals(a, b, tol=max(float(tol) * 10.0, 1e-5))
     log_a = torch.log(a.clamp_min(EPS))
     log_b = torch.log(b.clamp_min(EPS))
     log_kernel = -cost / float(eps)
@@ -153,6 +208,7 @@ def sinkhorn_balanced_pot(
     tol: float = 1e-5,
 ) -> torch.Tensor:
     _validate_transport_inputs(cost, a, b, eps)
+    validate_balanced_marginals(a, b, tol=max(float(tol) * 10.0, 1e-5))
     require_pot()
 
     def solver(pair_a: torch.Tensor, pair_b: torch.Tensor, pair_cost: torch.Tensor) -> torch.Tensor:
@@ -316,7 +372,7 @@ def generalized_kl_divergence(
     ).sum(dim=-1)
 
 
-def compute_unbalanced_transport_objective(
+def compute_unbalanced_classification_energy(
     plan: torch.Tensor,
     cost: torch.Tensor,
     a: torch.Tensor,
@@ -325,11 +381,10 @@ def compute_unbalanced_transport_objective(
     tau_c: float,
     eps: float = EPS,
 ) -> torch.Tensor:
-    """Unregularized KL-relaxed UOT objective evaluated at a Sinkhorn plan.
+    """KL-relaxed UOT classification energy evaluated at a Sinkhorn plan.
 
-    The Sinkhorn plan is produced with entropic regularization for numerical
-    stability, but classification should not ignore the KL marginal penalties:
-    otherwise a class can drop most mass and still receive a low average cost.
+    This intentionally excludes the entropy regularization term used to compute
+    the plan, but includes marginal KL penalties so dropped mass is scored.
     """
     if tau_q <= 0.0 or tau_c <= 0.0:
         raise ValueError("tau_q and tau_c must be positive")
@@ -343,3 +398,61 @@ def compute_unbalanced_transport_objective(
     source_kl = generalized_kl_divergence(row_mass, a, eps=eps)
     target_kl = generalized_kl_divergence(col_mass, b, eps=eps)
     return transport_cost + float(tau_q) * source_kl + float(tau_c) * target_kl
+
+
+def compute_unbalanced_total_objective_entropy(
+    plan: torch.Tensor,
+    cost: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    tau_q: float,
+    tau_c: float,
+    eps: float | None = None,
+    entropy_reg: float | None = None,
+    numerical_eps: float = EPS,
+) -> torch.Tensor:
+    """Full entropy-regularized UOT objective for ``reg_type='entropy'``.
+
+    Returns ``<P,C> + tau_q KL(P1,a) + tau_c KL(P^T1,b)
+    + eps * sum(P log(P) - P)``. ``entropy_reg`` is accepted as a
+    descriptive alias for the entropic regularization coefficient.
+    """
+    if eps is not None and entropy_reg is not None:
+        raise ValueError("Only one of eps and entropy_reg may be set")
+    entropy_weight = eps if eps is not None else entropy_reg
+    if entropy_weight is None:
+        raise ValueError("eps or entropy_reg must be provided")
+    if entropy_weight <= 0.0:
+        raise ValueError("eps and entropy_reg must be positive")
+    classification_energy = compute_unbalanced_classification_energy(
+        plan,
+        cost,
+        a,
+        b,
+        tau_q=tau_q,
+        tau_c=tau_c,
+        eps=numerical_eps,
+    )
+    entropy = (plan * torch.log(plan.clamp_min(numerical_eps)) - plan).sum(dim=(-1, -2))
+    return classification_energy + float(entropy_weight) * entropy
+
+
+def compute_unbalanced_transport_objective(
+    plan: torch.Tensor,
+    cost: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    tau_q: float,
+    tau_c: float,
+    eps: float = EPS,
+) -> torch.Tensor:
+    """Compatibility alias for :func:`compute_unbalanced_classification_energy`."""
+    return compute_unbalanced_classification_energy(
+        plan,
+        cost,
+        a,
+        b,
+        tau_q=tau_q,
+        tau_c=tau_c,
+        eps=eps,
+    )

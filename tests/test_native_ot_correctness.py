@@ -4,7 +4,11 @@ import pytest
 import torch
 
 from net.modules.unbalanced_ot import (
+    balanced_transport_plan_residuals,
     compute_transported_mass,
+    compute_transport_cost,
+    compute_unbalanced_classification_energy,
+    compute_unbalanced_total_objective_entropy,
     compute_unbalanced_transport_objective,
     sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
@@ -32,6 +36,10 @@ def test_native_balanced_sinkhorn_satisfies_marginals_batched():
     assert torch.allclose(plan.sum(dim=-1), a, atol=2e-4, rtol=2e-4)
     assert torch.allclose(plan.sum(dim=-2), b, atol=2e-4, rtol=2e-4)
     assert torch.allclose(compute_transported_mass(plan), torch.ones(2, 3), atol=2e-4, rtol=2e-4)
+    residuals = balanced_transport_plan_residuals(plan, a, b)
+    assert torch.all(residuals["row_residual"] <= 2e-4)
+    assert torch.all(residuals["column_residual"] <= 2e-4)
+    assert torch.all(residuals["mass_residual"] <= 2e-4)
 
 
 def test_native_balanced_sinkhorn_matches_pot_entropy_solver_batched():
@@ -76,6 +84,34 @@ def test_native_unbalanced_sinkhorn_matches_pot_entropy_reg_type_batched():
     )
 
     assert torch.allclose(native, pot, atol=3e-3, rtol=3e-2)
+    assert torch.allclose(
+        compute_transport_cost(native, cost),
+        compute_transport_cost(pot, cost),
+        atol=3e-3,
+        rtol=3e-2,
+    )
+    assert torch.allclose(
+        compute_unbalanced_total_objective_entropy(
+            native,
+            cost,
+            a,
+            b,
+            tau_q=0.6,
+            tau_c=0.8,
+            eps=0.12,
+        ),
+        compute_unbalanced_total_objective_entropy(
+            pot,
+            cost,
+            a,
+            b,
+            tau_q=0.6,
+            tau_c=0.8,
+            eps=0.12,
+        ),
+        atol=5e-3,
+        rtol=5e-2,
+    )
 
 
 def test_native_unbalanced_sinkhorn_recovers_balanced_limit_for_large_tau():
@@ -106,7 +142,7 @@ def test_unbalanced_objective_penalizes_dropped_mass():
     full_plan = torch.tensor([[[0.5, 0.0], [0.0, 0.5]]])
     dropped_plan = torch.tensor([[[0.05, 0.0], [0.0, 0.05]]])
 
-    full_objective = compute_unbalanced_transport_objective(
+    full_objective = compute_unbalanced_classification_energy(
         full_plan,
         cost,
         a,
@@ -125,3 +161,31 @@ def test_unbalanced_objective_penalizes_dropped_mass():
 
     assert torch.allclose(full_objective, torch.zeros_like(full_objective), atol=1e-6)
     assert torch.all(dropped_objective > full_objective)
+
+
+def test_unbalanced_total_objective_adds_entropy_term():
+    cost = torch.zeros(1, 2, 2)
+    a = torch.tensor([[0.5, 0.5]])
+    b = torch.tensor([[0.5, 0.5]])
+    plan = torch.tensor([[[0.25, 0.0], [0.0, 0.25]]])
+
+    classification_energy = compute_unbalanced_classification_energy(
+        plan,
+        cost,
+        a,
+        b,
+        tau_q=0.5,
+        tau_c=0.5,
+    )
+    total_objective = compute_unbalanced_total_objective_entropy(
+        plan,
+        cost,
+        a,
+        b,
+        tau_q=0.5,
+        tau_c=0.5,
+        eps=0.2,
+    )
+    entropy = (plan * torch.log(plan.clamp_min(1e-8)) - plan).sum(dim=(-1, -2))
+
+    assert torch.allclose(total_objective, classification_energy + 0.2 * entropy)
