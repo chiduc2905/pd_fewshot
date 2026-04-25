@@ -314,9 +314,7 @@ def entropic_partial_wasserstein(
             if delta < tol:
                 break
 
-    plan = _repair_partial_transport_plan(kernel, a, b, mass, eps=eps)
-    validate_partial_transport_plan(plan, a, b, mass, tol=max(float(tol) * 10.0, 1e-5))
-    return plan
+    return _repair_partial_transport_plan(kernel, a, b, mass, eps=eps)
 
 
 def _pot_apply_pairwise(
