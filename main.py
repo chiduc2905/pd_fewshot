@@ -1131,9 +1131,38 @@ def get_args():
     parser.add_argument("--deepemd_fast_val", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--deepemd_test_exact", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_test_sfc", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--deepemd_solver", type=str, default="sinkhorn", choices=["opencv", "qpth", "linprog", "sinkhorn"])
+    parser.add_argument(
+        "--deepemd_solver",
+        type=str,
+        default="sinkhorn",
+        choices=[
+            "opencv",
+            "qpth",
+            "linprog",
+            "sinkhorn",
+            "uot",
+            "unbalanced",
+            "unbalanced_ot",
+            "sinkhorn_unbalanced",
+            "partial",
+            "partial_ot",
+            "partial_sinkhorn",
+        ],
+    )
     parser.add_argument("--deepemd_qpth_form", type=str, default="L2", choices=["QP", "L2"])
     parser.add_argument("--deepemd_qpth_l2_strength", type=float, default=1e-6)
+    parser.add_argument("--deepemd_sinkhorn_reg", type=float, default=0.05)
+    parser.add_argument("--deepemd_sinkhorn_iterations", type=int, default=20)
+    parser.add_argument("--deepemd_sinkhorn_tolerance", type=float, default=1e-6)
+    parser.add_argument("--deepemd_uot_tau_q", type=float, default=0.5)
+    parser.add_argument("--deepemd_uot_tau_c", type=float, default=0.5)
+    parser.add_argument("--deepemd_uot_score_normalize", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--deepemd_partial_mass_fraction", type=float, default=0.5)
+    parser.add_argument("--deepemd_partial_transport_mass", type=float, default=None)
+    parser.add_argument("--deepemd_partial_score_normalize", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--deepemd_partial_backend", type=str, default="native", choices=["native", "pot"])
+    parser.add_argument("--deepemd_partial_exact", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--deepemd_eps", type=float, default=1e-8)
     parser.add_argument("--deepemd_sfc_lr", type=float, default=0.1)
     parser.add_argument("--deepemd_sfc_update_step", type=int, default=15)
     parser.add_argument("--deepemd_sfc_bs", type=int, default=4)
@@ -1175,6 +1204,12 @@ def get_model(args):
             f"test_exact={getattr(args, 'deepemd_test_exact', 'false')}, "
             f"test_sfc={getattr(args, 'deepemd_test_sfc', 'false')}, "
             f"qpth_form={getattr(args, 'deepemd_qpth_form', 'L2')}, "
+            f"sinkhorn_reg={getattr(args, 'deepemd_sinkhorn_reg', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'deepemd_sinkhorn_iterations', 20)}, "
+            f"uot_tau=({getattr(args, 'deepemd_uot_tau_q', 0.5)}, "
+            f"{getattr(args, 'deepemd_uot_tau_c', 0.5)}), "
+            f"partial_mass_fraction={getattr(args, 'deepemd_partial_mass_fraction', 0.5)}, "
+            f"partial_backend={getattr(args, 'deepemd_partial_backend', 'native')}, "
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
             f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 15)}, "
             f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)}{override_suffix})"

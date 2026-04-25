@@ -11,6 +11,8 @@ import torch.nn.functional as F
 from scipy.optimize import linprog
 
 from net.encoders.smnet_conv64f_encoder import build_resnet12_family_encoder
+from net.modules.partial_ot import compute_partial_transported_mass, solve_partial_transport
+from net.modules.unbalanced_ot import compute_transported_mass, sinkhorn_unbalanced_log
 
 try:
     import cv2
@@ -28,7 +30,13 @@ def _normalize_transport_weight(weight: torch.Tensor) -> torch.Tensor:
     return (weight * weight.shape[-1]) / weight.sum(dim=-1, keepdim=True)
 
 
-def sinkhorn_distance(cost: torch.Tensor, weight1: torch.Tensor, weight2: torch.Tensor, n_iters: int = 20, reg: float = 0.05):
+def sinkhorn_distance(
+    cost: torch.Tensor,
+    weight1: torch.Tensor,
+    weight2: torch.Tensor,
+    n_iters: int = 20,
+    reg: float = 0.05,
+):
     """Batched Sinkhorn fallback when neither OpenCV nor QPTH is usable."""
 
     batch_size, num_q, _ = cost.size()
@@ -44,6 +52,10 @@ def sinkhorn_distance(cost: torch.Tensor, weight1: torch.Tensor, weight2: torch.
         u = weight1 / (torch.bmm(kernel, v.unsqueeze(-1)).squeeze(-1) + 1e-8)
 
     return u.unsqueeze(-1) * kernel * v.unsqueeze(1)
+
+
+UOT_SOLVERS = {"uot", "unbalanced", "unbalanced_ot", "sinkhorn_unbalanced"}
+PARTIAL_OT_SOLVERS = {"partial", "partial_ot", "partial_sinkhorn"}
 
 
 def emd_inference_qpth(distance_matrix: torch.Tensor, weight1: torch.Tensor, weight2: torch.Tensor, form: str = "L2", l2_strength: float = 1e-6):
@@ -160,6 +172,18 @@ class DeepEMD(nn.Module):
         solver: str = "sinkhorn",
         qpth_form: str = "L2",
         qpth_l2_strength: float = 1e-6,
+        sinkhorn_reg: float = 0.05,
+        sinkhorn_iterations: int = 20,
+        sinkhorn_tolerance: float = 1e-6,
+        uot_tau_q: float = 0.5,
+        uot_tau_c: float = 0.5,
+        uot_score_normalize: bool = False,
+        partial_mass_fraction: float = 0.5,
+        partial_transport_mass: float | None = None,
+        partial_score_normalize: bool = True,
+        partial_backend: str = "native",
+        partial_exact: bool = False,
+        eps: float = 1e-8,
         sfc_lr: float = 0.1,
         sfc_update_step: int = 15,
         sfc_bs: int = 4,
@@ -181,6 +205,34 @@ class DeepEMD(nn.Module):
         self.solver = str(solver).lower()
         self.qpth_form = str(qpth_form)
         self.qpth_l2_strength = float(qpth_l2_strength)
+        if sinkhorn_reg <= 0.0:
+            raise ValueError("sinkhorn_reg must be positive")
+        if sinkhorn_iterations <= 0:
+            raise ValueError("sinkhorn_iterations must be positive")
+        if sinkhorn_tolerance < 0.0:
+            raise ValueError("sinkhorn_tolerance must be non-negative")
+        if uot_tau_q <= 0.0 or uot_tau_c <= 0.0:
+            raise ValueError("uot_tau_q and uot_tau_c must be positive")
+        if partial_mass_fraction <= 0.0 or partial_mass_fraction > 1.0:
+            raise ValueError("partial_mass_fraction must be in (0, 1]")
+        if partial_transport_mass is not None and partial_transport_mass <= 0.0:
+            raise ValueError("partial_transport_mass must be positive when provided")
+        partial_backend = str(partial_backend).lower()
+        if partial_backend not in {"native", "pot"}:
+            raise ValueError("partial_backend must be 'native' or 'pot'")
+
+        self.sinkhorn_reg = float(sinkhorn_reg)
+        self.sinkhorn_iterations = int(sinkhorn_iterations)
+        self.sinkhorn_tolerance = float(sinkhorn_tolerance)
+        self.uot_tau_q = float(uot_tau_q)
+        self.uot_tau_c = float(uot_tau_c)
+        self.uot_score_normalize = bool(uot_score_normalize)
+        self.partial_mass_fraction = float(partial_mass_fraction)
+        self.partial_transport_mass = None if partial_transport_mass is None else float(partial_transport_mass)
+        self.partial_score_normalize = bool(partial_score_normalize)
+        self.partial_backend = partial_backend
+        self.partial_exact = bool(partial_exact)
+        self.eps = float(eps)
         self.sfc_lr = float(sfc_lr)
         self.sfc_update_step = int(sfc_update_step)
         self.sfc_bs = int(sfc_bs)
@@ -215,9 +267,32 @@ class DeepEMD(nn.Module):
             return "opencv" if cv2 is not None else "linprog"
         if exact is False:
             return self.solver
+        if self.solver in UOT_SOLVERS or self.solver in PARTIAL_OT_SOLVERS:
+            return self.solver
         if self.training:
             return self.solver
         return "opencv" if cv2 is not None else "linprog"
+
+    def _aggregate_similarity_score(
+        self,
+        similarity: torch.Tensor,
+        flow: torch.Tensor,
+        num_node: int,
+        *,
+        normalize_by_mass: bool,
+    ) -> torch.Tensor:
+        raw_score = (flow * similarity).sum(dim=(-1, -2))
+        if normalize_by_mass:
+            mass = flow.sum(dim=(-1, -2)).clamp_min(self.eps)
+            return raw_score * (self.temperature / mass)
+        return raw_score * (self.temperature / float(num_node))
+
+    def _partial_transport_mass(self, weight1: torch.Tensor, weight2: torch.Tensor) -> torch.Tensor:
+        max_mass = torch.minimum(weight1.sum(dim=-1), weight2.sum(dim=-1))
+        if self.partial_transport_mass is not None:
+            requested = weight1.new_full(max_mass.shape, self.partial_transport_mass)
+            return torch.minimum(requested, max_mass)
+        return self.partial_mass_fraction * max_mass
 
     def get_emd_distance(self, similarity_map: torch.Tensor, weight1: torch.Tensor, weight2: torch.Tensor, solver: str) -> torch.Tensor:
         num_query = similarity_map.shape[0]
@@ -271,9 +346,77 @@ class DeepEMD(nn.Module):
             flat_similarity = similarity_map.reshape(num_query * num_proto, similarity_map.shape[-2], similarity_map.shape[-1])
             flat_weight1 = weight1.reshape(num_query * num_proto, weight1.shape[-1])
             flat_weight2 = weight2.reshape(num_query * num_proto, weight2.shape[-1])
-            flow = sinkhorn_distance(1 - flat_similarity, flat_weight1, flat_weight2)
-            logits = (flow * flat_similarity).reshape(num_query, num_proto, flow.shape[-2], flow.shape[-1])
-            return logits.sum(dim=-1).sum(dim=-1) * (self.temperature / num_node)
+            flow = sinkhorn_distance(
+                1 - flat_similarity,
+                flat_weight1,
+                flat_weight2,
+                n_iters=self.sinkhorn_iterations,
+                reg=self.sinkhorn_reg,
+            )
+            scores = self._aggregate_similarity_score(
+                flat_similarity,
+                flow,
+                num_node,
+                normalize_by_mass=False,
+            )
+            return scores.reshape(num_query, num_proto)
+
+        if solver in UOT_SOLVERS:
+            weight2 = weight2.permute(1, 0, 2)
+            flat_similarity = similarity_map.reshape(num_query * num_proto, similarity_map.shape[-2], similarity_map.shape[-1])
+            flat_weight1 = weight1.reshape(num_query * num_proto, weight1.shape[-1])
+            flat_weight2 = weight2.reshape(num_query * num_proto, weight2.shape[-1])
+            flow = sinkhorn_unbalanced_log(
+                1 - flat_similarity,
+                flat_weight1,
+                flat_weight2,
+                tau_q=self.uot_tau_q,
+                tau_c=self.uot_tau_c,
+                eps=self.sinkhorn_reg,
+                max_iter=self.sinkhorn_iterations,
+                tol=self.sinkhorn_tolerance,
+            )
+            if self.uot_score_normalize:
+                flow_mass = compute_transported_mass(flow).reshape(num_query, num_proto)
+                if torch.any(flow_mass <= self.eps):
+                    raise FloatingPointError("UOT transported mass collapsed to zero")
+            scores = self._aggregate_similarity_score(
+                flat_similarity,
+                flow,
+                num_node,
+                normalize_by_mass=self.uot_score_normalize,
+            )
+            return scores.reshape(num_query, num_proto)
+
+        if solver in PARTIAL_OT_SOLVERS:
+            weight2 = weight2.permute(1, 0, 2)
+            flat_similarity = similarity_map.reshape(num_query * num_proto, similarity_map.shape[-2], similarity_map.shape[-1])
+            flat_weight1 = weight1.reshape(num_query * num_proto, weight1.shape[-1])
+            flat_weight2 = weight2.reshape(num_query * num_proto, weight2.shape[-1])
+            transport_mass = self._partial_transport_mass(flat_weight1, flat_weight2)
+            flow = solve_partial_transport(
+                1 - flat_similarity,
+                flat_weight1,
+                flat_weight2,
+                transport_mass=transport_mass,
+                backend=self.partial_backend,
+                reg=self.sinkhorn_reg,
+                max_iter=self.sinkhorn_iterations,
+                tol=self.sinkhorn_tolerance,
+                exact=self.partial_exact,
+                eps=self.eps,
+            )
+            if self.partial_score_normalize:
+                flow_mass = compute_partial_transported_mass(flow).reshape(num_query, num_proto)
+                if torch.any(flow_mass <= self.eps):
+                    raise FloatingPointError("partial OT transported mass collapsed to zero")
+            scores = self._aggregate_similarity_score(
+                flat_similarity,
+                flow,
+                num_node,
+                normalize_by_mass=self.partial_score_normalize,
+            )
+            return scores.reshape(num_query, num_proto)
 
         raise ValueError(f"Unsupported DeepEMD solver: {solver}")
 
