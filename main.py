@@ -885,7 +885,23 @@ def get_args():
     parser.add_argument("--hrot_normalize_rho", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_eval_use_float64", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_hyperbolic_backend", type=str, default="auto", choices=["auto", "geoopt", "native"])
-    parser.add_argument("--hrot_ot_backend", type=str, default="native", choices=["auto", "native", "pot"])
+    parser.add_argument(
+        "--hrot_ot_backend",
+        type=str,
+        default="native",
+        choices=[
+            "auto",
+            "native",
+            "pot",
+            "partial",
+            "partial_ot",
+            "partial_sinkhorn",
+            "partial_pot",
+            "pot_partial",
+            "partial_exact",
+            "exact_partial",
+        ],
+    )
     parser.add_argument("--hrot_eps", type=float, default=1e-6)
     parser.add_argument("--fgwuot_token_dim", type=int, default=128)
     parser.add_argument("--fgwuot_tau", type=float, default=0.5)

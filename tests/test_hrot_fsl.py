@@ -13,6 +13,7 @@ from net.hrot_fsl import HROTFSL
 from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbolic_distance_matrix, safe_project_to_ball
 from net.model_factory import build_model_from_args
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass
+from net.modules.partial_ot import partial_transport_plan_residuals
 from net.modules.unbalanced_ot import (
     sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
@@ -1318,6 +1319,58 @@ def test_hrot_fsl_pot_backend_runs_for_debug_path():
     assert outputs["logits"].shape == (2, 3)
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["transport_plan"]).all()
+
+
+def test_hrot_fsl_partial_backend_uses_rho_as_transport_budget():
+    torch.manual_seed(66)
+    model = _build_model(
+        variant="H",
+        ot_backend="partial",
+        sinkhorn_epsilon=0.2,
+        sinkhorn_iterations=120,
+        sinkhorn_tolerance=1e-8,
+    )
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.uses_partial_transport
+    assert outputs["ot_backend"].item() == 2.0
+    assert torch.isfinite(outputs["transport_plan"]).all()
+    assert torch.allclose(outputs["shot_transported_mass"], outputs["shot_rho"], atol=5e-4, rtol=5e-4)
+
+    plan = outputs["transport_plan"].reshape(-1, *outputs["transport_plan"].shape[-2:])
+    token_q, token_s = plan.shape[-2:]
+    a = plan.new_full((plan.shape[0], token_q), 1.0 / float(token_q))
+    b = plan.new_full((plan.shape[0], token_s), 1.0 / float(token_s))
+    mass = outputs["shot_rho"].reshape(-1).to(device=plan.device, dtype=plan.dtype)
+    residuals = partial_transport_plan_residuals(plan, a, b, mass)
+
+    assert torch.all(residuals["row_violation"] <= 5e-4)
+    assert torch.all(residuals["column_violation"] <= 5e-4)
+    assert torch.all(residuals["mass_residual"] <= 5e-4)
+
+
+def test_hrot_fsl_model_factory_accepts_partial_ot_backend():
+    args = SimpleNamespace(
+        model="hrot_fsl",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_variant="H",
+        hrot_ot_backend="partial_ot",
+        hrot_sinkhorn_iterations=10,
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.uses_partial_transport
+    assert model.ot_backend == "partial_ot"
+    assert model.partial_backend == "native"
 
 
 @pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S", "T", "U", "V"])

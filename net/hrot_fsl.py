@@ -18,6 +18,11 @@ from net.hyperbolic.poincare_ops import (
     safe_project_to_ball,
 )
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
+from net.modules.partial_ot import (
+    compute_partial_transport_cost,
+    compute_partial_transported_mass,
+    solve_partial_transport,
+)
 from net.modules.unbalanced_ot import (
     compute_transport_cost,
     compute_transported_mass,
@@ -26,6 +31,16 @@ from net.modules.unbalanced_ot import (
     sinkhorn_balanced_pot,
     sinkhorn_unbalanced_log,
     sinkhorn_unbalanced_pot,
+)
+
+
+HROT_PARTIAL_OT_NATIVE_BACKENDS = {"partial", "partial_ot", "partial_sinkhorn"}
+HROT_PARTIAL_OT_POT_BACKENDS = {"partial_pot", "pot_partial"}
+HROT_PARTIAL_OT_EXACT_BACKENDS = {"partial_exact", "exact_partial"}
+HROT_PARTIAL_OT_BACKENDS = (
+    HROT_PARTIAL_OT_NATIVE_BACKENDS
+    | HROT_PARTIAL_OT_POT_BACKENDS
+    | HROT_PARTIAL_OT_EXACT_BACKENDS
 )
 
 
@@ -152,7 +167,17 @@ class HROTFSL(BaseConv64FewShotModel):
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)
-        self.ot_backend = resolve_ot_backend(ot_backend)
+        ot_backend_name = str(ot_backend).lower()
+        self.uses_partial_transport = ot_backend_name in HROT_PARTIAL_OT_BACKENDS
+        if self.uses_partial_transport:
+            self.ot_backend = ot_backend_name
+            partial_pot_backends = HROT_PARTIAL_OT_POT_BACKENDS | HROT_PARTIAL_OT_EXACT_BACKENDS
+            self.partial_backend = "pot" if ot_backend_name in partial_pot_backends else "native"
+            self.partial_exact = ot_backend_name in HROT_PARTIAL_OT_EXACT_BACKENDS
+        else:
+            self.ot_backend = resolve_ot_backend(ot_backend_name)
+            self.partial_backend = "native"
+            self.partial_exact = False
         self.projection_scale = float(projection_scale)
         self.score_scale = float(score_scale)
         self.tau_q = float(tau_q)
@@ -446,6 +471,15 @@ class HROTFSL(BaseConv64FewShotModel):
                 reward = reward + self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
             return reward
         return self.mass_bonus.to(device=reference.device, dtype=reference.dtype)
+
+    def _ot_backend_code(self, reference: torch.Tensor) -> torch.Tensor:
+        if self.uses_partial_transport:
+            code = 2.0
+        elif self.ot_backend == "pot":
+            code = 1.0
+        else:
+            code = 0.0
+        return reference.new_tensor(code)
 
     def _normalize_rho_budget(self, rho: torch.Tensor) -> torch.Tensor:
         if not self.normalize_rho:
@@ -1231,10 +1265,13 @@ class HROTFSL(BaseConv64FewShotModel):
         b: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_query, num_way, query_tokens, class_tokens = cost.shape
+        partial_transport_mass = None
         if a is None:
             base_a = cost.new_full((num_query, query_tokens), 1.0 / float(query_tokens))
             a = base_a.unsqueeze(1).expand(-1, num_way, -1)
-            if self.uses_unbalanced_transport:
+            if self.uses_partial_transport:
+                partial_transport_mass = rho.to(device=cost.device, dtype=cost.dtype)
+            elif self.uses_unbalanced_transport:
                 a = a * rho.unsqueeze(-1)
         else:
             if tuple(a.shape) != (num_query, num_way, query_tokens):
@@ -1247,7 +1284,9 @@ class HROTFSL(BaseConv64FewShotModel):
         if b is None:
             base_b = cost.new_full((num_way, class_tokens), 1.0 / float(class_tokens))
             b = base_b.unsqueeze(0).expand(num_query, -1, -1)
-            if self.uses_unbalanced_transport:
+            if self.uses_partial_transport:
+                partial_transport_mass = rho.to(device=cost.device, dtype=cost.dtype)
+            elif self.uses_unbalanced_transport:
                 b = b * rho.unsqueeze(-1)
         else:
             if tuple(b.shape) != (num_query, num_way, class_tokens):
@@ -1261,7 +1300,31 @@ class HROTFSL(BaseConv64FewShotModel):
         pair_a = a.reshape(num_query * num_way, query_tokens)
         pair_b = b.reshape(num_query * num_way, class_tokens)
 
-        if self.ot_backend == "pot":
+        if self.uses_partial_transport:
+            max_mass = torch.minimum(pair_a.sum(dim=-1), pair_b.sum(dim=-1))
+            if partial_transport_mass is None:
+                pair_transport_mass = max_mass
+            else:
+                pair_transport_mass = partial_transport_mass.reshape(num_query * num_way).to(
+                    device=cost.device,
+                    dtype=cost.dtype,
+                )
+                pair_transport_mass = torch.minimum(pair_transport_mass, max_mass)
+            pair_plan = solve_partial_transport(
+                pair_cost,
+                pair_a,
+                pair_b,
+                transport_mass=pair_transport_mass,
+                backend=self.partial_backend,
+                reg=self.sinkhorn_epsilon,
+                max_iter=self.sinkhorn_iterations,
+                tol=self.sinkhorn_tolerance,
+                exact=self.partial_exact,
+                eps=self.eps,
+            )
+            pair_transport_cost = compute_partial_transport_cost(pair_plan, pair_cost)
+            pair_transport_mass = compute_partial_transported_mass(pair_plan)
+        elif self.ot_backend == "pot":
             if self.uses_unbalanced_transport:
                 pair_plan = sinkhorn_unbalanced_pot(
                     pair_cost,
@@ -1282,6 +1345,8 @@ class HROTFSL(BaseConv64FewShotModel):
                     max_iter=self.sinkhorn_iterations,
                     tol=self.sinkhorn_tolerance,
                 )
+            pair_transport_cost = compute_transport_cost(pair_plan, pair_cost)
+            pair_transport_mass = compute_transported_mass(pair_plan)
         else:
             if self.uses_unbalanced_transport:
                 pair_plan = sinkhorn_unbalanced_log(
@@ -1303,9 +1368,8 @@ class HROTFSL(BaseConv64FewShotModel):
                     max_iter=self.sinkhorn_iterations,
                     tol=self.sinkhorn_tolerance,
                 )
-
-        pair_transport_cost = compute_transport_cost(pair_plan, pair_cost)
-        pair_transport_mass = compute_transported_mass(pair_plan)
+            pair_transport_cost = compute_transport_cost(pair_plan, pair_cost)
+            pair_transport_mass = compute_transported_mass(pair_plan)
         plan = pair_plan.reshape(num_query, num_way, query_tokens, class_tokens)
         transport_cost = pair_transport_cost.reshape(num_query, num_way)
         transport_mass = pair_transport_mass.reshape(num_query, num_way)
@@ -1428,7 +1492,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "curvature_regularization": curvature_regularization,
             "curvature": self.curvature.detach().to(device=logits.device, dtype=logits.dtype),
             "hyperbolic_backend": logits.new_tensor(0.0 if self.hyperbolic_backend == "native" else 1.0),
-            "ot_backend": logits.new_tensor(0.0 if self.ot_backend == "native" else 1.0),
+            "ot_backend": self._ot_backend_code(logits),
             "shot_transport_cost": shot_transport_cost,
             "shot_transported_mass": shot_transport_mass,
             "shot_rho": shot_rho,
@@ -1955,7 +2019,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 dtype=logits.dtype,
             ),
             "hyperbolic_backend": logits.new_tensor(0.0 if self.hyperbolic_backend == "native" else 1.0),
-            "ot_backend": logits.new_tensor(0.0 if self.ot_backend == "native" else 1.0),
+            "ot_backend": self._ot_backend_code(logits),
         }
         if self.uses_shot_decomposed_transport:
             outputs.update(
