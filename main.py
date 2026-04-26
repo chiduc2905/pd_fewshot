@@ -1186,6 +1186,50 @@ def get_args():
         choices=["true", "false"],
     )
     parser.add_argument("--dice_emd_lambda_flow", "--lambda_flow", dest="dice_emd_lambda_flow", type=float, default=0.0)
+    parser.add_argument(
+        "--transport_recon_emd_tau_shot",
+        "--tardis_emd_tau_shot",
+        dest="transport_recon_emd_tau_shot",
+        type=float,
+        default=0.2,
+    )
+    parser.add_argument(
+        "--transport_recon_emd_kshot_mode",
+        "--tardis_emd_kshot_mode",
+        dest="transport_recon_emd_kshot_mode",
+        type=str,
+        default="query_condense",
+        choices=["query_condense", "mean_condense"],
+    )
+    parser.add_argument(
+        "--transport_recon_emd_lambda_emd",
+        "--tardis_emd_lambda_emd",
+        dest="transport_recon_emd_lambda_emd",
+        type=float,
+        default=0.3,
+    )
+    parser.add_argument(
+        "--transport_recon_emd_lambda_rec",
+        "--tardis_emd_lambda_rec",
+        dest="transport_recon_emd_lambda_rec",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--transport_recon_emd_lambda_struct",
+        "--tardis_emd_lambda_struct",
+        dest="transport_recon_emd_lambda_struct",
+        type=float,
+        default=0.1,
+    )
+    parser.add_argument(
+        "--transport_recon_emd_debug_shapes",
+        "--tardis_emd_debug_shapes",
+        dest="transport_recon_emd_debug_shapes",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
 
     parser.add_argument("--project", type=str, default="pulse_fewshot")
     parser.add_argument("--experiment_tag", type=str, default="")
@@ -1244,6 +1288,18 @@ def get_model(args):
             f"debug_transport={getattr(args, 'dice_emd_debug_transport', 'false')}, "
             f"lambda_flow={getattr(args, 'dice_emd_lambda_flow', 0.0)}, "
             f"solver={getattr(args, 'deepemd_solver', 'sinkhorn')})"
+        )
+    if args.model in {"transport_recon_emd", "tardis_emd"}:
+        print(
+            f"  {args.model}: DeepEMD dense ResNet12 tokens + balanced transport alignment "
+            f"(tau_shot={getattr(args, 'transport_recon_emd_tau_shot', 0.2)}, "
+            f"kshot_mode={getattr(args, 'transport_recon_emd_kshot_mode', 'query_condense')}, "
+            f"sinkhorn_reg={getattr(args, 'deepemd_sinkhorn_reg', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'deepemd_sinkhorn_iterations', 20)}, "
+            f"lambda_emd={getattr(args, 'transport_recon_emd_lambda_emd', 0.3)}, "
+            f"lambda_rec={getattr(args, 'transport_recon_emd_lambda_rec', 1.0)}, "
+            f"lambda_struct={getattr(args, 'transport_recon_emd_lambda_struct', 0.1)}, "
+            f"debug_shapes={getattr(args, 'transport_recon_emd_debug_shapes', 'false')})"
         )
     if args.model == "hierarchical_episodic_ssm_net":
         print(
@@ -2264,6 +2320,14 @@ def forward_scores(
                 support_targets=support_targets,
             )
         return net(query, support, return_aux=collect_diagnostics)
+    if args.model in {"transport_recon_emd", "tardis_emd"}:
+        return net(
+            query,
+            support,
+            return_aux=collect_diagnostics,
+            query_targets=query_targets,
+            support_targets=support_targets,
+        )
     if args.model in {"feat", "can"}:
         return net(query, support, query_targets=query_targets, support_targets=support_targets)
     if args.model == "hierarchical_support_sw_net":

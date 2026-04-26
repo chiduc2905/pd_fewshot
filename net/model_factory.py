@@ -107,6 +107,16 @@ MODEL_REGISTRY = {
         "architecture": "ResNet12 dense descriptors + class-competitive evidence-aware balanced transport",
         "metric": "Discriminative Class-Competitive Earth Mover's Distance",
     },
+    "transport_recon_emd": {
+        "display_name": "Transport-Recon EMD",
+        "architecture": "ResNet12 dense descriptors + balanced transport alignment + bidirectional reconstruction + Gram structure consistency",
+        "metric": "Transport-Guided Reconstruction EMD",
+    },
+    "tardis_emd": {
+        "display_name": "TARDIS-EMD",
+        "architecture": "Alias for Transport-Recon EMD: ResNet12 dense descriptors + transport reconstruction consistency",
+        "metric": "Transport-Guided Reconstruction EMD",
+    },
     "can": {
         "display_name": "CAN",
         "architecture": "ResNet12 + paper-style CAM + inductive cosine inference",
@@ -370,13 +380,18 @@ def get_model_metadata(model_name):
     return MODEL_REGISTRY[model_name]
 
 
-PAPER_BASELINE_BACKBONE_MODELS = frozenset({"feat", "deepemd", "dice_emd", "can", "frn", "deepbdc"})
+PAPER_BASELINE_BACKBONE_MODELS = frozenset(
+    {"feat", "deepemd", "dice_emd", "transport_recon_emd", "tardis_emd", "can", "frn", "deepbdc"}
+)
+RESNET12_ONLY_MODELS = frozenset({"transport_recon_emd", "tardis_emd"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
 
 
 def model_supports_fewshot_backbone(model_name, backbone_name):
     model_name = str(model_name)
     backbone_name = str(backbone_name).lower()
+    if model_name in RESNET12_ONLY_MODELS:
+        return backbone_name == "resnet12"
     if backbone_name != "fsl_mamba":
         return True
     return model_name not in PAPER_BASELINE_BACKBONE_MODELS
@@ -421,6 +436,10 @@ def build_model_from_args(args):
     image_size = getattr(args, "image_size", 64)
     fewshot_backbone = resolve_fewshot_backbone(args)
     if not model_supports_fewshot_backbone(args.model, fewshot_backbone):
+        if str(args.model) in RESNET12_ONLY_MODELS:
+            raise ValueError(
+                f"{args.model} requires fewshot_backbone=resnet12 to keep 640-dim dense maps"
+            )
         raise ValueError(
             f"fewshot_backbone={fewshot_backbone} is only supported for SPIF/new repository models, "
             f"not the paper baseline `{args.model}`"
@@ -563,6 +582,82 @@ def build_model_from_args(args):
                 default=False,
             ),
             lambda_flow=float(_first_attr(args, "dice_emd_lambda_flow", "lambda_flow", default=0.0)),
+            device=device,
+        )
+    if args.model in {"transport_recon_emd", "tardis_emd"}:
+        TransportReconEMD = _load_symbol("net.transport_recon_emd", "TransportReconEMD")
+        return TransportReconEMD(
+            image_size=image_size,
+            fewshot_backbone=fewshot_backbone,
+            tau_shot=float(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_tau_shot",
+                    "tardis_emd_tau_shot",
+                    "tau_shot",
+                    default=0.2,
+                )
+            ),
+            kshot_mode=str(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_kshot_mode",
+                    "tardis_emd_kshot_mode",
+                    "kshot_mode",
+                    default="query_condense",
+                )
+            ),
+            sinkhorn_reg=float(getattr(args, "deepemd_sinkhorn_reg", 0.05)),
+            sinkhorn_iter=int(getattr(args, "deepemd_sinkhorn_iterations", 20)),
+            sinkhorn_tolerance=float(getattr(args, "deepemd_sinkhorn_tolerance", 1e-6)),
+            lambda_emd=float(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_lambda_emd",
+                    "tardis_emd_lambda_emd",
+                    "lambda_emd",
+                    default=0.3,
+                )
+            ),
+            lambda_rec=float(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_lambda_rec",
+                    "tardis_emd_lambda_rec",
+                    "lambda_rec",
+                    default=1.0,
+                )
+            ),
+            lambda_struct=float(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_lambda_struct",
+                    "tardis_emd_lambda_struct",
+                    "lambda_struct",
+                    default=0.1,
+                )
+            ),
+            use_sfc=_bool_flag(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_use_sfc",
+                    "tardis_emd_use_sfc",
+                    "use_sfc",
+                    default="false",
+                ),
+                default=False,
+            ),
+            debug_shapes=_bool_flag(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_debug_shapes",
+                    "tardis_emd_debug_shapes",
+                    "debug_shapes",
+                    default="false",
+                ),
+                default=False,
+            ),
+            eps=float(getattr(args, "deepemd_eps", 1e-8)),
             device=device,
         )
     if args.model == "can":
