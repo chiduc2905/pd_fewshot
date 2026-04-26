@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import torch
 
-from main import infer_hrot_arch_overrides_from_state_dict, infer_hrot_variant_from_state_dict
+from main import get_args, infer_hrot_arch_overrides_from_state_dict, infer_hrot_variant_from_state_dict
+
+
+def test_hrot_sinkhorn_iters_cli_alias(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--model", "hrot_fsl", "--hrot_sinkhorn_iters", "7"],
+    )
+
+    args = get_args()
+
+    assert args.hrot_sinkhorn_iterations == 7
 
 
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():

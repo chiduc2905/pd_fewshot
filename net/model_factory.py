@@ -2014,7 +2014,9 @@ def build_model_from_args(args):
             tau_q=float(getattr(args, "hrot_tau_q", 0.5)),
             tau_c=float(getattr(args, "hrot_tau_c", 0.5)),
             sinkhorn_epsilon=float(getattr(args, "hrot_sinkhorn_epsilon", 0.1)),
-            sinkhorn_iterations=int(getattr(args, "hrot_sinkhorn_iterations", 60)),
+            sinkhorn_iterations=int(
+                _first_attr(args, "hrot_sinkhorn_iterations", "hrot_sinkhorn_iters", default=60)
+            ),
             sinkhorn_tolerance=float(getattr(args, "hrot_sinkhorn_tolerance", 1e-5)),
             fixed_mass=float(getattr(args, "hrot_fixed_mass", 0.8)),
             min_mass=float(getattr(args, "hrot_min_mass", 0.1)),

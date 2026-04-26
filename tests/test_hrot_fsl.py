@@ -1373,6 +1373,21 @@ def test_hrot_fsl_model_factory_accepts_partial_ot_backend():
     assert model.partial_backend == "native"
 
 
+def test_hrot_fsl_model_factory_accepts_sinkhorn_iters_alias():
+    args = SimpleNamespace(
+        model="hrot_fsl",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_variant="H",
+        hrot_sinkhorn_iters=7,
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.sinkhorn_iterations == 7
+
+
 @pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(

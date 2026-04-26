@@ -867,7 +867,13 @@ def get_args():
     parser.add_argument("--hrot_tau_q", type=float, default=0.5)
     parser.add_argument("--hrot_tau_c", type=float, default=0.5)
     parser.add_argument("--hrot_sinkhorn_epsilon", type=float, default=0.1)
-    parser.add_argument("--hrot_sinkhorn_iterations", type=int, default=60)
+    parser.add_argument(
+        "--hrot_sinkhorn_iterations",
+        "--hrot_sinkhorn_iters",
+        dest="hrot_sinkhorn_iterations",
+        type=int,
+        default=60,
+    )
     parser.add_argument("--hrot_sinkhorn_tolerance", type=float, default=1e-5)
     parser.add_argument("--hrot_fixed_mass", type=float, default=0.8)
     parser.add_argument("--hrot_min_mass", type=float, default=0.1)
