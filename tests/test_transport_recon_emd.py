@@ -29,6 +29,7 @@ def _token_only_model(**overrides) -> TransportReconEMD:
         lambda_rec=1.0,
         lambda_struct=0.1,
         use_sfc=False,
+        normalize_reconstruction=True,
         debug_shapes=True,
         eps=1e-8,
         last_transport_debug=None,
@@ -123,6 +124,7 @@ def test_transport_recon_emd_model_factory_registers_aliases_and_flags():
         transport_recon_emd_lambda_emd=0.4,
         transport_recon_emd_lambda_rec=0.9,
         transport_recon_emd_lambda_struct=0.2,
+        transport_recon_emd_normalize_reconstruction="true",
         transport_recon_emd_debug_shapes="true",
     )
 
@@ -137,4 +139,18 @@ def test_transport_recon_emd_model_factory_registers_aliases_and_flags():
     assert model.lambda_emd == pytest.approx(0.4)
     assert model.lambda_rec == pytest.approx(0.9)
     assert model.lambda_struct == pytest.approx(0.2)
+    assert model.normalize_reconstruction is True
     assert model.debug_shapes is True
+
+
+def test_transport_recon_emd_normalized_reconstruction_is_norm_stable():
+    torch.manual_seed(706)
+    model = _token_only_model(lambda_emd=0.2, lambda_rec=1.25, lambda_struct=0.15)
+    query = 25.0 * torch.randn(2, 5, 640)
+    support = 25.0 * torch.randn(4, 5, 5, 640)
+
+    outputs = model.forward_from_tokens(query, support, way=4, shot=5, return_aux=True)
+
+    assert outputs["rec_q"].max() <= 4.0 + 1e-4
+    assert outputs["rec_s"].max() <= 4.0 + 1e-4
+    assert outputs["logits"].abs().max() < 10.0

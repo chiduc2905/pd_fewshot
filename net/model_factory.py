@@ -647,6 +647,16 @@ def build_model_from_args(args):
                 ),
                 default=False,
             ),
+            normalize_reconstruction=_bool_flag(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_normalize_reconstruction",
+                    "tardis_emd_normalize_reconstruction",
+                    "normalize_reconstruction",
+                    default="true",
+                ),
+                default=True,
+            ),
             debug_shapes=_bool_flag(
                 _first_attr(
                     args,

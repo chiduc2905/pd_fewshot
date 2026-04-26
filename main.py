@@ -1230,6 +1230,14 @@ def get_args():
         default="false",
         choices=["true", "false"],
     )
+    parser.add_argument(
+        "--transport_recon_emd_normalize_reconstruction",
+        "--tardis_emd_normalize_reconstruction",
+        dest="transport_recon_emd_normalize_reconstruction",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
 
     parser.add_argument("--project", type=str, default="pulse_fewshot")
     parser.add_argument("--experiment_tag", type=str, default="")
@@ -1299,6 +1307,7 @@ def get_model(args):
             f"lambda_emd={getattr(args, 'transport_recon_emd_lambda_emd', 0.3)}, "
             f"lambda_rec={getattr(args, 'transport_recon_emd_lambda_rec', 1.0)}, "
             f"lambda_struct={getattr(args, 'transport_recon_emd_lambda_struct', 0.1)}, "
+            f"normalize_reconstruction={getattr(args, 'transport_recon_emd_normalize_reconstruction', 'true')}, "
             f"debug_shapes={getattr(args, 'transport_recon_emd_debug_shapes', 'false')})"
         )
     if args.model == "hierarchical_episodic_ssm_net":

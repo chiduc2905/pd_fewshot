@@ -159,6 +159,7 @@ def compute_transport_reconstruction_scores(
     C: torch.Tensor,
     P: torch.Tensor,
     eps: float = 1e-8,
+    normalize_reconstruction: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Score EMD plus bidirectional transport-guided reconstruction."""
     if Q.ndim != 3:
@@ -169,14 +170,16 @@ def compute_transport_reconstruction_scores(
         raise ValueError(f"C and P must have matching shapes, got {tuple(C.shape)} and {tuple(P.shape)}")
 
     score_emd = -(P * C).sum(dim=(-1, -2))
+    Q_rec = F.normalize(Q, dim=-1, eps=eps) if normalize_reconstruction else Q
+    S_rec = F.normalize(S_bar, dim=-1, eps=eps) if normalize_reconstruction else S_bar
 
     P_row = P / (P.sum(dim=-1, keepdim=True) + float(eps))
-    Q_hat = torch.einsum("qwij,qwjd->qwid", P_row, S_bar)
-    rec_q = (Q.unsqueeze(1) - Q_hat).pow(2).sum(dim=-1).mean(dim=-1)
+    Q_hat = torch.einsum("qwij,qwjd->qwid", P_row, S_rec)
+    rec_q = (Q_rec.unsqueeze(1) - Q_hat).pow(2).sum(dim=-1).mean(dim=-1)
 
     P_col = P / (P.sum(dim=-2, keepdim=True) + float(eps))
-    S_hat = torch.einsum("qwij,qid->qwjd", P_col, Q)
-    rec_s = (S_bar - S_hat).pow(2).sum(dim=-1).mean(dim=-1)
+    S_hat = torch.einsum("qwij,qid->qwjd", P_col, Q_rec)
+    rec_s = (S_rec - S_hat).pow(2).sum(dim=-1).mean(dim=-1)
 
     score_rec = -0.5 * (rec_q + rec_s)
     return score_emd, score_rec, Q_hat, rec_q, rec_s
@@ -213,6 +216,7 @@ class TransportReconEMD(nn.Module):
         lambda_rec: float = 1.0,
         lambda_struct: float = 0.1,
         use_sfc: bool = False,
+        normalize_reconstruction: bool = True,
         debug_shapes: bool = False,
         eps: float = 1e-8,
         device: str = "cuda",
@@ -257,6 +261,7 @@ class TransportReconEMD(nn.Module):
         self.lambda_rec = float(lambda_rec)
         self.lambda_struct = float(lambda_struct)
         self.use_sfc = False
+        self.normalize_reconstruction = bool(normalize_reconstruction)
         self.debug_shapes = bool(debug_shapes)
         self.eps = float(eps)
         self.last_transport_debug: dict[str, torch.Tensor] | None = None
@@ -353,6 +358,7 @@ class TransportReconEMD(nn.Module):
                 cost,
                 plan,
                 eps=self.eps,
+                normalize_reconstruction=getattr(self, "normalize_reconstruction", True),
             )
             if self.lambda_struct != 0.0 or return_aux:
                 score_struct = compute_gram_structure_score(query_tokens, Q_hat, eps=self.eps)
