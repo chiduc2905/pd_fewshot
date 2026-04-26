@@ -1166,6 +1166,26 @@ def get_args():
     parser.add_argument("--deepemd_sfc_lr", type=float, default=0.1)
     parser.add_argument("--deepemd_sfc_update_step", type=int, default=15)
     parser.add_argument("--deepemd_sfc_bs", type=int, default=4)
+    parser.add_argument("--dice_emd_lambda_disc", "--lambda_disc", dest="dice_emd_lambda_disc", type=float, default=0.2)
+    parser.add_argument("--dice_emd_tau_comp", "--tau_comp", dest="dice_emd_tau_comp", type=float, default=0.1)
+    parser.add_argument(
+        "--dice_emd_use_softmin_distance",
+        "--use_softmin_distance",
+        dest="dice_emd_use_softmin_distance",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--dice_emd_tau_softmin", "--tau_softmin", dest="dice_emd_tau_softmin", type=float, default=0.1)
+    parser.add_argument(
+        "--dice_emd_debug_transport",
+        "--debug_transport",
+        dest="dice_emd_debug_transport",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--dice_emd_lambda_flow", "--lambda_flow", dest="dice_emd_lambda_flow", type=float, default=0.0)
 
     parser.add_argument("--project", type=str, default="pulse_fewshot")
     parser.add_argument("--experiment_tag", type=str, default="")
@@ -1213,6 +1233,17 @@ def get_model(args):
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
             f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 15)}, "
             f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)}{override_suffix})"
+        )
+    if args.model == "dice_emd":
+        print(
+            "  dice_emd: DeepEMD balanced Sinkhorn/EMD with class-competitive evidence cost "
+            f"(lambda_disc={getattr(args, 'dice_emd_lambda_disc', 0.2)}, "
+            f"tau_comp={getattr(args, 'dice_emd_tau_comp', 0.1)}, "
+            f"use_softmin_distance={getattr(args, 'dice_emd_use_softmin_distance', 'true')}, "
+            f"tau_softmin={getattr(args, 'dice_emd_tau_softmin', 0.1)}, "
+            f"debug_transport={getattr(args, 'dice_emd_debug_transport', 'false')}, "
+            f"lambda_flow={getattr(args, 'dice_emd_lambda_flow', 0.0)}, "
+            f"solver={getattr(args, 'deepemd_solver', 'sinkhorn')})"
         )
     if args.model == "hierarchical_episodic_ssm_net":
         print(
@@ -2195,6 +2226,44 @@ def forward_scores(
             refine_proto = _bool_flag(args.deepemd_test_sfc, default=False)
             return net(query, support, refine_proto=refine_proto, exact=exact)
         return net(query, support)
+    if args.model == "dice_emd":
+        if phase == "train":
+            refine_proto = _bool_flag(args.deepemd_train_sfc, default=False)
+            return net(
+                query,
+                support,
+                refine_proto=refine_proto,
+                exact=False,
+                sfc_update_step_override=getattr(args, "deepemd_train_sfc_update_step", None),
+                sfc_bs_override=getattr(args, "deepemd_train_sfc_bs", None),
+                return_aux=collect_diagnostics,
+                query_targets=query_targets,
+                support_targets=support_targets,
+            )
+        if phase == "val":
+            fast_val = _bool_flag(args.deepemd_fast_val, default=True)
+            return net(
+                query,
+                support,
+                refine_proto=not fast_val,
+                exact=not fast_val,
+                return_aux=collect_diagnostics,
+                query_targets=query_targets,
+                support_targets=support_targets,
+            )
+        if phase == "test":
+            exact = _bool_flag(args.deepemd_test_exact, default=False)
+            refine_proto = _bool_flag(args.deepemd_test_sfc, default=False)
+            return net(
+                query,
+                support,
+                refine_proto=refine_proto,
+                exact=exact,
+                return_aux=collect_diagnostics,
+                query_targets=query_targets,
+                support_targets=support_targets,
+            )
+        return net(query, support, return_aux=collect_diagnostics)
     if args.model in {"feat", "can"}:
         return net(query, support, query_targets=query_targets, support_targets=support_targets)
     if args.model == "hierarchical_support_sw_net":

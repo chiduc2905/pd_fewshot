@@ -102,6 +102,11 @@ MODEL_REGISTRY = {
         "architecture": "ResNet12 local descriptors + transport matching",
         "metric": "Earth Mover's Distance",
     },
+    "dice_emd": {
+        "display_name": "DICE-EMD",
+        "architecture": "ResNet12 dense descriptors + class-competitive evidence-aware balanced transport",
+        "metric": "Discriminative Class-Competitive Earth Mover's Distance",
+    },
     "can": {
         "display_name": "CAN",
         "architecture": "ResNet12 + paper-style CAM + inductive cosine inference",
@@ -365,7 +370,7 @@ def get_model_metadata(model_name):
     return MODEL_REGISTRY[model_name]
 
 
-PAPER_BASELINE_BACKBONE_MODELS = frozenset({"feat", "deepemd", "can", "frn", "deepbdc"})
+PAPER_BASELINE_BACKBONE_MODELS = frozenset({"feat", "deepemd", "dice_emd", "can", "frn", "deepbdc"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
 
 
@@ -528,6 +533,36 @@ def build_model_from_args(args):
             sfc_update_step=int(getattr(args, "deepemd_sfc_update_step", 15)),
             sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
             fewshot_backbone=fewshot_backbone,
+            device=device,
+        )
+    if args.model == "dice_emd":
+        DICEEMD = _load_symbol("net.dice_emd", "DICEEMD")
+        return DICEEMD(
+            image_size=image_size,
+            temperature=12.5,
+            solver=getattr(args, "deepemd_solver", "sinkhorn"),
+            qpth_form=getattr(args, "deepemd_qpth_form", "L2"),
+            qpth_l2_strength=float(getattr(args, "deepemd_qpth_l2_strength", 1e-6)),
+            sinkhorn_reg=float(getattr(args, "deepemd_sinkhorn_reg", 0.05)),
+            sinkhorn_iterations=int(getattr(args, "deepemd_sinkhorn_iterations", 20)),
+            sinkhorn_tolerance=float(getattr(args, "deepemd_sinkhorn_tolerance", 1e-6)),
+            eps=float(getattr(args, "deepemd_eps", 1e-8)),
+            sfc_lr=float(getattr(args, "deepemd_sfc_lr", 0.1)),
+            sfc_update_step=int(getattr(args, "deepemd_sfc_update_step", 15)),
+            sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
+            fewshot_backbone=fewshot_backbone,
+            lambda_disc=float(_first_attr(args, "dice_emd_lambda_disc", "lambda_disc", default=0.2)),
+            tau_comp=float(_first_attr(args, "dice_emd_tau_comp", "tau_comp", default=0.1)),
+            use_softmin_distance=_bool_flag(
+                _first_attr(args, "dice_emd_use_softmin_distance", "use_softmin_distance", default="true"),
+                default=True,
+            ),
+            tau_softmin=float(_first_attr(args, "dice_emd_tau_softmin", "tau_softmin", default=0.1)),
+            debug_transport=_bool_flag(
+                _first_attr(args, "dice_emd_debug_transport", "debug_transport", default="false"),
+                default=False,
+            ),
+            lambda_flow=float(_first_attr(args, "dice_emd_lambda_flow", "lambda_flow", default=0.0)),
             device=device,
         )
     if args.model == "can":
