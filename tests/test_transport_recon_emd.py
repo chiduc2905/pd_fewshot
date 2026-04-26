@@ -171,3 +171,22 @@ def test_transport_recon_emd_score_scale_only_scales_raw_logits():
 
     assert torch.allclose(base_outputs["raw_logits"], scaled_outputs["raw_logits"], atol=1e-6, rtol=1e-5)
     assert torch.allclose(scaled_outputs["logits"], 8.0 * base_outputs["logits"], atol=1e-6, rtol=1e-5)
+
+
+def test_transport_recon_emd_merge_aux_handles_scalar_tensors():
+    outputs = [
+        {
+            "logits": torch.randn(2, 4),
+            "score_scale": torch.tensor(8.0),
+        },
+        {
+            "logits": torch.randn(3, 4),
+            "score_scale": torch.tensor(8.0),
+        },
+    ]
+
+    merged = TransportReconEMD._merge_aux(outputs)
+
+    assert merged["logits"].shape == (5, 4)
+    assert merged["score_scale"].ndim == 0
+    assert merged["score_scale"].item() == pytest.approx(8.0)

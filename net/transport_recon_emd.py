@@ -415,7 +415,10 @@ class TransportReconEMD(nn.Module):
         for key in outputs[0]:
             values = [item[key] for item in outputs if key in item]
             if values and torch.is_tensor(values[0]):
-                merged[key] = torch.cat(values, dim=0)
+                if values[0].dim() == 0:
+                    merged[key] = torch.stack(values, dim=0).mean()
+                else:
+                    merged[key] = torch.cat(values, dim=0)
         return merged
 
     def forward(
