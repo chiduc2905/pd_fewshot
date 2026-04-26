@@ -215,6 +215,7 @@ class TransportReconEMD(nn.Module):
         lambda_emd: float = 0.3,
         lambda_rec: float = 1.0,
         lambda_struct: float = 0.1,
+        score_scale: float = 8.0,
         use_sfc: bool = False,
         normalize_reconstruction: bool = True,
         debug_shapes: bool = False,
@@ -235,6 +236,8 @@ class TransportReconEMD(nn.Module):
             raise ValueError("sinkhorn_iter must be positive")
         if sinkhorn_tolerance < 0.0:
             raise ValueError("sinkhorn_tolerance must be non-negative")
+        if score_scale <= 0.0:
+            raise ValueError("score_scale must be positive")
         if eps <= 0.0:
             raise ValueError("eps must be positive")
         if use_sfc:
@@ -260,6 +263,7 @@ class TransportReconEMD(nn.Module):
         self.lambda_emd = float(lambda_emd)
         self.lambda_rec = float(lambda_rec)
         self.lambda_struct = float(lambda_struct)
+        self.score_scale = float(score_scale)
         self.use_sfc = False
         self.normalize_reconstruction = bool(normalize_reconstruction)
         self.debug_shapes = bool(debug_shapes)
@@ -363,11 +367,12 @@ class TransportReconEMD(nn.Module):
             if self.lambda_struct != 0.0 or return_aux:
                 score_struct = compute_gram_structure_score(query_tokens, Q_hat, eps=self.eps)
 
-        logits = (
+        raw_logits = (
             self.lambda_emd * score_emd
             + self.lambda_rec * score_rec
             + self.lambda_struct * score_struct
         )
+        logits = self.score_scale * raw_logits
 
         self._debug_validate(
             query_tokens=query_tokens,
@@ -386,9 +391,11 @@ class TransportReconEMD(nn.Module):
 
         payload: dict[str, torch.Tensor] = {
             "logits": logits,
+            "raw_logits": raw_logits,
             "score_emd": score_emd,
             "score_rec": score_rec,
             "score_struct": score_struct,
+            "score_scale": logits.new_tensor(self.score_scale),
             "rec_q": rec_q,
             "rec_s": rec_s,
             "cost": cost,

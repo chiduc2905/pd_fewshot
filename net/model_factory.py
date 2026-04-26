@@ -637,6 +637,15 @@ def build_model_from_args(args):
                     default=0.1,
                 )
             ),
+            score_scale=float(
+                _first_attr(
+                    args,
+                    "transport_recon_emd_score_scale",
+                    "tardis_emd_score_scale",
+                    "score_scale",
+                    default=8.0,
+                )
+            ),
             use_sfc=_bool_flag(
                 _first_attr(
                     args,

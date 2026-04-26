@@ -1223,6 +1223,13 @@ def get_args():
         default=0.1,
     )
     parser.add_argument(
+        "--transport_recon_emd_score_scale",
+        "--tardis_emd_score_scale",
+        dest="transport_recon_emd_score_scale",
+        type=float,
+        default=8.0,
+    )
+    parser.add_argument(
         "--transport_recon_emd_debug_shapes",
         "--tardis_emd_debug_shapes",
         dest="transport_recon_emd_debug_shapes",
@@ -1307,6 +1314,7 @@ def get_model(args):
             f"lambda_emd={getattr(args, 'transport_recon_emd_lambda_emd', 0.3)}, "
             f"lambda_rec={getattr(args, 'transport_recon_emd_lambda_rec', 1.0)}, "
             f"lambda_struct={getattr(args, 'transport_recon_emd_lambda_struct', 0.1)}, "
+            f"score_scale={getattr(args, 'transport_recon_emd_score_scale', 8.0)}, "
             f"normalize_reconstruction={getattr(args, 'transport_recon_emd_normalize_reconstruction', 'true')}, "
             f"debug_shapes={getattr(args, 'transport_recon_emd_debug_shapes', 'false')})"
         )
@@ -2674,6 +2682,21 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     if torch.is_tensor(global_scores) and global_scores.dim() == 2 and global_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(global_scores, targets, prefix="global"))
 
+    component_score_keys = {
+        "raw_logits": "raw",
+        "score_emd": "emd",
+        "score_rec": "recon",
+        "score_struct": "struct",
+    }
+    for score_key, prefix in component_score_keys.items():
+        component_scores = scores.get(score_key)
+        if (
+            torch.is_tensor(component_scores)
+            and component_scores.dim() == 2
+            and component_scores.shape[0] == targets.shape[0]
+        ):
+            metrics.update(summarize_class_score_tensor(component_scores, targets, prefix=prefix))
+
     local_scores = scores.get("local_scores")
     if torch.is_tensor(local_scores) and local_scores.dim() == 2 and local_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(local_scores, targets, prefix="local"))
@@ -2753,6 +2776,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "mean_consistency_penalty",
         "mean_redundancy_penalty",
         "logit_scale",
+        "score_scale",
         "mass_regularization",
         "mean_query_mass_entropy",
         "mean_support_mass_entropy",
@@ -2835,6 +2859,18 @@ def format_diagnostic_summary(metrics):
         "margin_pos_rate",
         "correct_logit_margin",
         "wrong_logit_margin",
+        "raw_true_score",
+        "raw_best_negative_score",
+        "raw_score_gap",
+        "emd_true_score",
+        "emd_best_negative_score",
+        "emd_score_gap",
+        "recon_true_score",
+        "recon_best_negative_score",
+        "recon_score_gap",
+        "struct_true_score",
+        "struct_best_negative_score",
+        "struct_score_gap",
         "global_true_score",
         "global_best_negative_score",
         "global_score_gap",
