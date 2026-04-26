@@ -1,7 +1,9 @@
 """Run pulse_fewshot benchmark experiments with a unified training protocol."""
 
 import argparse
+from datetime import datetime
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,24 @@ DEEPEMD_5SHOT_TRAIN_SFC_STEPS = 15
 DEEPEMD_5SHOT_TRAIN_SFC_BS = 20
 DEEPEMD_5SHOT_TEST_EXACT = "false"
 DEEPEMD_5SHOT_TEST_SFC = "false"
+
+
+def log_cli_command(args, log_path="results/cli_commands.log"):
+    """Append the exact launcher CLI with timestamp and WandB project."""
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    command = shlex.join([sys.executable, *sys.argv])
+    project = str(getattr(args, "project", ""))
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("=" * 88 + "\n")
+        handle.write(f"timestamp      : {timestamp}\n")
+        handle.write(f"wandb_project  : {project}\n")
+        handle.write(f"cwd            : {Path.cwd()}\n")
+        handle.write(f"command        : {command}\n")
+
+    print(f"CLI command log: {path}")
 
 
 def get_args():
@@ -602,6 +622,7 @@ def main():
 
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("results", exist_ok=True)
+    log_cli_command(args)
 
     if args.spifce_ablation_suite != "none":
         if requested_models != ["spifce"]:
