@@ -291,6 +291,61 @@ def test_hrot_fsl_variant_g_uses_shot_decomposed_euclidean_ot():
     assert outputs["cost_matrix"].shape == outputs["transport_plan"].shape
 
 
+def test_hrot_fsl_cosine_ground_cost_uses_deepemd_style_cost():
+    torch.manual_seed(36)
+    model = _build_model(variant="G", ground_cost="cosine")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    flat_support = outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_cost = model._cosine_cost(outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
+    euclidean_cost = model._euclidean_cost(outputs["query_euclidean_tokens"], flat_support)
+    euclidean_cost = euclidean_cost.reshape_as(expected_cost)
+
+    assert model.ground_cost == "cosine"
+    assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert not torch.allclose(outputs["cost_matrix"], euclidean_cost, atol=1e-5, rtol=1e-5)
+    assert torch.all(outputs["cost_matrix"] >= 0.0)
+
+
+def test_hrot_fsl_auto_ground_cost_preserves_hyperbolic_variant_and_cosine_overrides():
+    torch.manual_seed(37)
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 2, 1, 3, 64, 64)
+
+    auto_model = _build_model(variant="E")
+    auto_model.eval()
+    with torch.no_grad():
+        auto_outputs = auto_model(query, support, return_aux=True)
+
+    expected_auto_cost = auto_model._hyperbolic_cost(
+        auto_outputs["query_hyperbolic_tokens"],
+        auto_outputs["support_hyperbolic_tokens"].squeeze(0),
+    )
+    assert auto_model.ground_cost == "auto"
+    assert torch.allclose(auto_outputs["cost_matrix"], expected_auto_cost, atol=1e-5, rtol=1e-5)
+
+    torch.manual_seed(38)
+    cosine_model = _build_model(variant="E", ground_cost="cosine")
+    cosine_model.eval()
+    with torch.no_grad():
+        cosine_outputs = cosine_model(query, support, return_aux=True)
+
+    expected_cosine_cost = cosine_model._cosine_cost(
+        cosine_outputs["query_euclidean_tokens"],
+        cosine_outputs["support_euclidean_tokens"].squeeze(0),
+    )
+    assert cosine_model.uses_hyperbolic_geometry
+    assert cosine_model.ground_cost == "cosine"
+    assert torch.allclose(cosine_outputs["cost_matrix"], expected_cosine_cost, atol=1e-5, rtol=1e-5)
+
+
 def test_hrot_fsl_variant_h_uses_geodesic_eam_with_shot_decomposed_score():
     torch.manual_seed(15)
     model = _build_model(variant="H")
@@ -1386,6 +1441,21 @@ def test_hrot_fsl_model_factory_accepts_sinkhorn_iters_alias():
     model = build_model_from_args(args)
 
     assert model.sinkhorn_iterations == 7
+
+
+def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
+    args = SimpleNamespace(
+        model="hrot_fsl",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_variant="H",
+        hrot_ground_cost="cosine",
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.ground_cost == "cosine"
 
 
 @pytest.mark.parametrize("factory_variant", ["E", "Q", "R", "S", "T", "U", "V"])

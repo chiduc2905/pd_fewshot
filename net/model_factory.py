@@ -2030,6 +2030,7 @@ def build_model_from_args(args):
             lambda_curvature=float(getattr(args, "hrot_lambda_curvature", 0.0)),
             min_curvature=float(getattr(args, "hrot_min_curvature", 0.05)),
             structure_cost_init=float(getattr(args, "hrot_structure_cost_init", 0.05)),
+            ground_cost=str(getattr(args, "hrot_ground_cost", "auto")),
             normalize_euclidean_tokens=_bool_flag(
                 getattr(args, "hrot_normalize_euclidean_tokens", "true"),
                 default=True,

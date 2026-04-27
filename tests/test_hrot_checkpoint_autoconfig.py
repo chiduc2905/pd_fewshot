@@ -16,6 +16,17 @@ def test_hrot_sinkhorn_iters_cli_alias(monkeypatch):
     assert args.hrot_sinkhorn_iterations == 7
 
 
+def test_hrot_ground_cost_cli_accepts_cosine(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--model", "hrot_fsl", "--hrot_ground_cost", "cosine"],
+    )
+
+    args = get_args()
+
+    assert args.hrot_ground_cost == "cosine"
+
+
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),

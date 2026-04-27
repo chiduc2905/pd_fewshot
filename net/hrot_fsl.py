@@ -42,6 +42,7 @@ HROT_PARTIAL_OT_BACKENDS = (
     | HROT_PARTIAL_OT_POT_BACKENDS
     | HROT_PARTIAL_OT_EXACT_BACKENDS
 )
+HROT_GROUND_COSTS = {"auto", "euclidean", "cosine"}
 
 
 class HROTFSLResult(dict):
@@ -63,6 +64,22 @@ def _normalize_hrot_variant_name(variant: str) -> str:
     normalized = str(variant).strip().upper().replace("-", "").replace("_", "")
     if normalized in {"RL", "RLITE"}:
         return "T"
+    return normalized
+
+
+def _normalize_hrot_ground_cost(ground_cost: str) -> str:
+    normalized = str(ground_cost).strip().lower().replace("-", "_")
+    aliases = {
+        "l2": "euclidean",
+        "sqeuclidean": "euclidean",
+        "squared_euclidean": "euclidean",
+        "legacy": "auto",
+        "deepemd": "cosine",
+        "deepemd_cosine": "cosine",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in HROT_GROUND_COSTS:
+        raise ValueError(f"Unsupported HROT ground cost: {ground_cost}")
     return normalized
 
 
@@ -102,6 +119,7 @@ class HROTFSL(BaseConv64FewShotModel):
         lambda_curvature: float = 0.0,
         min_curvature: float = 0.05,
         structure_cost_init: float = 0.05,
+        ground_cost: str = "auto",
         normalize_euclidean_tokens: bool = True,
         normalize_rho: bool = False,
         eval_use_float64: bool = True,
@@ -163,6 +181,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_structural_cover_objective = variant in {"T", "U"}
         self.uses_coverage_regularized_cover = variant == "U"
         self.coverage_penalty_weight = 0.5 if self.uses_coverage_regularized_cover else 0.0
+        self.ground_cost = _normalize_hrot_ground_cost(ground_cost)
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
@@ -546,6 +565,22 @@ class HROTFSL(BaseConv64FewShotModel):
         class_norm = F.normalize(class_tokens, p=2, dim=-1, eps=self.eps)
         similarity = torch.einsum("qtd,wkd->qwtk", query_norm, class_norm)
         return (1.0 - similarity).clamp_min(0.0)
+
+    def _ground_cost(self, query_tokens: torch.Tensor, class_tokens: torch.Tensor) -> torch.Tensor:
+        if self.ground_cost == "cosine":
+            return self._cosine_cost(query_tokens, class_tokens)
+        return self._euclidean_cost(query_tokens, class_tokens)
+
+    def _class_ground_cost(
+        self,
+        query_euclidean: torch.Tensor,
+        class_euclidean: torch.Tensor,
+        query_hyperbolic: torch.Tensor,
+        class_hyperbolic: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.ground_cost == "auto" and self.uses_hyperbolic_geometry:
+            return self._hyperbolic_cost(query_hyperbolic, class_hyperbolic)
+        return self._ground_cost(query_euclidean, class_euclidean)
 
     def _hyperbolic_cost(
         self,
@@ -1425,7 +1460,7 @@ class HROTFSL(BaseConv64FewShotModel):
         if query_hw != support_hw:
             raise ValueError(f"Query/support token grids must match, got {query_hw} vs {support_hw}")
 
-        flat_cost = self._euclidean_cost(query_euc, support_euc)
+        flat_cost = self._ground_cost(query_euc, support_euc)
 
         support_hyp_by_shot = support_hyp.reshape(
             way_num,
@@ -1575,7 +1610,7 @@ class HROTFSL(BaseConv64FewShotModel):
             if self.uses_noise_calibrated_transport:
                 if self.q_eam is None:
                     raise RuntimeError("HROT-Q requires a dedicated q_eam head")
-                flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+                flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
                 q_geodesic_features, geodesic_features = self._build_q_geodesic_eam_features(
                     query_hyperbolic,
                     support_hyperbolic,
@@ -1850,7 +1885,7 @@ class HROTFSL(BaseConv64FewShotModel):
                         }
                     )
             elif self.uses_hyperbolic_token_attention:
-                flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+                flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
                 geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
                 shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
                 shot_rho = self.eam.forward_features(geodesic_features)
@@ -1920,7 +1955,7 @@ class HROTFSL(BaseConv64FewShotModel):
                         }
                     )
             else:
-                flat_cost = self._euclidean_cost(query_euclidean, flat_support_euclidean)
+                flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
                 if self.uses_hybrid_ablation_eam:
                     shot_rho = self._build_hybrid_rho_per_shot(
                         query_hyperbolic,
@@ -1970,10 +2005,12 @@ class HROTFSL(BaseConv64FewShotModel):
                 cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
                 plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
         else:
-            if self.uses_hyperbolic_geometry:
-                cost = self._hyperbolic_cost(query_hyperbolic, class_hyperbolic)
-            else:
-                cost = self._euclidean_cost(query_euclidean, class_euclidean)
+            cost = self._class_ground_cost(
+                query_euclidean,
+                class_euclidean,
+                query_hyperbolic,
+                class_hyperbolic,
+            )
 
             rho = self._build_pairwise_rho(query_hyperbolic, class_hyperbolic)
             plan, transport_cost, transport_mass = self._transport_match(cost, rho)

@@ -887,6 +887,7 @@ def get_args():
     parser.add_argument("--hrot_lambda_curvature", type=float, default=0.0)
     parser.add_argument("--hrot_min_curvature", type=float, default=0.05)
     parser.add_argument("--hrot_structure_cost_init", type=float, default=0.05)
+    parser.add_argument("--hrot_ground_cost", type=str, default="auto", choices=["auto", "euclidean", "cosine"])
     parser.add_argument("--hrot_normalize_euclidean_tokens", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_normalize_rho", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_eval_use_float64", type=str, default="true", choices=["true", "false"])
@@ -1838,6 +1839,7 @@ def get_model(args):
             f"rho_rank_margin={getattr(args, 'hrot_rho_rank_margin', 0.05)}, "
             f"rho_rank_temperature={getattr(args, 'hrot_rho_rank_temperature', 0.05)}, "
             f"structure_cost_init={getattr(args, 'hrot_structure_cost_init', 0.05)}, "
+            f"ground_cost={getattr(args, 'hrot_ground_cost', 'auto')}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
     if args.model == "jsc_wdro":
