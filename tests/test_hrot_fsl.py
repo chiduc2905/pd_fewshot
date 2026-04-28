@@ -494,10 +494,19 @@ def test_hrot_fsl_post_h_ablation_variants(
         if uses_threshold
         else model.mass_bonus.detach()
     ).to(dtype=outputs["shot_transported_mass"].dtype)
-    expected_logits = (
+    expected_shot_logits = (
         -model.score_scale * outputs["shot_transport_cost"]
         + reward_weight * outputs["shot_transported_mass"]
-    ).mean(dim=-1)
+    )
+    if variant == "J":
+        expected_logits = torch.logsumexp(expected_shot_logits, dim=-1) - math.log(
+            float(expected_shot_logits.shape[-1])
+        )
+        expected_transport_weights = torch.softmax(expected_shot_logits, dim=-1)
+        expected_transport_cost = (expected_transport_weights * outputs["shot_transport_cost"]).sum(dim=-1)
+        expected_transport_mass = (expected_transport_weights * outputs["shot_transported_mass"]).sum(dim=-1)
+    else:
+        expected_logits = expected_shot_logits.mean(dim=-1)
 
     assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
@@ -532,6 +541,18 @@ def test_hrot_fsl_post_h_ablation_variants(
         assert torch.isfinite(captured_features[0]).all()
         assert torch.all(outputs["rho"] >= 0.1)
         assert torch.all(outputs["rho"] <= 1.0)
+
+    if variant == "J":
+        assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+        assert torch.allclose(outputs["shot_pool_weights"], expected_transport_weights, atol=1e-5, rtol=1e-5)
+        assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
+        assert torch.allclose(outputs["transported_mass"], expected_transport_mass, atol=1e-5, rtol=1e-5)
+        assert torch.allclose(
+            outputs["shot_pool_weights"].sum(dim=-1),
+            torch.ones_like(outputs["logits"]),
+            atol=1e-6,
+            rtol=0.0,
+        )
 
 
 def test_hrot_fsl_variant_i_euclidean_eam_features_match_l2_summary():

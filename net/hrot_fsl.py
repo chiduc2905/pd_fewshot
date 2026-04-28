@@ -1270,6 +1270,23 @@ class HROTFSL(BaseConv64FewShotModel):
         transport_mass = (weights * shot_transport_mass).sum(dim=-1)
         return logits, transport_cost, transport_mass, weights
 
+    def _pool_j_shot_scores(
+        self,
+        shot_logits: torch.Tensor,
+        shot_transport_cost: torch.Tensor,
+        shot_transport_mass: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        shot_num = shot_logits.shape[-1]
+        if shot_num == 1:
+            weights = torch.ones_like(shot_logits)
+            logits = shot_logits.squeeze(-1)
+        else:
+            weights = torch.softmax(shot_logits, dim=-1)
+            logits = torch.logsumexp(shot_logits, dim=-1) - math.log(float(shot_num))
+        transport_cost = (weights * shot_transport_cost).sum(dim=-1)
+        transport_mass = (weights * shot_transport_mass).sum(dim=-1)
+        return logits, transport_cost, transport_mass, weights
+
     def _compute_q_adaptive_threshold(
         self,
         q_features: torch.Tensor,
@@ -2073,9 +2090,20 @@ class HROTFSL(BaseConv64FewShotModel):
                 if self.uses_unbalanced_transport:
                     shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
 
-                logits = shot_logits.mean(dim=-1)
-                transport_cost = shot_transport_cost.mean(dim=-1)
-                transport_mass = shot_transport_mass.mean(dim=-1)
+                if self.variant == "J":
+                    logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
+                        shot_logits,
+                        shot_transport_cost,
+                        shot_transport_mass,
+                    )
+                    transport_probe_payload = {
+                        "shot_logits": shot_logits,
+                        "shot_pool_weights": shot_pool_weights,
+                    }
+                else:
+                    logits = shot_logits.mean(dim=-1)
+                    transport_cost = shot_transport_cost.mean(dim=-1)
+                    transport_mass = shot_transport_mass.mean(dim=-1)
                 rho = shot_rho
                 cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
                 plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
