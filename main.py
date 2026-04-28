@@ -706,6 +706,38 @@ def get_args():
     parser.add_argument("--spif_ota_lambda_mass", type=float, default=0.0)
     parser.add_argument("--spif_ota_lambda_consistency", type=float, default=0.0)
     parser.add_argument("--spif_ota_eps", type=float, default=1e-6)
+    parser.add_argument("--ebot_proj_dim", type=int, default=256)
+    parser.add_argument("--ebot_reliability_hidden_dim", type=int, default=128)
+    parser.add_argument("--ebot_reliability_dropout", type=float, default=0.1)
+    parser.add_argument("--ebot_sinkhorn_epsilon", "--ebot_sinkhorn_eps", dest="ebot_sinkhorn_epsilon", type=float, default=0.05)
+    parser.add_argument("--ebot_sinkhorn_iters", "--ebot_sinkhorn_iterations", dest="ebot_sinkhorn_iters", type=int, default=50)
+    parser.add_argument("--ebot_dustbin_cost", type=float, default=0.7)
+    parser.add_argument("--ebot_learnable_dustbin_cost", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_alpha_unmatched", type=float, default=0.10)
+    parser.add_argument("--ebot_min_budget", type=float, default=0.15)
+    parser.add_argument("--ebot_max_budget", type=float, default=0.95)
+    parser.add_argument("--ebot_gate_temperature", type=float, default=1.0)
+    parser.add_argument("--ebot_use_scalogram_priors", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_use_energy_prior", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_use_gradient_prior", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_use_tf_coords", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_log_power_alpha", type=float, default=10.0)
+    parser.add_argument("--ebot_prior_norm", type=str, default="mean", choices=["mean", "zscore", "none"])
+    parser.add_argument("--ebot_use_cross_reference", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_use_dustbin", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_use_evidence_budget", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_use_kshot_reweighting", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ebot_lambda_score", type=float, default=1.0)
+    parser.add_argument("--ebot_lambda_mass", type=float, default=0.5)
+    parser.add_argument("--ebot_lambda_unmatched", type=float, default=0.5)
+    parser.add_argument("--ebot_symmetric_matching", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--ebot_use_uncertainty_prior", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--ebot_use_aux_loss", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--ebot_budget_floor", type=float, default=0.15)
+    parser.add_argument("--ebot_budget_ceiling", type=float, default=0.95)
+    parser.add_argument("--ebot_weight_budget_low", type=float, default=0.01)
+    parser.add_argument("--ebot_weight_budget_high", type=float, default=0.001)
+    parser.add_argument("--ebot_eps", type=float, default=1e-6)
     parser.add_argument("--spif_otccls_feature_dim", type=int, default=256)
     parser.add_argument("--spif_otccls_gate_hidden", type=int, default=128)
     parser.add_argument("--spif_otccls_num_projections", type=int, default=64)
@@ -1548,6 +1580,21 @@ def get_model(args):
             f"use_column_bias={getattr(args, 'spif_ota_use_column_bias', 'true')}, "
             f"lambda_mass={getattr(args, 'spif_ota_lambda_mass', 0.0)}, "
             f"lambda_consistency={getattr(args, 'spif_ota_lambda_consistency', 0.0)})"
+        )
+    if args.model in {"evidence_budget_ot", "evidence_budgeted_ot", "ebot", "ebot_scalogram"}:
+        print(
+            "  ebot: scalogram priors -> reliability evidence budget -> "
+            "dustbin Sinkhorn OT -> reliability-weighted k-shot aggregation "
+            f"(proj_dim={getattr(args, 'ebot_proj_dim', 256)}, "
+            f"sinkhorn_eps={getattr(args, 'ebot_sinkhorn_epsilon', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'ebot_sinkhorn_iters', 50)}, "
+            f"dustbin_cost={getattr(args, 'ebot_dustbin_cost', 0.7)}, "
+            f"learnable_dustbin={getattr(args, 'ebot_learnable_dustbin_cost', 'true')}, "
+            f"budget=({getattr(args, 'ebot_min_budget', 0.15)}, {getattr(args, 'ebot_max_budget', 0.95)}), "
+            f"priors={getattr(args, 'ebot_use_scalogram_priors', 'true')}, "
+            f"cross_ref={getattr(args, 'ebot_use_cross_reference', 'true')}, "
+            f"kshot_reweight={getattr(args, 'ebot_use_kshot_reweighting', 'true')}, "
+            f"symmetric={getattr(args, 'ebot_symmetric_matching', 'false')})"
         )
     if args.model == "spif_otccls":
         print(
@@ -2464,6 +2511,14 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
+    if args.model in {"evidence_budget_ot", "evidence_budgeted_ot", "ebot", "ebot_scalogram"}:
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
     if args.model == "hrot_fsl":
         return net(
             query,
@@ -2880,6 +2935,13 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "dispersion_mean",
         "dispersion_min",
         "prototype_shift_norm",
+        "budget_low_loss",
+        "budget_high_loss",
+        "dustbin_cost",
+        "matched_mass",
+        "sinkhorn_error",
+        "unmatched_mass",
+        "weighted_unmatched_mass",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))

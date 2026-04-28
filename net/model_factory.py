@@ -102,6 +102,26 @@ MODEL_REGISTRY = {
         "architecture": "ResNet12 local descriptors + transport matching",
         "metric": "Earth Mover's Distance",
     },
+    "evidence_budget_ot": {
+        "display_name": "EBOT",
+        "architecture": "Backbone local tokens + scalogram reliability priors + evidence-budgeted dustbin OT + k-shot evidence aggregation",
+        "metric": "Reliability-Budgeted Partial Optimal Transport",
+    },
+    "ebot": {
+        "display_name": "EBOT",
+        "architecture": "Alias for Evidence-Budgeted Optimal Transport with scalogram reliability priors",
+        "metric": "Reliability-Budgeted Partial Optimal Transport",
+    },
+    "ebot_scalogram": {
+        "display_name": "EBOT-Scalogram",
+        "architecture": "Alias for Evidence-Budgeted Optimal Transport with scalogram reliability priors",
+        "metric": "Reliability-Budgeted Partial Optimal Transport",
+    },
+    "evidence_budgeted_ot": {
+        "display_name": "EvidenceBudgetedOT",
+        "architecture": "Alias for Evidence-Budgeted Optimal Transport with scalogram reliability priors",
+        "metric": "Reliability-Budgeted Partial Optimal Transport",
+    },
     "dice_emd": {
         "display_name": "DICE-EMD",
         "architecture": "ResNet12 dense descriptors + class-competitive evidence-aware balanced transport",
@@ -385,6 +405,7 @@ PAPER_BASELINE_BACKBONE_MODELS = frozenset(
 )
 RESNET12_ONLY_MODELS = frozenset({"transport_recon_emd", "tardis_emd"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
+EBOT_MODEL_NAMES = frozenset({"evidence_budget_ot", "evidence_budgeted_ot", "ebot", "ebot_scalogram"})
 
 
 def model_supports_fewshot_backbone(model_name, backbone_name):
@@ -553,6 +574,52 @@ def build_model_from_args(args):
             sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
             fewshot_backbone=fewshot_backbone,
             device=device,
+        )
+    if args.model in EBOT_MODEL_NAMES:
+        EvidenceBudgetedOTFewShot = _load_symbol("net.evidence_budget_ot", "EvidenceBudgetedOTFewShot")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return EvidenceBudgetedOTFewShot(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            proj_dim=int(_first_attr(args, "ebot_proj_dim", "evidence_budget_ot_proj_dim", default=256)),
+            reliability_hidden_dim=int(getattr(args, "ebot_reliability_hidden_dim", 128)),
+            reliability_dropout=float(getattr(args, "ebot_reliability_dropout", 0.1)),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            sinkhorn_epsilon=float(_first_attr(args, "ebot_sinkhorn_epsilon", "ebot_sinkhorn_eps", default=0.05)),
+            sinkhorn_iters=int(_first_attr(args, "ebot_sinkhorn_iters", "ebot_sinkhorn_iterations", default=50)),
+            dustbin_cost=float(getattr(args, "ebot_dustbin_cost", 0.7)),
+            learnable_dustbin_cost=_bool_flag(
+                getattr(args, "ebot_learnable_dustbin_cost", "true"),
+                default=True,
+            ),
+            alpha_unmatched=float(getattr(args, "ebot_alpha_unmatched", 0.10)),
+            min_budget=float(getattr(args, "ebot_min_budget", 0.15)),
+            max_budget=float(getattr(args, "ebot_max_budget", 0.95)),
+            gate_temperature=float(getattr(args, "ebot_gate_temperature", 1.0)),
+            use_scalogram_priors=_bool_flag(getattr(args, "ebot_use_scalogram_priors", "true"), default=True),
+            use_energy_prior=_bool_flag(getattr(args, "ebot_use_energy_prior", "true"), default=True),
+            use_gradient_prior=_bool_flag(getattr(args, "ebot_use_gradient_prior", "true"), default=True),
+            use_tf_coords=_bool_flag(getattr(args, "ebot_use_tf_coords", "true"), default=True),
+            log_power_alpha=float(getattr(args, "ebot_log_power_alpha", 10.0)),
+            prior_norm=str(getattr(args, "ebot_prior_norm", "mean")),
+            use_cross_reference=_bool_flag(getattr(args, "ebot_use_cross_reference", "true"), default=True),
+            use_dustbin=_bool_flag(getattr(args, "ebot_use_dustbin", "true"), default=True),
+            use_evidence_budget=_bool_flag(getattr(args, "ebot_use_evidence_budget", "true"), default=True),
+            use_kshot_reweighting=_bool_flag(getattr(args, "ebot_use_kshot_reweighting", "true"), default=True),
+            lambda_score=float(getattr(args, "ebot_lambda_score", 1.0)),
+            lambda_mass=float(getattr(args, "ebot_lambda_mass", 0.5)),
+            lambda_unmatched=float(getattr(args, "ebot_lambda_unmatched", 0.5)),
+            symmetric_matching=_bool_flag(getattr(args, "ebot_symmetric_matching", "false"), default=False),
+            use_uncertainty_prior=_bool_flag(getattr(args, "ebot_use_uncertainty_prior", "false"), default=False),
+            use_aux_loss=_bool_flag(getattr(args, "ebot_use_aux_loss", "false"), default=False),
+            budget_floor=float(getattr(args, "ebot_budget_floor", 0.15)),
+            budget_ceiling=float(getattr(args, "ebot_budget_ceiling", 0.95)),
+            weight_budget_low=float(getattr(args, "ebot_weight_budget_low", 0.01)),
+            weight_budget_high=float(getattr(args, "ebot_weight_budget_high", 0.001)),
+            eps=float(getattr(args, "ebot_eps", 1e-6)),
         )
     if args.model == "dice_emd":
         DICEEMD = _load_symbol("net.dice_emd", "DICEEMD")
