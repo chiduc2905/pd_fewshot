@@ -126,8 +126,20 @@ def test_evidence_deepemd_mass_sums_and_logits_are_finite():
     assert torch.allclose(debug["support_mass_sum"], torch.ones_like(debug["support_mass_sum"]), atol=1e-6)
 
 
-def test_evidence_deepemd_ablation_off_matches_deepemd_balanced_sinkhorn():
+def test_query_reliability_broadcasts_query_tokens_to_all_classes():
     torch.manual_seed(602)
+    model = _token_only_model(feat_dim=8)
+    query = torch.randn(4, 8, 5, 5)
+    class_proto = torch.randn(4, 8)
+
+    query_rel = model._query_reliability(query, class_proto)
+
+    assert query_rel.shape == (4, 4, 25)
+    assert torch.isfinite(query_rel).all()
+
+
+def test_evidence_deepemd_ablation_off_matches_deepemd_balanced_sinkhorn():
+    torch.manual_seed(603)
     proto = torch.randn(3, 8, 2, 2)
     query = torch.randn(2, 8, 2, 2)
     evidence = _token_only_model(use_evidence_weight=False, use_shot_reliability=False)
@@ -140,7 +152,7 @@ def test_evidence_deepemd_ablation_off_matches_deepemd_balanced_sinkhorn():
 
 
 def test_evidence_deepemd_shot_alpha_sums_for_one_and_five_shot():
-    torch.manual_seed(603)
+    torch.manual_seed(604)
     model = _token_only_model()
     query = torch.randn(2, 8, 2, 2)
 
@@ -177,7 +189,7 @@ def test_evidence_deepemd_factory_registers_flags():
 
 
 def test_evidence_deepemd_full_forward_one_and_five_shot_shapes():
-    torch.manual_seed(604)
+    torch.manual_seed(605)
     model = build_model_from_args(_factory_args(deepemd_sinkhorn_iterations=3))
     model.eval()
 

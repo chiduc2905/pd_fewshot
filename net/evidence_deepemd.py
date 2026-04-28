@@ -169,7 +169,8 @@ class EvidenceMLP(nn.Module):
         )
 
     def forward(self, tokens: torch.Tensor, class_proto: torch.Tensor) -> torch.Tensor:
-        proto = class_proto.unsqueeze(-2).expand_as(tokens)
+        proto = class_proto.unsqueeze(-2)
+        tokens, proto = torch.broadcast_tensors(tokens, proto)
         evidence_input = torch.cat(
             [tokens, proto, tokens * proto, torch.abs(tokens - proto)],
             dim=-1,
@@ -341,7 +342,8 @@ class EvidenceDeepEMD(nn.Module):
         return self._local_tokens(proto).mean(dim=1)
 
     def _token_reliability(self, tokens: torch.Tensor, class_proto: torch.Tensor) -> torch.Tensor:
-        proto = class_proto.unsqueeze(-2).expand_as(tokens)
+        proto = class_proto.unsqueeze(-2)
+        tokens, proto = torch.broadcast_tensors(tokens, proto)
         mlp_rel = self.evidence_mlp(tokens, class_proto)
         consensus = torch.sigmoid(
             self.consensus_scale * F.cosine_similarity(tokens, proto, dim=-1, eps=self.eps)
