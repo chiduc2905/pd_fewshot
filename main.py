@@ -888,6 +888,8 @@ def get_args():
     parser.add_argument("--hrot_min_curvature", type=float, default=0.05)
     parser.add_argument("--hrot_structure_cost_init", type=float, default=0.05)
     parser.add_argument("--hrot_ground_cost", type=str, default="auto", choices=["auto", "euclidean", "cosine"])
+    parser.add_argument("--hrot_eam_mode", type=str, default="compact", choices=["legacy", "compact"])
+    parser.add_argument("--hrot_compact_eam_prior_mix", type=float, default=0.5)
     parser.add_argument("--hrot_normalize_euclidean_tokens", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_normalize_rho", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_eval_use_float64", type=str, default="true", choices=["true", "false"])
@@ -1840,6 +1842,8 @@ def get_model(args):
             f"rho_rank_temperature={getattr(args, 'hrot_rho_rank_temperature', 0.05)}, "
             f"structure_cost_init={getattr(args, 'hrot_structure_cost_init', 0.05)}, "
             f"ground_cost={getattr(args, 'hrot_ground_cost', 'auto')}, "
+            f"eam_mode={getattr(args, 'hrot_eam_mode', 'compact')}, "
+            f"compact_eam_prior_mix={getattr(args, 'hrot_compact_eam_prior_mix', 0.5)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
     if args.model == "jsc_wdro":
@@ -2069,6 +2073,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
     variant = infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
     if variant is not None:
         overrides["hrot_variant"] = variant
+        if checkpoint_args.get("hrot_eam_mode") is not None:
+            overrides["hrot_eam_mode"] = str(checkpoint_args["hrot_eam_mode"]).strip().lower().replace("-", "_")
+        elif variant == "H":
+            overrides["hrot_eam_mode"] = "legacy"
+        if checkpoint_args.get("hrot_compact_eam_prior_mix") is not None:
+            overrides["hrot_compact_eam_prior_mix"] = float(checkpoint_args["hrot_compact_eam_prior_mix"])
 
     if "hrot_use_raw_backbone_tokens" in checkpoint_args:
         raw_flag = _bool_flag(checkpoint_args.get("hrot_use_raw_backbone_tokens"), default=False)

@@ -404,7 +404,24 @@ def test_hrot_fsl_variant_h_uses_geodesic_eam_with_shot_decomposed_score():
     assert len(captured_features) == 1
     assert captured_features[0].shape == (2, 3, 2, 4)
     assert torch.isfinite(captured_features[0]).all()
-    assert torch.any(captured_features[0][..., 1] > 0.0)
+    raw_geodesic = model._build_geodesic_eam_features(
+        outputs["query_hyperbolic_tokens"],
+        outputs["support_hyperbolic_tokens"].squeeze(0),
+    )
+    expected_compact_features = model._build_compact_geodesic_eam_features(raw_geodesic)
+    expected_rho = original_forward_features(expected_compact_features)
+    expected_rho = model._apply_compact_geodesic_mass_prior(expected_rho, expected_compact_features)
+    expected_rho = model._normalize_rho_budget(expected_rho)
+
+    assert model.uses_compact_geodesic_eam
+    assert torch.allclose(captured_features[0], expected_compact_features, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        captured_features[0].mean(dim=(1, 2)),
+        torch.zeros_like(captured_features[0].mean(dim=(1, 2))),
+        atol=1e-5,
+        rtol=0.0,
+    )
+    assert torch.allclose(outputs["rho"], expected_rho, atol=1e-5, rtol=1e-5)
     assert outputs["rho"].shape == (2, 3, 2)
     assert outputs["transport_plan"].shape[:3] == (2, 3, 2)
     assert outputs["cost_matrix"].shape == outputs["transport_plan"].shape

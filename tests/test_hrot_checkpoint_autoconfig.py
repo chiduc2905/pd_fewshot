@@ -27,6 +27,17 @@ def test_hrot_ground_cost_cli_accepts_cosine(monkeypatch):
     assert args.hrot_ground_cost == "cosine"
 
 
+def test_hrot_eam_mode_cli_accepts_legacy(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--model", "hrot_fsl", "--hrot_eam_mode", "legacy"],
+    )
+
+    args = get_args()
+
+    assert args.hrot_eam_mode == "legacy"
+
+
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),
@@ -70,6 +81,39 @@ def test_infer_hrot_arch_overrides_recovers_variant_and_token_shape():
     assert overrides["hrot_token_dim"] == 96
     assert overrides["hrot_eam_hidden_dim"] == 192
     assert overrides["hrot_use_raw_backbone_tokens"] == "false"
+
+
+def test_infer_hrot_arch_overrides_marks_old_h_checkpoints_as_legacy_eam():
+    state_dict = {
+        "raw_transport_cost_threshold": torch.tensor(0.0),
+        "eam.network.0.weight": torch.randn(192, 4),
+        "eam.network.0.bias": torch.randn(192),
+        "token_projector.1.weight": torch.randn(96, 640),
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict)
+
+    assert overrides["hrot_variant"] == "H"
+    assert overrides["hrot_eam_mode"] == "legacy"
+
+
+def test_infer_hrot_arch_overrides_preserves_checkpoint_eam_mode_when_present():
+    state_dict = {
+        "raw_transport_cost_threshold": torch.tensor(0.0),
+        "eam.network.0.weight": torch.randn(192, 4),
+        "eam.network.0.bias": torch.randn(192),
+    }
+    checkpoint_args = {
+        "hrot_variant": "H",
+        "hrot_eam_mode": "compact",
+        "hrot_compact_eam_prior_mix": 0.25,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+
+    assert overrides["hrot_variant"] == "H"
+    assert overrides["hrot_eam_mode"] == "compact"
+    assert overrides["hrot_compact_eam_prior_mix"] == 0.25
 
 
 def test_infer_hrot_arch_overrides_prefers_checkpoint_args_when_present():

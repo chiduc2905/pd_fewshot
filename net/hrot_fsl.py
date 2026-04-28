@@ -120,6 +120,8 @@ class HROTFSL(BaseConv64FewShotModel):
         min_curvature: float = 0.05,
         structure_cost_init: float = 0.05,
         ground_cost: str = "auto",
+        eam_mode: str = "compact",
+        compact_eam_prior_mix: float = 0.5,
         normalize_euclidean_tokens: bool = True,
         normalize_rho: bool = False,
         eval_use_float64: bool = True,
@@ -159,6 +161,11 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("rho_rank_margin must be non-negative")
         if rho_rank_temperature <= 0.0:
             raise ValueError("rho_rank_temperature must be positive")
+        eam_mode = str(eam_mode).strip().lower().replace("-", "_")
+        if eam_mode not in {"legacy", "compact"}:
+            raise ValueError(f"Unsupported HROT EAM mode: {eam_mode}")
+        if not 0.0 <= compact_eam_prior_mix <= 1.0:
+            raise ValueError("compact_eam_prior_mix must be in [0, 1]")
 
         self.variant = variant
         self.uses_hrot_v = variant == "V"
@@ -182,6 +189,9 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_coverage_regularized_cover = variant == "U"
         self.coverage_penalty_weight = 0.5 if self.uses_coverage_regularized_cover else 0.0
         self.ground_cost = _normalize_hrot_ground_cost(ground_cost)
+        self.eam_mode = eam_mode
+        self.uses_compact_geodesic_eam = self.eam_mode == "compact" and variant == "H"
+        self.compact_eam_prior_mix = float(compact_eam_prior_mix)
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
@@ -627,8 +637,14 @@ class HROTFSL(BaseConv64FewShotModel):
                 self.fixed_mass,
             )
 
-        features = self._build_geodesic_eam_features(query_tokens_hyp, support_tokens_hyp)
+        geodesic_features = self._build_geodesic_eam_features(query_tokens_hyp, support_tokens_hyp)
+        features = (
+            self._build_compact_geodesic_eam_features(geodesic_features)
+            if self.uses_compact_geodesic_eam
+            else geodesic_features
+        )
         rho = self.eam.forward_features(features)
+        rho = self._apply_compact_geodesic_mass_prior(rho, features)
         rho = self._normalize_rho_budget(rho)
         return rho.to(dtype=query_tokens_hyp.dtype)
 
@@ -830,6 +846,65 @@ class HROTFSL(BaseConv64FewShotModel):
         mean = values.mean(dim=-2, keepdim=True)
         std = values.std(dim=-2, keepdim=True, unbiased=False).clamp_min(self.eps)
         return (values - mean) / std
+
+    def _standardize_over_candidates(self, values: torch.Tensor) -> torch.Tensor:
+        if values.dim() < 4:
+            raise ValueError(
+                "candidate standardization expects values shaped "
+                "(NumQuery, Way, Shot, FeatureDim)"
+            )
+        mean = values.mean(dim=(1, 2), keepdim=True)
+        std = values.std(dim=(1, 2), keepdim=True, unbiased=False).clamp_min(self.eps)
+        return (values - mean) / std
+
+    def _build_compact_geodesic_eam_features(self, geodesic_features: torch.Tensor) -> torch.Tensor:
+        if geodesic_features.shape[-1] != 4:
+            raise ValueError(
+                "compact geodesic EAM expects raw features "
+                "[mean_distance, shot_spread, query_variance, support_variance]"
+            )
+        mean_distance = geodesic_features[..., 0]
+        shot_spread = geodesic_features[..., 1]
+        query_variance = geodesic_features[..., 2].clamp_min(0.0)
+        support_variance = geodesic_features[..., 3].clamp_min(0.0)
+
+        query_log_var = torch.log1p(query_variance)
+        support_log_var = torch.log1p(support_variance)
+        variance_gap = (query_log_var - support_log_var).abs()
+        joint_dispersion = torch.log1p(query_variance + support_variance)
+        evidence_features = torch.stack(
+            [
+                mean_distance,
+                shot_spread,
+                variance_gap,
+                joint_dispersion,
+            ],
+            dim=-1,
+        )
+        return self._standardize_over_candidates(evidence_features)
+
+    def _compact_geodesic_eam_prior(self, compact_features: torch.Tensor) -> torch.Tensor:
+        if compact_features.shape[-1] != 4:
+            raise ValueError(f"compact_features last dim must be 4, got {compact_features.shape[-1]}")
+        distance_z = compact_features[..., 0]
+        spread_z = compact_features[..., 1]
+        variance_gap_z = compact_features[..., 2]
+        dispersion_z = compact_features[..., 3]
+        evidence = -(distance_z + 0.5 * spread_z + 0.25 * variance_gap_z + 0.25 * dispersion_z)
+        base_logit = math.log(self.fixed_mass / (1.0 - self.fixed_mass))
+        prior = torch.sigmoid(evidence + compact_features.new_tensor(base_logit))
+        return prior.clamp(min=self.min_mass, max=1.0)
+
+    def _apply_compact_geodesic_mass_prior(
+        self,
+        rho: torch.Tensor,
+        compact_features: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.uses_compact_geodesic_eam or self.compact_eam_prior_mix == 0.0:
+            return rho
+        prior = self._compact_geodesic_eam_prior(compact_features).to(device=rho.device, dtype=rho.dtype)
+        mix = rho.new_tensor(self.compact_eam_prior_mix)
+        return ((1.0 - mix) * rho + mix * prior).clamp(min=self.min_mass, max=1.0)
 
     def _compute_hyperbolic_token_prior_logits(
         self,

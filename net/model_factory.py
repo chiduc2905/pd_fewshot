@@ -2031,6 +2031,8 @@ def build_model_from_args(args):
             min_curvature=float(getattr(args, "hrot_min_curvature", 0.05)),
             structure_cost_init=float(getattr(args, "hrot_structure_cost_init", 0.05)),
             ground_cost=str(getattr(args, "hrot_ground_cost", "auto")),
+            eam_mode=str(getattr(args, "hrot_eam_mode", "compact")),
+            compact_eam_prior_mix=float(getattr(args, "hrot_compact_eam_prior_mix", 0.5)),
             normalize_euclidean_tokens=_bool_flag(
                 getattr(args, "hrot_normalize_euclidean_tokens", "true"),
                 default=True,
