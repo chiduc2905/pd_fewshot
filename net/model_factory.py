@@ -612,6 +612,11 @@ def build_model_from_args(args):
             lambda_score=float(getattr(args, "ebot_lambda_score", 1.0)),
             lambda_mass=float(getattr(args, "ebot_lambda_mass", 0.5)),
             lambda_unmatched=float(getattr(args, "ebot_lambda_unmatched", 0.5)),
+            score_scale=float(getattr(args, "ebot_score_scale", 12.5)),
+            learnable_score_scale=_bool_flag(
+                getattr(args, "ebot_learnable_score_scale", "false"),
+                default=False,
+            ),
             symmetric_matching=_bool_flag(getattr(args, "ebot_symmetric_matching", "false"), default=False),
             use_uncertainty_prior=_bool_flag(getattr(args, "ebot_use_uncertainty_prior", "false"), default=False),
             use_aux_loss=_bool_flag(getattr(args, "ebot_use_aux_loss", "false"), default=False),

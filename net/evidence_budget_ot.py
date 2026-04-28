@@ -588,6 +588,8 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
         lambda_score: float = 1.0,
         lambda_mass: float = 0.5,
         lambda_unmatched: float = 0.5,
+        score_scale: float = 12.5,
+        learnable_score_scale: bool = False,
         symmetric_matching: bool = False,
         use_uncertainty_prior: bool = False,
         use_aux_loss: bool = False,
@@ -607,6 +609,8 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
         )
         if proj_dim <= 0:
             raise ValueError("proj_dim must be positive")
+        if score_scale <= 0.0:
+            raise ValueError("score_scale must be positive")
         if eps <= 0.0:
             raise ValueError("eps must be positive")
 
@@ -615,6 +619,7 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
         self.lambda_score = float(lambda_score)
         self.lambda_mass = float(lambda_mass)
         self.lambda_unmatched = float(lambda_unmatched)
+        self.learnable_score_scale = bool(learnable_score_scale)
         self.use_aux_loss = bool(use_aux_loss)
         self.budget_floor = float(budget_floor)
         self.budget_ceiling = float(budget_ceiling)
@@ -623,6 +628,14 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
         self.eps = float(eps)
         self.latest_aux: dict[str, Any] = {}
         self._last_reliability_maps: dict[str, torch.Tensor] = {}
+        if self.learnable_score_scale:
+            self.raw_score_scale = nn.Parameter(torch.tensor(_inverse_softplus(score_scale)))
+        else:
+            self.register_buffer(
+                "fixed_score_scale",
+                torch.tensor(float(score_scale), dtype=torch.float32),
+                persistent=False,
+            )
 
         self.prior_extractor = ScalogramPriorExtractor(
             use_scalogram_priors=use_scalogram_priors,
@@ -654,6 +667,12 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
             use_uncertainty_prior=use_uncertainty_prior,
             eps=eps,
         )
+
+    @property
+    def score_scale(self) -> torch.Tensor:
+        if self.learnable_score_scale:
+            return F.softplus(self.raw_score_scale)
+        return self.fixed_score_scale
 
     def _prepare_backbone_images(self, images: torch.Tensor) -> torch.Tensor:
         if images.dim() != 4:
@@ -766,7 +785,8 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
         matched_mass = pair_aux["matched_mass"].reshape(num_query, way_num, shot_num)
         unmatched_mass = pair_aux["unmatched_mass"].reshape(num_query, way_num, shot_num)
         class_scores, shot_weights = self._aggregate_shots(shot_scores, matched_mass, unmatched_mass)
-        logits = class_scores
+        score_scale = self.score_scale.to(device=class_scores.device, dtype=class_scores.dtype)
+        logits = score_scale * class_scores
 
         q_budget = pair_aux["q_budget"].reshape(num_query, way_num, shot_num)
         s_budget = pair_aux["s_budget"].reshape(num_query, way_num, shot_num)
@@ -791,6 +811,7 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
             "gate_query_mean": float(q_gate.detach().mean().item()),
             "gate_support_mean": float(s_gate.detach().mean().item()),
             "dustbin_cost": float(self.matcher.dustbin_cost.detach().item()),
+            "score_scale": float(score_scale.detach().item()),
             "sinkhorn_error": float(pair_aux["sinkhorn_error"].detach().mean().item()),
             "feature_hw": (height, width),
         }
@@ -803,7 +824,8 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
         outputs: dict[str, torch.Tensor] = {
             "logits": logits,
             "aux_loss": aux_loss,
-            "class_scores": class_scores,
+            "class_scores": logits,
+            "raw_class_scores": class_scores,
             "shot_scores": shot_scores,
             "shot_aggregation_weights": shot_weights,
             "matched_mass": matched_mass,
@@ -835,6 +857,7 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
                 .mean()
             ),
             "dustbin_cost": self.matcher.dustbin_cost.detach(),
+            "score_scale": score_scale.detach(),
         }
         return outputs
 

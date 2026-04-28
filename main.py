@@ -730,6 +730,8 @@ def get_args():
     parser.add_argument("--ebot_lambda_score", type=float, default=1.0)
     parser.add_argument("--ebot_lambda_mass", type=float, default=0.5)
     parser.add_argument("--ebot_lambda_unmatched", type=float, default=0.5)
+    parser.add_argument("--ebot_score_scale", type=float, default=12.5)
+    parser.add_argument("--ebot_learnable_score_scale", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--ebot_symmetric_matching", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--ebot_use_uncertainty_prior", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--ebot_use_aux_loss", type=str, default="false", choices=["true", "false"])
@@ -1591,6 +1593,7 @@ def get_model(args):
             f"dustbin_cost={getattr(args, 'ebot_dustbin_cost', 0.7)}, "
             f"learnable_dustbin={getattr(args, 'ebot_learnable_dustbin_cost', 'true')}, "
             f"budget=({getattr(args, 'ebot_min_budget', 0.15)}, {getattr(args, 'ebot_max_budget', 0.95)}), "
+            f"score_scale={getattr(args, 'ebot_score_scale', 12.5)}, "
             f"priors={getattr(args, 'ebot_use_scalogram_priors', 'true')}, "
             f"cross_ref={getattr(args, 'ebot_use_cross_reference', 'true')}, "
             f"kshot_reweight={getattr(args, 'ebot_use_kshot_reweighting', 'true')}, "
