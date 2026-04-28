@@ -339,8 +339,8 @@ MODEL_REGISTRY = {
     },
     "fgwuot_fsl": {
         "display_name": "FGWUOT-FSL",
-        "architecture": "Backbone spatial tokens -> Fused Gromov-Wasserstein Unbalanced OT -> joint k-shot support matching",
-        "metric": "FGW Unbalanced OT",
+        "architecture": "Backbone spatial tokens -> reliability-mass FGW-UOT -> scalogram-aware relational geometry -> shot-aware robust class scoring",
+        "metric": "Reliability-Weighted Scalogram FGW-UOT",
     },
     "jsc_wdro": {
         "display_name": "JSC-WDRO",
@@ -2064,6 +2064,16 @@ def build_model_from_args(args):
             rho_target=float(getattr(args, "fgwuot_rho_target", 0.8)),
             normalize_tokens=_bool_flag(
                 getattr(args, "fgwuot_normalize_tokens", "true"), default=True),
+            mass_mode=str(getattr(args, "fgwuot_mass_mode", "reliability")),
+            reliability_mix=float(getattr(args, "fgwuot_reliability_mix", 0.65)),
+            reliability_temperature=float(getattr(args, "fgwuot_reliability_temperature", 0.25)),
+            support_mode=str(getattr(args, "fgwuot_support_mode", "shotwise")),
+            shot_aggregation=str(getattr(args, "fgwuot_shot_aggregation", "softmin")),
+            shot_softmin_beta=float(getattr(args, "fgwuot_shot_softmin_beta", 8.0)),
+            structure_prior_weight=float(getattr(args, "fgwuot_structure_prior_weight", 0.12)),
+            score_mode=str(getattr(args, "fgwuot_score_mode", "radius_margin")),
+            radius_alpha=float(getattr(args, "fgwuot_radius_alpha", 0.5)),
+            radius_floor=float(getattr(args, "fgwuot_radius_floor", 0.02)),
             eps=float(getattr(args, "fgwuot_eps", 1e-8)),
         )
     if args.model == "jsc_wdro":

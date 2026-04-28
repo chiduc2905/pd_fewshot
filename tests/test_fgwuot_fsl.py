@@ -37,6 +37,16 @@ def cfg():
         lambda_rho=0.01,
         rho_target=0.8,
         normalize_tokens=True,
+        mass_mode="reliability",
+        reliability_mix=0.65,
+        reliability_temperature=0.25,
+        support_mode="shotwise",
+        shot_aggregation="softmin",
+        shot_softmin_beta=8.0,
+        structure_prior_weight=0.12,
+        score_mode="radius_margin",
+        radius_alpha=0.5,
+        radius_floor=0.02,
     )
 
 
@@ -179,24 +189,31 @@ class TestFGWUOTModel:
         required_keys = {
             "logits", "aux_loss", "rho", "alpha", "score_scale",
             "transport_cost", "transport_plan", "C_feat", "C_final",
+            "query_class_distance", "transport_radius", "query_token_mass",
+            "support_token_mass", "shot_aggregation_weights",
         }
         for k in required_keys:
             assert k in aux_dict, f"Missing key in aux_dict: {k}"
 
-    def test_score_is_negative_transport(self, model):
-        """score = score_scale * (-transport_cost / rho) — verify formula."""
+    def test_score_matches_configured_distance_rule(self, model):
+        """Verify the configured FGWUOT distance-to-logit rule."""
         q, s, qt, st = make_episode(way=4, shot=1, nq=1)
         with torch.no_grad():
             aux = model(q, s, return_aux=True)
 
-        tc = aux["transport_cost"]          # (NQ, Way)
-        rho = aux["rho"]                    # (NQ, Way)
+        distance = aux["query_class_distance"]
+        radius = aux["transport_radius"]
         ss  = aux["score_scale"]            # scalar
         logits = aux["logits"]              # (NQ, Way)
 
-        expected = ss * (-tc / rho.clamp_min(1e-8))
+        if model.score_mode == "negative_distance":
+            expected = ss * (-distance)
+        elif model.score_mode == "radius_margin":
+            expected = ss * (-(distance - radius))
+        else:
+            expected = ss * (-torch.relu(distance - radius))
         assert torch.allclose(logits, expected, atol=1e-4), \
-            "Logit formula: score_scale * (-transport_cost / rho)"
+            "Logit formula must match configured FGWUOT score_mode"
 
     def test_alpha_zero_matches_uot_only(self, model):
         """Setting alpha=0 should match pure UOT (no structure cost)."""
@@ -257,3 +274,16 @@ class TestFGWUOTModel:
         aux = model(q, s, return_aux=True)
         expected_aux = model.lambda_rho * aux["rho_regularization"]
         assert torch.allclose(aux["aux_loss"], expected_aux, atol=1e-6)
+
+    def test_shotwise_aux_shapes_5shot(self, model):
+        q, s, _, _ = make_episode(way=4, shot=5, nq=2)
+        with torch.no_grad():
+            aux = model(q, s, return_aux=True)
+        assert aux["shot_distance"].shape == (2, 4, 5)
+        assert aux["shot_aggregation_weights"].shape == (2, 4, 5)
+        assert aux["transport_plan"].dim() == 5
+        assert torch.allclose(
+            aux["shot_aggregation_weights"].sum(dim=-1),
+            torch.ones(2, 4),
+            atol=1e-5,
+        )
