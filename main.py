@@ -58,6 +58,7 @@ PAPER_BASELINE_MODELS = {
     "dn4",
     "feat",
     "deepemd",
+    "evidence_deepemd",
     "can",
     "frn",
     "deepbdc",
@@ -1240,6 +1241,12 @@ def get_args():
     parser.add_argument("--deepemd_sfc_lr", type=float, default=0.1)
     parser.add_argument("--deepemd_sfc_update_step", type=int, default=15)
     parser.add_argument("--deepemd_sfc_bs", type=int, default=4)
+    parser.add_argument("--use_evidence_weight", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--use_shot_reliability", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--evidence_eps", type=float, default=1e-3)
+    parser.add_argument("--consensus_scale", type=float, default=5.0)
+    parser.add_argument("--shot_temperature", type=float, default=1.0)
+    parser.add_argument("--debug_evidence", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--dice_emd_lambda_disc", "--lambda_disc", dest="dice_emd_lambda_disc", type=float, default=0.2)
     parser.add_argument("--dice_emd_tau_comp", "--tau_comp", dest="dice_emd_tau_comp", type=float, default=0.1)
     parser.add_argument(
@@ -1366,6 +1373,20 @@ def get_model(args):
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
             f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 15)}, "
             f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)}{override_suffix})"
+        )
+    if args.model == "evidence_deepemd":
+        print(
+            "  evidence_deepemd: DeepEMD balanced OT with evidence masses and shot aggregation "
+            f"(train_solver={getattr(args, 'deepemd_solver', 'sinkhorn')}, "
+            f"use_evidence_weight={getattr(args, 'use_evidence_weight', 'true')}, "
+            f"use_shot_reliability={getattr(args, 'use_shot_reliability', 'true')}, "
+            f"evidence_eps={getattr(args, 'evidence_eps', 1e-3)}, "
+            f"consensus_scale={getattr(args, 'consensus_scale', 5.0)}, "
+            f"shot_temperature={getattr(args, 'shot_temperature', 1.0)}, "
+            f"debug_evidence={getattr(args, 'debug_evidence', 'false')}, "
+            f"fast_val={getattr(args, 'deepemd_fast_val', 'true')}, "
+            f"test_exact={getattr(args, 'deepemd_test_exact', 'false')}, "
+            f"test_sfc={getattr(args, 'deepemd_test_sfc', 'false')})"
         )
     if args.model == "dice_emd":
         print(
@@ -2395,7 +2416,7 @@ def forward_scores(
     if args.model == "maml":
         smoothing = effective_label_smoothing(args, train=train)
         return net(query, support, label_smoothing=smoothing)
-    if args.model == "deepemd":
+    if args.model in {"deepemd", "evidence_deepemd"}:
         if phase == "train":
             refine_proto = _bool_flag(args.deepemd_train_sfc, default=False)
             return net(

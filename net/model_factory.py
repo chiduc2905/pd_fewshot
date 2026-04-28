@@ -102,6 +102,11 @@ MODEL_REGISTRY = {
         "architecture": "ResNet12 local descriptors + transport matching",
         "metric": "Earth Mover's Distance",
     },
+    "evidence_deepemd": {
+        "display_name": "Evidence-DeepEMD",
+        "architecture": "DeepEMD local descriptors + class-stable evidence masses + support-shot reliability aggregation",
+        "metric": "Evidence-Weighted Balanced Earth Mover's Distance",
+    },
     "evidence_budget_ot": {
         "display_name": "EBOT",
         "architecture": "Backbone local tokens + scalogram reliability priors + evidence-budgeted dustbin OT + k-shot evidence aggregation",
@@ -401,7 +406,17 @@ def get_model_metadata(model_name):
 
 
 PAPER_BASELINE_BACKBONE_MODELS = frozenset(
-    {"feat", "deepemd", "dice_emd", "transport_recon_emd", "tardis_emd", "can", "frn", "deepbdc"}
+    {
+        "feat",
+        "deepemd",
+        "evidence_deepemd",
+        "dice_emd",
+        "transport_recon_emd",
+        "tardis_emd",
+        "can",
+        "frn",
+        "deepbdc",
+    }
 )
 RESNET12_ONLY_MODELS = frozenset({"transport_recon_emd", "tardis_emd"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
@@ -573,6 +588,69 @@ def build_model_from_args(args):
             sfc_update_step=int(getattr(args, "deepemd_sfc_update_step", 15)),
             sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
             fewshot_backbone=fewshot_backbone,
+            device=device,
+        )
+    if args.model == "evidence_deepemd":
+        EvidenceDeepEMD = _load_symbol("net.evidence_deepemd", "EvidenceDeepEMD")
+        return EvidenceDeepEMD(
+            image_size=image_size,
+            temperature=12.5,
+            solver=getattr(args, "deepemd_solver", "sinkhorn"),
+            qpth_form=getattr(args, "deepemd_qpth_form", "L2"),
+            qpth_l2_strength=float(getattr(args, "deepemd_qpth_l2_strength", 1e-6)),
+            sinkhorn_reg=float(getattr(args, "deepemd_sinkhorn_reg", 0.05)),
+            sinkhorn_iterations=int(getattr(args, "deepemd_sinkhorn_iterations", 20)),
+            sinkhorn_tolerance=float(getattr(args, "deepemd_sinkhorn_tolerance", 1e-6)),
+            uot_tau_q=float(getattr(args, "deepemd_uot_tau_q", 0.5)),
+            uot_tau_c=float(getattr(args, "deepemd_uot_tau_c", 0.5)),
+            uot_score_normalize=_bool_flag(
+                getattr(args, "deepemd_uot_score_normalize", "false"),
+                default=False,
+            ),
+            partial_mass_fraction=float(getattr(args, "deepemd_partial_mass_fraction", 0.5)),
+            partial_transport_mass=getattr(args, "deepemd_partial_transport_mass", None),
+            partial_score_normalize=_bool_flag(
+                getattr(args, "deepemd_partial_score_normalize", "true"),
+                default=True,
+            ),
+            partial_backend=str(getattr(args, "deepemd_partial_backend", "native")),
+            partial_exact=_bool_flag(getattr(args, "deepemd_partial_exact", "false"), default=False),
+            eps=float(getattr(args, "deepemd_eps", 1e-8)),
+            sfc_lr=float(getattr(args, "deepemd_sfc_lr", 0.1)),
+            sfc_update_step=int(getattr(args, "deepemd_sfc_update_step", 15)),
+            sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
+            fewshot_backbone=fewshot_backbone,
+            use_evidence_weight=_bool_flag(
+                _first_attr(
+                    args,
+                    "use_evidence_weight",
+                    "evidence_deepemd_use_evidence_weight",
+                    default="true",
+                ),
+                default=True,
+            ),
+            use_shot_reliability=_bool_flag(
+                _first_attr(
+                    args,
+                    "use_shot_reliability",
+                    "evidence_deepemd_use_shot_reliability",
+                    default="true",
+                ),
+                default=True,
+            ),
+            evidence_eps=float(
+                _first_attr(args, "evidence_eps", "evidence_deepemd_evidence_eps", default=1e-3)
+            ),
+            consensus_scale=float(
+                _first_attr(args, "consensus_scale", "evidence_deepemd_consensus_scale", default=5.0)
+            ),
+            shot_temperature=float(
+                _first_attr(args, "shot_temperature", "evidence_deepemd_shot_temperature", default=1.0)
+            ),
+            debug_evidence=_bool_flag(
+                _first_attr(args, "debug_evidence", "evidence_deepemd_debug_evidence", default="false"),
+                default=False,
+            ),
             device=device,
         )
     if args.model in EBOT_MODEL_NAMES:
