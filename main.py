@@ -2801,6 +2801,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     if torch.is_tensor(transported_mass) and transported_mass.dim() == 2 and transported_mass.shape[0] == targets.shape[0]:
         metrics.update(summarize_budget_tensor(transported_mass, targets, prefix="transport_mass"))
 
+    weighted_unmatched_mass = scores.get("weighted_unmatched_mass")
+    if (
+        torch.is_tensor(weighted_unmatched_mass)
+        and weighted_unmatched_mass.dim() == 2
+        and weighted_unmatched_mass.shape[0] == targets.shape[0]
+    ):
+        metrics.update(summarize_class_distance_tensor(weighted_unmatched_mass, targets, prefix="unmatched_mass"))
+
     global_scores = scores.get("global_scores")
     if torch.is_tensor(global_scores) and global_scores.dim() == 2 and global_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(global_scores, targets, prefix="global"))

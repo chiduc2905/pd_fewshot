@@ -821,10 +821,12 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
 
         transport_entropy = pair_aux["transport_entropy"].reshape(num_query, way_num, shot_num)
         real_cost = pair_aux["real_cost"].reshape(num_query, way_num, shot_num)
+        total_distance = (shot_weights * real_cost).sum(dim=-1)
         outputs: dict[str, torch.Tensor] = {
             "logits": logits,
             "aux_loss": aux_loss,
             "class_scores": logits,
+            "raw_logits": class_scores,
             "raw_class_scores": class_scores,
             "shot_scores": shot_scores,
             "shot_aggregation_weights": shot_weights,
@@ -832,6 +834,8 @@ class EvidenceBudgetedOTFewShot(BaseConv64FewShotModel):
             "unmatched_mass": unmatched_mass,
             "transported_mass": weighted_matched,
             "weighted_unmatched_mass": weighted_unmatched,
+            "total_distance": total_distance,
+            "query_class_distance": total_distance,
             "transport_cost": real_cost,
             "plan_entropy": transport_entropy,
             "q_budget": q_budget,
