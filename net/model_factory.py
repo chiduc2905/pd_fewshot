@@ -362,6 +362,11 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport with episode-adaptive, token-reliable mass",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
+    "crj_fsl": {
+        "display_name": "CRJ-FSL",
+        "architecture": "J-FSL fixed-budget shot-decomposed UOT -> consensus-robust lower-confidence shot aggregation with diagnostics",
+        "metric": "Consensus-Robust Threshold-Calibrated UOT",
+    },
     "fgwuot_fsl": {
         "display_name": "FGWUOT-FSL",
         "architecture": "Backbone spatial tokens -> reliability-mass FGW-UOT -> scalogram-aware relational geometry -> shot-aware robust class scoring",
@@ -2139,6 +2144,65 @@ def build_model_from_args(args):
             eval_projection_mode=str(getattr(args, "spif_papersw_eval_projection_mode", "fixed")),
             eval_num_repeats=int(getattr(args, "spif_papersw_eval_num_repeats", 1)),
             projection_seed=int(getattr(args, "spif_papersw_projection_seed", 7)),
+        )
+    if args.model == "crj_fsl":
+        CRJFSL = _load_symbol("net.crj_fsl", "CRJFSL")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return CRJFSL(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(
+                _first_attr(args, "crj_token_dim", "hrot_token_dim", "token_dim", default=128) or 128
+            ),
+            use_raw_backbone_tokens=_bool_flag(
+                _first_attr(args, "crj_use_raw_backbone_tokens", "hrot_use_raw_backbone_tokens", default="false"),
+                default=False,
+            ),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
+            curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
+            projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),
+            token_temperature=float(getattr(args, "hrot_token_temperature", 0.1)),
+            score_scale=float(getattr(args, "hrot_score_scale", 16.0)),
+            tau_q=float(getattr(args, "hrot_tau_q", 0.5)),
+            tau_c=float(getattr(args, "hrot_tau_c", 0.5)),
+            sinkhorn_epsilon=float(getattr(args, "hrot_sinkhorn_epsilon", 0.1)),
+            sinkhorn_iterations=int(
+                _first_attr(args, "hrot_sinkhorn_iterations", "hrot_sinkhorn_iters", default=60)
+            ),
+            sinkhorn_tolerance=float(getattr(args, "hrot_sinkhorn_tolerance", 1e-5)),
+            fixed_mass=float(getattr(args, "hrot_fixed_mass", 0.8)),
+            min_mass=float(getattr(args, "hrot_min_mass", 0.1)),
+            mass_bonus_init=float(getattr(args, "hrot_mass_bonus_init", 1.0)),
+            transport_cost_threshold_init=getattr(args, "hrot_transport_cost_threshold_init", None),
+            lambda_rho=float(getattr(args, "hrot_lambda_rho", 0.01)),
+            rho_target=float(getattr(args, "hrot_rho_target", 0.8)),
+            lambda_rho_rank=float(getattr(args, "hrot_lambda_rho_rank", 0.05)),
+            rho_rank_margin=float(getattr(args, "hrot_rho_rank_margin", 0.05)),
+            rho_rank_temperature=float(getattr(args, "hrot_rho_rank_temperature", 0.05)),
+            lambda_curvature=float(getattr(args, "hrot_lambda_curvature", 0.0)),
+            min_curvature=float(getattr(args, "hrot_min_curvature", 0.05)),
+            structure_cost_init=float(getattr(args, "hrot_structure_cost_init", 0.05)),
+            ground_cost=str(getattr(args, "hrot_ground_cost", "auto")),
+            eam_mode=str(getattr(args, "hrot_eam_mode", "compact")),
+            compact_eam_prior_mix=float(getattr(args, "hrot_compact_eam_prior_mix", 0.5)),
+            normalize_euclidean_tokens=_bool_flag(
+                getattr(args, "hrot_normalize_euclidean_tokens", "true"),
+                default=True,
+            ),
+            normalize_rho=_bool_flag(getattr(args, "hrot_normalize_rho", "false"), default=False),
+            eval_use_float64=_bool_flag(getattr(args, "hrot_eval_use_float64", "true"), default=True),
+            hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
+            ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
+            eps=float(getattr(args, "hrot_eps", 1e-6)),
+            crj_pool_gamma=float(getattr(args, "crj_pool_gamma", 0.65)),
+            crj_variance_penalty=float(getattr(args, "crj_variance_penalty", 0.25)),
+            crj_min_shots=int(getattr(args, "crj_min_shots", 2)),
+            crj_trim_fraction=float(getattr(args, "crj_trim_fraction", 0.0)),
+            crj_clip_logit=float(getattr(args, "crj_clip_logit", 0.0)),
         )
     if args.model == "hrot_fsl":
         HROTFSL = _load_symbol("net.hrot_fsl", "HROTFSL")

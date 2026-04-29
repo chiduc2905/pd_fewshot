@@ -958,6 +958,13 @@ def get_args():
         ],
     )
     parser.add_argument("--hrot_eps", type=float, default=1e-6)
+    parser.add_argument("--crj_token_dim", type=int, default=None)
+    parser.add_argument("--crj_use_raw_backbone_tokens", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--crj_pool_gamma", type=float, default=0.65)
+    parser.add_argument("--crj_variance_penalty", type=float, default=0.25)
+    parser.add_argument("--crj_min_shots", type=int, default=2)
+    parser.add_argument("--crj_trim_fraction", type=float, default=0.0)
+    parser.add_argument("--crj_clip_logit", type=float, default=0.0)
     parser.add_argument("--fgwuot_token_dim", type=int, default=128)
     parser.add_argument("--fgwuot_tau", type=float, default=0.5)
     parser.add_argument("--fgwuot_eps_sinkhorn", type=float, default=0.1)
@@ -1949,6 +1956,31 @@ def get_model(args):
             f"compact_eam_prior_mix={getattr(args, 'hrot_compact_eam_prior_mix', 0.5)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
+    if args.model == "crj_fsl":
+        crj_raw_tokens = _bool_flag(
+            getattr(args, "crj_use_raw_backbone_tokens", getattr(args, "hrot_use_raw_backbone_tokens", "false")),
+            default=False,
+        )
+        crj_token_dim = "raw_backbone" if crj_raw_tokens else (
+            getattr(args, "crj_token_dim", None)
+            or getattr(args, "hrot_token_dim", None)
+            or getattr(args, "token_dim", 128)
+        )
+        print(
+            "  crj_fsl: J-FSL fixed-budget shot-decomposed UOT -> "
+            "consensus-robust lower-confidence shot aggregation "
+            f"(token_dim={crj_token_dim}, "
+            f"fixed_mass={getattr(args, 'hrot_fixed_mass', 0.8)}, "
+            f"score_scale={getattr(args, 'hrot_score_scale', 16.0)}, "
+            f"sinkhorn_eps={getattr(args, 'hrot_sinkhorn_epsilon', 0.1)}, "
+            f"sinkhorn_iters={getattr(args, 'hrot_sinkhorn_iterations', 60)}, "
+            f"ground_cost={getattr(args, 'hrot_ground_cost', 'auto')}, "
+            f"pool_gamma={getattr(args, 'crj_pool_gamma', 0.65)}, "
+            f"variance_penalty={getattr(args, 'crj_variance_penalty', 0.25)}, "
+            f"min_shots={getattr(args, 'crj_min_shots', 2)}, "
+            f"trim_fraction={getattr(args, 'crj_trim_fraction', 0.0)}, "
+            f"clip_logit={getattr(args, 'crj_clip_logit', 0.0)})"
+        )
     if args.model == "fgwuot_fsl":
         print(
             "  fgwuot_fsl: reliability-weighted FGW-UOT over scalogram spatial tokens -> "
@@ -2578,7 +2610,7 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
-    if args.model == "hrot_fsl":
+    if args.model in {"hrot_fsl", "crj_fsl"}:
         return net(
             query,
             support,
@@ -2891,6 +2923,29 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
             metrics["global_local_agreement"] = _scalar_metric(
                 global_scores.argmax(dim=1).eq(local_scores.argmax(dim=1)).float().mean()
             )
+    crj_score_tensors = {
+        "crj_vanilla_logits": "crj_vanilla",
+        "crj_robust_lcb": "crj_lcb",
+        "crj_logit_delta": "crj_delta",
+    }
+    for score_key, prefix in crj_score_tensors.items():
+        score_tensor = scores.get(score_key)
+        if torch.is_tensor(score_tensor) and score_tensor.dim() == 2 and score_tensor.shape[0] == targets.shape[0]:
+            metrics.update(summarize_class_score_tensor(score_tensor, targets, prefix=prefix))
+
+    crj_budget_tensors = {
+        "crj_shot_score_std": "crj_shot_std",
+        "crj_consensus_confidence": "crj_consensus",
+        "crj_effective_shots": "crj_effective_shots",
+    }
+    for budget_key, prefix in crj_budget_tensors.items():
+        budget_tensor = scores.get(budget_key)
+        if (
+            torch.is_tensor(budget_tensor)
+            and budget_tensor.dim() == 2
+            and budget_tensor.shape[0] == targets.shape[0]
+        ):
+            metrics.update(summarize_budget_tensor(budget_tensor, targets, prefix=prefix))
     anchor_local_scores = scores.get("anchor_local_scores")
     if torch.is_tensor(anchor_local_scores) and anchor_local_scores.dim() == 2 and anchor_local_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(anchor_local_scores, targets, prefix="anchor_local"))
@@ -3009,6 +3064,15 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "sinkhorn_error",
         "unmatched_mass",
         "weighted_unmatched_mass",
+        "mean_crj_logit_delta",
+        "mean_crj_shot_std",
+        "mean_crj_effective_shots",
+        "mean_crj_pool_entropy",
+        "crj_pool_gamma",
+        "crj_variance_penalty",
+        "crj_min_shots",
+        "crj_trim_fraction",
+        "crj_clip_logit",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -3071,6 +3135,15 @@ def format_diagnostic_summary(metrics):
         "local_true_score",
         "local_best_negative_score",
         "local_score_gap",
+        "crj_vanilla_true_score",
+        "crj_vanilla_best_negative_score",
+        "crj_vanilla_score_gap",
+        "crj_lcb_true_score",
+        "crj_lcb_best_negative_score",
+        "crj_lcb_score_gap",
+        "crj_delta_true_score",
+        "crj_delta_best_negative_score",
+        "crj_delta_score_gap",
         "raw_local_true_score",
         "raw_local_best_negative_score",
         "raw_local_score_gap",
@@ -3105,6 +3178,22 @@ def format_diagnostic_summary(metrics):
         "retained_fraction_true",
         "retained_fraction_best_negative",
         "retained_fraction_gap",
+        "crj_shot_std_true",
+        "crj_shot_std_best_negative",
+        "crj_shot_std_gap",
+        "crj_consensus_true",
+        "crj_consensus_best_negative",
+        "crj_consensus_gap",
+        "crj_effective_shots_true",
+        "crj_effective_shots_best_negative",
+        "crj_effective_shots_gap",
+        "mean_crj_logit_delta",
+        "mean_crj_shot_std",
+        "mean_crj_effective_shots",
+        "mean_crj_pool_entropy",
+        "crj_pool_gamma",
+        "crj_variance_penalty",
+        "crj_min_shots",
         "mean_budget",
         "mean_gate",
         "alpha",
@@ -3645,7 +3734,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     support_distribution_rows = []
     support_summary_sums = defaultdict(float)
     support_summary_count = 0.0
+    test_diag_sums = defaultdict(float)
+    test_diag_total = 0.0
     exported_q1 = 0
+    collect_test_diagnostics = q1_enabled or args.model == "crj_fsl"
 
     with torch.no_grad():
         for episode_idx, batch in enumerate(tqdm(loader, desc="Testing")):
@@ -3677,7 +3769,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 phase="test",
                 query_targets=targets,
                 support_targets=support_targets,
-                collect_diagnostics=q1_enabled,
+                collect_diagnostics=collect_test_diagnostics,
             )
             logits = extract_logits(scores)
             preds = logits.argmax(dim=1)
@@ -3688,6 +3780,9 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
+            batch_metrics = summarize_score_diagnostics(scores=scores, logits=logits, targets=targets)
+            accumulate_diagnostics(test_diag_sums, batch_metrics, weight=targets.size(0))
+            test_diag_total += float(targets.size(0))
 
             if args.shot_num > 1:
                 support_rows_episode, support_summary = compute_support_episode_distribution(
@@ -3805,6 +3900,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         print(f"  Mean pairwise distance : {support_summary_sums['support_pairwise_distance_mean'] / support_summary_count:.4f}")
         print(f"  Max outlier score      : {support_summary_sums['support_outlier_score_max'] / support_summary_count:.4f}")
         print(f"  Mean entropy std       : {support_summary_sums['support_entropy_std_mean'] / support_summary_count:.4f}")
+    test_diag = finalize_diagnostics(test_diag_sums, test_diag_total)
+    test_diag_summary = format_diagnostic_summary(test_diag)
+    if test_diag_summary:
+        print(f"  TestDiag: {test_diag_summary}")
 
     wandb.log(
         {
@@ -3819,6 +3918,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             "test_p_value": p_val,
             "inference_time_mean_ms": time_mean,
             "inference_time_std_ms": time_std,
+            **prefix_diagnostics(test_diag, "diag/test_"),
         }
     )
 
