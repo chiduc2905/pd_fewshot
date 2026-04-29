@@ -882,6 +882,7 @@ def get_args():
             "J",
             "J_EGTW",
             "JE",
+            "J_HLM",
             "K",
             "L",
             "M",
@@ -922,6 +923,31 @@ def get_args():
     parser.add_argument("--hrot_egtw_detach_masses", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_tau", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_lambda", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--hrot_hlm_min_mass", type=float, default=0.1)
+    parser.add_argument("--hrot_hlm_init_mass", type=float, default=0.8)
+    parser.add_argument(
+        "--hrot_hlm_budget_mode",
+        type=str,
+        default="cost",
+        choices=["geodesic", "cost", "hybrid"],
+    )
+    parser.add_argument(
+        "--hrot_hlm_token_mode",
+        type=str,
+        default="cost",
+        choices=["uniform", "cost", "hybrid"],
+    )
+    parser.add_argument("--hrot_hlm_token_tau", type=float, default=0.25)
+    parser.add_argument("--hrot_hlm_budget_hidden_dim", type=int, default=64)
+    parser.add_argument("--hrot_hlm_token_hidden_dim", type=int, default=64)
+    parser.add_argument("--hrot_hlm_detach_cost_features", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--hrot_hlm_allow_mass_grad", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--hrot_hlm_lambda_rho", type=float, default=0.0)
+    parser.add_argument("--hrot_hlm_lambda_eff", type=float, default=0.0)
+    parser.add_argument("--hrot_hlm_eff_margin", type=float, default=0.05)
+    parser.add_argument("--hrot_hlm_lambda_shot_cov", type=float, default=0.0)
+    parser.add_argument("--hrot_hlm_shot_entropy_floor", type=float, default=0.35)
+    parser.add_argument("--hrot_hlm_return_diagnostics", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_min_mass", type=float, default=0.1)
     parser.add_argument("--hrot_mass_bonus_init", type=float, default=1.0)
     parser.add_argument("--hrot_transport_cost_threshold_init", type=float, default=None)
@@ -1936,6 +1962,11 @@ def get_model(args):
             f"egtw_support_sim={getattr(args, 'hrot_egtw_support_similarity_weight', 0.5)}, "
             f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
             f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
+            f"hlm_budget={getattr(args, 'hrot_hlm_budget_mode', 'cost')}, "
+            f"hlm_token={getattr(args, 'hrot_hlm_token_mode', 'cost')}, "
+            f"hlm_token_tau={getattr(args, 'hrot_hlm_token_tau', 0.25)}, "
+            f"hlm_min_mass={getattr(args, 'hrot_hlm_min_mass', 0.1)}, "
+            f"hlm_init_mass={getattr(args, 'hrot_hlm_init_mass', 0.8)}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
@@ -2139,6 +2170,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             normalized = "T"
         if normalized in {"JEGTW", "JE"}:
             normalized = "JE"
+        if normalized in {"JHLM", "JHIERMASS", "JHMASS", "JTAHM"}:
+            normalized = "J_HLM"
         if normalized in {
             "A",
             "B",
@@ -2151,6 +2184,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "I",
             "J",
             "JE",
+            "J_HLM",
             "K",
             "L",
             "M",
@@ -2181,6 +2215,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
 
     if "w_q" in keys or "raw_tau_token" in keys:
         return "V"
+    if has_param("hierarchical_transport_mass"):
+        return "J_HLM"
     if "raw_egtw_tau" in keys or "raw_egtw_lambda" in keys:
         return "JE"
     if has_param("q_eam"):
@@ -2227,6 +2263,25 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
         ):
             if checkpoint_args.get(egtw_key) is not None:
                 overrides[egtw_key] = checkpoint_args[egtw_key]
+        for hlm_key in (
+            "hrot_hlm_min_mass",
+            "hrot_hlm_init_mass",
+            "hrot_hlm_budget_mode",
+            "hrot_hlm_token_mode",
+            "hrot_hlm_token_tau",
+            "hrot_hlm_budget_hidden_dim",
+            "hrot_hlm_token_hidden_dim",
+            "hrot_hlm_detach_cost_features",
+            "hrot_hlm_allow_mass_grad",
+            "hrot_hlm_lambda_rho",
+            "hrot_hlm_lambda_eff",
+            "hrot_hlm_eff_margin",
+            "hrot_hlm_lambda_shot_cov",
+            "hrot_hlm_shot_entropy_floor",
+            "hrot_hlm_return_diagnostics",
+        ):
+            if checkpoint_args.get(hlm_key) is not None:
+                overrides[hlm_key] = checkpoint_args[hlm_key]
         if checkpoint_args.get("hrot_eam_mode") is not None:
             overrides["hrot_eam_mode"] = str(checkpoint_args["hrot_eam_mode"]).strip().lower().replace("-", "_")
         elif variant == "H":
@@ -2595,7 +2650,15 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
-    if args.model in {"hrot_fsl", "crj_fsl"}:
+    if args.model == "hrot_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
+    if args.model == "crj_fsl":
         return net(
             query,
             support,

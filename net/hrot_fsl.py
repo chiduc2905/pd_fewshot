@@ -18,6 +18,7 @@ from net.hyperbolic.poincare_ops import (
     safe_project_to_ball,
 )
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
+from net.modules.hierarchical_transport_mass import HierarchicalTransportMass
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
     compute_partial_transported_mass,
@@ -66,6 +67,8 @@ def _normalize_hrot_variant_name(variant: str) -> str:
         return "T"
     if normalized in {"JEGTW", "JE"}:
         return "JE"
+    if normalized in {"JHLM", "JHIERMASS", "JHMASS", "JTAHM"}:
+        return "J_HLM"
     return normalized
 
 
@@ -86,7 +89,7 @@ def _normalize_hrot_ground_cost(ground_cost: str) -> str:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-V and JE."""
+    """Vectorized HROT few-shot model with ablation variants A-V, JE, and J_HLM."""
 
     def __init__(
         self,
@@ -119,6 +122,21 @@ class HROTFSL(BaseConv64FewShotModel):
         egtw_detach_masses: bool = True,
         egtw_learn_tau: bool = False,
         egtw_learn_lambda: bool = False,
+        hlm_min_mass: float = 0.1,
+        hlm_init_mass: float = 0.8,
+        hlm_budget_mode: str = "cost",
+        hlm_token_mode: str = "cost",
+        hlm_token_tau: float = 0.25,
+        hlm_budget_hidden_dim: int = 64,
+        hlm_token_hidden_dim: int = 64,
+        hlm_detach_cost_features: bool = True,
+        hlm_allow_mass_grad: bool = True,
+        hlm_lambda_rho: float = 0.0,
+        hlm_lambda_eff: float = 0.0,
+        hlm_eff_margin: float = 0.05,
+        hlm_lambda_shot_cov: float = 0.0,
+        hlm_shot_entropy_floor: float = 0.35,
+        hlm_return_diagnostics: bool = True,
         min_mass: float = 0.1,
         mass_bonus_init: float = 1.0,
         transport_cost_threshold_init: float | None = None,
@@ -149,7 +167,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_HLM", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -180,6 +198,32 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("egtw_uniform_mix must be in [0, 1]")
         if egtw_detach_masses and (egtw_learn_tau or egtw_learn_lambda):
             raise ValueError("EGTW learnable tau/lambda require egtw_detach_masses=False")
+        hlm_budget_mode = str(hlm_budget_mode).strip().lower().replace("-", "_")
+        hlm_token_mode = str(hlm_token_mode).strip().lower().replace("-", "_")
+        if hlm_budget_mode not in {"geodesic", "cost", "hybrid"}:
+            raise ValueError(f"Unsupported HLM budget mode: {hlm_budget_mode}")
+        if hlm_token_mode not in {"uniform", "cost", "hybrid"}:
+            raise ValueError(f"Unsupported HLM token mode: {hlm_token_mode}")
+        if not 0.0 < hlm_min_mass < 1.0:
+            raise ValueError("hlm_min_mass must be in (0, 1)")
+        if not hlm_min_mass <= hlm_init_mass <= 1.0:
+            raise ValueError("hlm_init_mass must be in [hlm_min_mass, 1]")
+        if hlm_token_tau <= 0.0:
+            raise ValueError("hlm_token_tau must be positive")
+        if hlm_budget_hidden_dim <= 0:
+            raise ValueError("hlm_budget_hidden_dim must be positive")
+        if hlm_token_hidden_dim <= 0:
+            raise ValueError("hlm_token_hidden_dim must be positive")
+        if hlm_lambda_rho < 0.0:
+            raise ValueError("hlm_lambda_rho must be non-negative")
+        if hlm_lambda_eff < 0.0:
+            raise ValueError("hlm_lambda_eff must be non-negative")
+        if hlm_eff_margin < 0.0:
+            raise ValueError("hlm_eff_margin must be non-negative")
+        if hlm_lambda_shot_cov < 0.0:
+            raise ValueError("hlm_lambda_shot_cov must be non-negative")
+        if hlm_shot_entropy_floor < 0.0:
+            raise ValueError("hlm_shot_entropy_floor must be non-negative")
         if lambda_rho_rank < 0.0:
             raise ValueError("lambda_rho_rank must be non-negative")
         if rho_rank_margin < 0.0:
@@ -195,16 +239,17 @@ class HROTFSL(BaseConv64FewShotModel):
         self.variant = variant
         self.uses_hrot_v = variant == "V"
         self.uses_egtw_mass = variant == "JE"
+        self.uses_hlm_mass = variant == "J_HLM"
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_HLM", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "J_HLM", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_HLM", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_HLM", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
@@ -250,6 +295,19 @@ class HROTFSL(BaseConv64FewShotModel):
         self.egtw_detach_masses = bool(egtw_detach_masses)
         self.egtw_learn_tau = bool(egtw_learn_tau)
         self.egtw_learn_lambda = bool(egtw_learn_lambda)
+        self.hlm_min_mass = float(hlm_min_mass)
+        self.hlm_init_mass = float(hlm_init_mass)
+        self.hlm_budget_mode = hlm_budget_mode
+        self.hlm_token_mode = hlm_token_mode
+        self.hlm_token_tau_value = float(hlm_token_tau)
+        self.hlm_detach_cost_features = bool(hlm_detach_cost_features)
+        self.hlm_allow_mass_grad = bool(hlm_allow_mass_grad)
+        self.hlm_lambda_rho = float(hlm_lambda_rho)
+        self.hlm_lambda_eff = float(hlm_lambda_eff)
+        self.hlm_eff_margin = float(hlm_eff_margin)
+        self.hlm_lambda_shot_cov = float(hlm_lambda_shot_cov)
+        self.hlm_shot_entropy_floor = float(hlm_shot_entropy_floor)
+        self.hlm_return_diagnostics = bool(hlm_return_diagnostics)
         self.min_mass = float(min_mass)
         self.lambda_rho = float(lambda_rho)
         self.rho_target = float(rho_target)
@@ -300,6 +358,22 @@ class HROTFSL(BaseConv64FewShotModel):
                 input_dim=self.q_eam_feature_dim,
             )
             if self.uses_noise_calibrated_transport
+            else None
+        )
+        self.hierarchical_transport_mass = (
+            HierarchicalTransportMass(
+                min_mass=hlm_min_mass,
+                init_mass=hlm_init_mass,
+                budget_mode=hlm_budget_mode,
+                token_mode=hlm_token_mode,
+                token_tau=hlm_token_tau,
+                budget_hidden_dim=hlm_budget_hidden_dim,
+                token_hidden_dim=hlm_token_hidden_dim,
+                geodesic_feature_dim=4,
+                detach_cost_features=hlm_detach_cost_features,
+                eps=max(self.eps, 1e-8),
+            )
+            if self.uses_hlm_mass
             else None
         )
         if self.uses_hybrid_ablation_eam:
@@ -1398,6 +1472,33 @@ class HROTFSL(BaseConv64FewShotModel):
             shot_coverage_ratio,
         )
 
+    def _compute_hlm_aux_losses(
+        self,
+        shot_rho: torch.Tensor,
+        shot_transport_mass: torch.Tensor,
+        shot_pool_weights: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        zero = shot_rho.new_zeros(())
+        if not self.uses_hlm_mass:
+            return zero, zero, zero
+
+        target = shot_rho.new_tensor(self.hlm_init_mass)
+        rho_loss = (shot_rho - target).pow(2).mean()
+
+        if self.hlm_lambda_eff > 0.0:
+            efficiency = shot_transport_mass / shot_rho.clamp_min(self.eps)
+            eff_loss = (self.hlm_eff_margin - efficiency).clamp_min(0.0).mean()
+        else:
+            eff_loss = zero
+
+        if self.hlm_lambda_shot_cov > 0.0 and shot_pool_weights is not None and shot_pool_weights.shape[-1] > 1:
+            weights = shot_pool_weights.clamp_min(self.eps)
+            entropy = -(weights * weights.log()).sum(dim=-1) / math.log(float(weights.shape[-1]))
+            shot_cov_loss = (self.hlm_shot_entropy_floor - entropy).clamp_min(0.0).mean()
+        else:
+            shot_cov_loss = zero
+        return rho_loss, eff_loss, shot_cov_loss
+
     def _compute_egtw_token_marginals(
         self,
         query_tokens: torch.Tensor,
@@ -2195,7 +2296,69 @@ class HROTFSL(BaseConv64FewShotModel):
             else:
                 flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
                 transport_match_kwargs = {}
-                if self.uses_egtw_mass:
+                if self.uses_hlm_mass:
+                    if self.hierarchical_transport_mass is None:
+                        raise RuntimeError("J_HLM requires hierarchical_transport_mass")
+                    cost_qcst = flat_cost.reshape(
+                        query.shape[0],
+                        way_num,
+                        shot_num,
+                        flat_cost.shape[-2],
+                        flat_cost.shape[-1],
+                    )
+                    geodesic_features = None
+                    if self.hlm_budget_mode in {"geodesic", "hybrid"}:
+                        geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
+                        shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
+                    hlm_payload = self.hierarchical_transport_mass(
+                        cost_qcst,
+                        geodesic_features=geodesic_features,
+                        threshold=self.transport_cost_threshold,
+                    )
+                    shot_rho = hlm_payload["shot_rho"].to(dtype=query_euclidean.dtype)
+                    flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+                    flat_query_mass = hlm_payload["query_mass"].reshape(
+                        query.shape[0],
+                        way_num * shot_num,
+                        flat_cost.shape[-2],
+                    )
+                    flat_support_mass = hlm_payload["support_mass"].reshape(
+                        query.shape[0],
+                        way_num * shot_num,
+                        flat_cost.shape[-1],
+                    )
+                    if not self.hlm_allow_mass_grad:
+                        flat_rho = flat_rho.detach()
+                        flat_query_mass = flat_query_mass.detach()
+                        flat_support_mass = flat_support_mass.detach()
+                    transport_match_kwargs = {
+                        "a": flat_query_mass,
+                        "b": flat_support_mass,
+                    }
+                    transport_probe_payload = {
+                        "query_token_mass": hlm_payload["query_mass"],
+                        "support_token_mass": hlm_payload["support_mass"],
+                        "query_token_weight": hlm_payload["query_weight"],
+                        "support_token_weight": hlm_payload["support_weight"],
+                        "hlm_query_weight": hlm_payload["query_weight"],
+                        "hlm_support_weight": hlm_payload["support_weight"],
+                        "hlm_token_gate": hlm_payload["token_gate"],
+                        "hlm_budget_features": hlm_payload["budget_features"],
+                        "hlm_mean_cost": hlm_payload["mean_cost"],
+                        "hlm_min_cost": hlm_payload["min_cost"],
+                        "hlm_std_cost": hlm_payload["std_cost"],
+                    }
+                    if self.hlm_return_diagnostics:
+                        transport_probe_payload.update(
+                            {
+                                "hlm_row_softmin": hlm_payload["row_softmin"],
+                                "hlm_col_softmin": hlm_payload["col_softmin"],
+                            }
+                        )
+                    transport_probe_payload["hlm_config_token_tau"] = query_euclidean.new_tensor(
+                        self.hlm_token_tau_value,
+                    )
+                elif self.uses_egtw_mass:
                     egtw_query_mass, egtw_support_mass, egtw_diagnostics = self._compute_egtw_token_marginals(
                         query_euclidean,
                         support_euclidean,
@@ -2289,7 +2452,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 if self.uses_unbalanced_transport:
                     shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
 
-                if self.variant in {"J", "JE"}:
+                if self.variant in {"J", "JE", "J_HLM"}:
                     logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
                         shot_logits,
                         shot_transport_cost,
@@ -2326,19 +2489,42 @@ class HROTFSL(BaseConv64FewShotModel):
                 logits = logits + self._mass_reward_weight(logits) * transport_mass
 
         rho_regularization = logits.new_zeros(())
-        if self.uses_learned_mass and self.lambda_rho > 0.0 and not self.uses_structural_cover_objective:
+        if (
+            self.uses_learned_mass
+            and not self.uses_hlm_mass
+            and self.lambda_rho > 0.0
+            and not self.uses_structural_cover_objective
+        ):
             rho_regularization = (rho - self.rho_target).pow(2).mean()
 
         rho_rank_loss = self._rho_rank_loss(rho, shot_geodesic_distance)
+
+        hlm_rho_regularization = logits.new_zeros(())
+        hlm_eff_loss = logits.new_zeros(())
+        hlm_shot_cov_loss = logits.new_zeros(())
+        if self.uses_hlm_mass:
+            hlm_shot_pool_weights = None
+            if transport_probe_payload is not None:
+                hlm_shot_pool_weights = transport_probe_payload.get("shot_pool_weights")
+            hlm_rho_regularization, hlm_eff_loss, hlm_shot_cov_loss = self._compute_hlm_aux_losses(
+                rho,
+                shot_transport_mass,
+                hlm_shot_pool_weights,
+            )
+            rho_regularization = hlm_rho_regularization
 
         curvature_regularization = logits.new_zeros(())
         if self.lambda_curvature > 0.0:
             curvature_regularization = (self.min_curvature - self.curvature).clamp_min(0.0).pow(2)
 
+        base_rho_weight = 0.0 if self.uses_hlm_mass else self.lambda_rho
         aux_loss = (
-            self.lambda_rho * rho_regularization
+            base_rho_weight * rho_regularization
             + self.lambda_rho_rank * rho_rank_loss
             + self.lambda_curvature * curvature_regularization
+            + self.hlm_lambda_rho * hlm_rho_regularization
+            + self.hlm_lambda_eff * hlm_eff_loss
+            + self.hlm_lambda_shot_cov * hlm_shot_cov_loss
         )
 
         if not needs_payload:
@@ -2354,6 +2540,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho": rho,
             "rho_regularization": rho_regularization,
             "rho_rank_loss": rho_rank_loss,
+            "hlm_rho_regularization": hlm_rho_regularization,
+            "hlm_eff_loss": hlm_eff_loss,
+            "hlm_shot_cov_loss": hlm_shot_cov_loss,
             "curvature_regularization": curvature_regularization,
             "curvature": self.curvature.detach().to(dtype=logits.dtype),
             "mass_bonus": self._mass_reward_weight(logits).detach().to(dtype=logits.dtype),
@@ -2406,6 +2595,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),
             "ot_backend": torch.stack([item["ot_backend"] for item in batch_outputs]).mean(),
         }
+        for key in ("hlm_rho_regularization", "hlm_eff_loss", "hlm_shot_cov_loss"):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
         if "shot_transport_cost" in batch_outputs[0]:
             stacked["shot_transport_cost"] = torch.cat([item["shot_transport_cost"] for item in batch_outputs], dim=0)
             stacked["shot_transported_mass"] = torch.cat(
@@ -2433,6 +2625,17 @@ class HROTFSL(BaseConv64FewShotModel):
         for key in (
             "query_token_mass",
             "support_token_mass",
+            "query_token_weight",
+            "support_token_weight",
+            "hlm_query_weight",
+            "hlm_support_weight",
+            "hlm_token_gate",
+            "hlm_budget_features",
+            "hlm_mean_cost",
+            "hlm_min_cost",
+            "hlm_std_cost",
+            "hlm_row_softmin",
+            "hlm_col_softmin",
             "probe_query_reliability",
             "probe_support_reliability",
             "support_consensus",
@@ -2485,6 +2688,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "egtw_attention_temperature",
             "egtw_support_similarity_weight",
             "egtw_uniform_mix",
+            "hlm_config_token_tau",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

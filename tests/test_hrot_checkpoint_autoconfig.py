@@ -67,6 +67,32 @@ def test_hrot_variant_cli_accepts_j_egtw(monkeypatch):
     assert args.hrot_egtw_uniform_mix == 0.1
 
 
+def test_hrot_variant_cli_accepts_j_hlm(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "hrot_fsl",
+            "--hrot_variant",
+            "J_HLM",
+            "--hrot_hlm_budget_mode",
+            "hybrid",
+            "--hrot_hlm_token_mode",
+            "hybrid",
+            "--hrot_hlm_token_tau",
+            "0.35",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.hrot_variant == "J_HLM"
+    assert args.hrot_hlm_budget_mode == "hybrid"
+    assert args.hrot_hlm_token_mode == "hybrid"
+    assert args.hrot_hlm_token_tau == 0.35
+
+
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),
@@ -109,6 +135,30 @@ def test_infer_hrot_variant_normalizes_j_egtw_checkpoint_args():
     assert overrides["hrot_egtw_lambda"] == 1.3
     assert overrides["hrot_egtw_attention_temperature"] == 0.2
     assert overrides["hrot_egtw_detach_masses"] == "true"
+
+
+def test_infer_hrot_variant_detects_j_hlm_state():
+    state_dict = {
+        "raw_transport_cost_threshold": torch.tensor(0.0),
+        "hierarchical_transport_mass.budget_mlp.0.weight": torch.randn(64, 9),
+        "hierarchical_transport_mass.budget_mlp.0.bias": torch.randn(64),
+        "token_projector.1.weight": torch.randn(96, 640),
+    }
+    checkpoint_args = {
+        "hrot_variant": "J_HLM",
+        "hrot_hlm_budget_mode": "cost",
+        "hrot_hlm_token_mode": "cost",
+        "hrot_hlm_token_tau": 0.25,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+
+    assert infer_hrot_variant_from_state_dict(state_dict) == "J_HLM"
+    assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "J_HLM"
+    assert overrides["hrot_variant"] == "J_HLM"
+    assert overrides["hrot_hlm_budget_mode"] == "cost"
+    assert overrides["hrot_hlm_token_mode"] == "cost"
+    assert overrides["hrot_hlm_token_tau"] == 0.25
 
 
 def test_infer_hrot_arch_overrides_recovers_variant_and_token_shape():
