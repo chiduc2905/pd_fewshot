@@ -916,6 +916,10 @@ def get_args():
     parser.add_argument("--hrot_egtw_tau", type=float, default=1.0)
     parser.add_argument("--hrot_egtw_lambda", type=float, default=1.0)
     parser.add_argument("--hrot_egtw_eps", type=float, default=1e-8)
+    parser.add_argument("--hrot_egtw_attention_temperature", type=float, default=0.2)
+    parser.add_argument("--hrot_egtw_support_similarity_weight", type=float, default=0.5)
+    parser.add_argument("--hrot_egtw_uniform_mix", type=float, default=0.25)
+    parser.add_argument("--hrot_egtw_detach_masses", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_tau", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_lambda", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_min_mass", type=float, default=0.1)
@@ -1930,6 +1934,10 @@ def get_model(args):
             f"fixed_mass={getattr(args, 'hrot_fixed_mass', 0.8)}, "
             f"egtw_tau={getattr(args, 'hrot_egtw_tau', 1.0)}, "
             f"egtw_lambda={getattr(args, 'hrot_egtw_lambda', 1.0)}, "
+            f"egtw_attn_temp={getattr(args, 'hrot_egtw_attention_temperature', 0.2)}, "
+            f"egtw_support_sim={getattr(args, 'hrot_egtw_support_similarity_weight', 0.5)}, "
+            f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
+            f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
@@ -2193,6 +2201,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_egtw_tau",
             "hrot_egtw_lambda",
             "hrot_egtw_eps",
+            "hrot_egtw_attention_temperature",
+            "hrot_egtw_support_similarity_weight",
+            "hrot_egtw_uniform_mix",
+            "hrot_egtw_detach_masses",
             "hrot_egtw_learn_tau",
             "hrot_egtw_learn_lambda",
         ):

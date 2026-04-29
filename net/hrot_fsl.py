@@ -113,6 +113,10 @@ class HROTFSL(BaseConv64FewShotModel):
         egtw_tau: float = 1.0,
         egtw_lambda: float = 1.0,
         egtw_eps: float = 1e-8,
+        egtw_attention_temperature: float = 0.2,
+        egtw_support_similarity_weight: float = 0.5,
+        egtw_uniform_mix: float = 0.25,
+        egtw_detach_masses: bool = True,
         egtw_learn_tau: bool = False,
         egtw_learn_lambda: bool = False,
         min_mass: float = 0.1,
@@ -168,6 +172,14 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("egtw_lambda must be non-negative")
         if egtw_eps <= 0.0:
             raise ValueError("egtw_eps must be positive")
+        if egtw_attention_temperature <= 0.0:
+            raise ValueError("egtw_attention_temperature must be positive")
+        if egtw_support_similarity_weight < 0.0:
+            raise ValueError("egtw_support_similarity_weight must be non-negative")
+        if not 0.0 <= egtw_uniform_mix <= 1.0:
+            raise ValueError("egtw_uniform_mix must be in [0, 1]")
+        if egtw_detach_masses and (egtw_learn_tau or egtw_learn_lambda):
+            raise ValueError("EGTW learnable tau/lambda require egtw_detach_masses=False")
         if lambda_rho_rank < 0.0:
             raise ValueError("lambda_rho_rank must be non-negative")
         if rho_rank_margin < 0.0:
@@ -232,6 +244,10 @@ class HROTFSL(BaseConv64FewShotModel):
         self.default_egtw_tau = float(egtw_tau)
         self.default_egtw_lambda = float(egtw_lambda)
         self.egtw_eps = float(egtw_eps)
+        self.default_egtw_attention_temperature = float(egtw_attention_temperature)
+        self.egtw_support_similarity_weight = float(egtw_support_similarity_weight)
+        self.egtw_uniform_mix = float(egtw_uniform_mix)
+        self.egtw_detach_masses = bool(egtw_detach_masses)
         self.egtw_learn_tau = bool(egtw_learn_tau)
         self.egtw_learn_lambda = bool(egtw_learn_lambda)
         self.min_mass = float(min_mass)
@@ -464,6 +480,10 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_egtw_lambda is not None:
             return F.softplus(self.raw_egtw_lambda)
         return self.curvature.new_tensor(self.default_egtw_lambda)
+
+    @property
+    def egtw_attention_temperature(self) -> torch.Tensor:
+        return self.curvature.new_tensor(self.default_egtw_attention_temperature)
 
     @property
     def tau_token(self) -> torch.Tensor:
@@ -1396,15 +1416,20 @@ class HROTFSL(BaseConv64FewShotModel):
         calc_dtype = torch.float64 if (self.eval_use_float64 and not self.training) else query_tokens.dtype
         query_cast = query_tokens.to(dtype=calc_dtype)
         support_cast = support_tokens.to(dtype=calc_dtype)
-        scale = math.sqrt(float(embed_dim))
         tau = self.egtw_tau.to(device=query_cast.device, dtype=query_cast.dtype).clamp_min(float(self.egtw_eps))
         discriminative_weight = self.egtw_lambda.to(device=query_cast.device, dtype=query_cast.dtype)
+        attention_temperature = self.egtw_attention_temperature.to(
+            device=query_cast.device,
+            dtype=query_cast.dtype,
+        ).clamp_min(float(self.egtw_eps))
+        support_similarity_weight = query_cast.new_tensor(self.egtw_support_similarity_weight)
+        uniform_mix = query_cast.new_tensor(self.egtw_uniform_mix)
         rho0 = query_cast.new_tensor(self.fixed_mass)
         log_eps = float(self.egtw_eps)
 
         all_support = support_cast.reshape(way_num * shot_num * support_len, embed_dim)
-        sim_q = torch.matmul(query_cast, all_support.transpose(0, 1)) / scale
-        attn_q = torch.softmax(sim_q, dim=-1)
+        sim_q = torch.matmul(query_cast, all_support.transpose(0, 1))
+        attn_q = torch.softmax(sim_q / attention_temperature, dim=-1)
         attn_q_blocks = attn_q.reshape(num_query, query_len, way_num, shot_num, support_len)
         class_attention = attn_q_blocks.sum(dim=(-1, -2))
         log_class_attention = torch.log(class_attention.clamp_min(log_eps))
@@ -1413,10 +1438,23 @@ class HROTFSL(BaseConv64FewShotModel):
         query_importance = log_class_attention + discriminative_weight * class_confidence.unsqueeze(-1)
         query_mass = torch.softmax(query_importance.transpose(1, 2) / tau, dim=-1) * rho0
 
-        sim_s = torch.einsum("wkld,ntd->nwklt", support_cast, query_cast) / scale
-        attn_s = torch.softmax(sim_s, dim=-1)
+        sim_s = torch.einsum("wkld,ntd->nwklt", support_cast, query_cast)
+        attn_s = torch.softmax(sim_s / attention_temperature, dim=-1)
         support_entropy = -(attn_s * torch.log(attn_s.clamp_min(log_eps))).sum(dim=-1)
-        support_mass = torch.softmax(-support_entropy / tau, dim=-1) * rho0
+        support_confidence = math.log(float(query_len)) - support_entropy
+        support_relevance = sim_s.max(dim=-1).values
+        support_importance = support_similarity_weight * support_relevance + discriminative_weight * support_confidence
+        support_mass = torch.softmax(support_importance / tau, dim=-1) * rho0
+
+        if self.egtw_uniform_mix > 0.0:
+            query_uniform = query_mass.new_full(query_mass.shape, self.fixed_mass / float(query_len))
+            support_uniform = support_mass.new_full(support_mass.shape, self.fixed_mass / float(support_len))
+            query_mass = (1.0 - uniform_mix) * query_mass + uniform_mix * query_uniform
+            support_mass = (1.0 - uniform_mix) * support_mass + uniform_mix * support_uniform
+
+        if self.egtw_detach_masses:
+            query_mass = query_mass.detach()
+            support_mass = support_mass.detach()
 
         if __debug__:
             expected_query_mass = query_mass.new_full(query_mass.shape[:-1], self.fixed_mass)
@@ -1436,6 +1474,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "egtw_class_attention": class_attention.to(dtype=query_tokens.dtype),
             "egtw_class_entropy": class_entropy.to(dtype=query_tokens.dtype),
             "egtw_support_entropy": support_entropy.to(dtype=support_tokens.dtype),
+            "egtw_support_relevance": support_relevance.to(dtype=support_tokens.dtype),
+            "egtw_support_importance": support_importance.to(dtype=support_tokens.dtype),
         }
         return (
             query_mass.to(dtype=query_tokens.dtype),
@@ -2193,6 +2233,14 @@ class HROTFSL(BaseConv64FewShotModel):
                             device=query_euclidean.device,
                             dtype=query_euclidean.dtype,
                         ),
+                        "egtw_attention_temperature": self.egtw_attention_temperature.detach().to(
+                            device=query_euclidean.device,
+                            dtype=query_euclidean.dtype,
+                        ),
+                        "egtw_support_similarity_weight": query_euclidean.new_tensor(
+                            self.egtw_support_similarity_weight,
+                        ),
+                        "egtw_uniform_mix": query_euclidean.new_tensor(self.egtw_uniform_mix),
                     }
                     transport_probe_payload.update(egtw_diagnostics)
                 elif self.uses_hybrid_ablation_eam:
@@ -2394,6 +2442,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "egtw_class_attention",
             "egtw_class_entropy",
             "egtw_support_entropy",
+            "egtw_support_relevance",
+            "egtw_support_importance",
             "adaptive_threshold",
             "adaptive_transport_cost_threshold",
             "shot_logits",
@@ -2432,6 +2482,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "transport_cost_threshold",
             "egtw_tau",
             "egtw_lambda",
+            "egtw_attention_temperature",
+            "egtw_support_similarity_weight",
+            "egtw_uniform_mix",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

@@ -594,6 +594,12 @@ def test_hrot_fsl_variant_j_egtw_uses_nonuniform_masses_with_j_scoring():
     assert torch.allclose(j_outputs["cost_matrix"], egtw_outputs["cost_matrix"], atol=1e-5, rtol=1e-5)
     assert torch.allclose(egtw_outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
     assert torch.allclose(egtw_outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        egtw_outputs["egtw_attention_temperature"],
+        torch.as_tensor(0.2, dtype=egtw_outputs["egtw_attention_temperature"].dtype),
+        atol=1e-6,
+        rtol=0.0,
+    )
 
     query_mass = egtw_outputs["egtw_query_mass"]
     pair_query_mass = egtw_outputs["query_token_mass"]
@@ -632,8 +638,8 @@ def test_hrot_fsl_variant_j_egtw_uses_nonuniform_masses_with_j_scoring():
         rtol=1e-4,
     )
 
-    synthetic_query = F.normalize(torch.randn(2, 5, 24), p=2, dim=-1)
-    synthetic_support = F.normalize(torch.randn(3, 2, 7, 24), p=2, dim=-1)
+    synthetic_query = F.normalize(torch.randn(2, 5, 24, requires_grad=True), p=2, dim=-1)
+    synthetic_support = F.normalize(torch.randn(3, 2, 7, 24, requires_grad=True), p=2, dim=-1)
     synthetic_query_mass, synthetic_support_mass, _ = egtw_model._compute_egtw_token_marginals(
         synthetic_query,
         synthetic_support,
@@ -656,6 +662,8 @@ def test_hrot_fsl_variant_j_egtw_uses_nonuniform_masses_with_j_scoring():
         atol=1e-6,
         rtol=0.0,
     )
+    assert not synthetic_query_mass.requires_grad
+    assert not synthetic_support_mass.requires_grad
     assert not torch.allclose(j_outputs["logits"], egtw_outputs["logits"], atol=1e-6, rtol=1e-5)
 
 

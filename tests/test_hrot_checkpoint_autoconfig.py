@@ -51,6 +51,10 @@ def test_hrot_variant_cli_accepts_j_egtw(monkeypatch):
             "0.7",
             "--hrot_egtw_lambda",
             "1.3",
+            "--hrot_egtw_attention_temperature",
+            "0.2",
+            "--hrot_egtw_uniform_mix",
+            "0.1",
         ],
     )
 
@@ -59,6 +63,8 @@ def test_hrot_variant_cli_accepts_j_egtw(monkeypatch):
     assert args.hrot_variant == "J_EGTW"
     assert args.hrot_egtw_tau == 0.7
     assert args.hrot_egtw_lambda == 1.3
+    assert args.hrot_egtw_attention_temperature == 0.2
+    assert args.hrot_egtw_uniform_mix == 0.1
 
 
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
@@ -91,6 +97,8 @@ def test_infer_hrot_variant_normalizes_j_egtw_checkpoint_args():
         "hrot_variant": "J_EGTW",
         "hrot_egtw_tau": 0.7,
         "hrot_egtw_lambda": 1.3,
+        "hrot_egtw_attention_temperature": 0.2,
+        "hrot_egtw_detach_masses": "true",
     }
 
     overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
@@ -99,6 +107,8 @@ def test_infer_hrot_variant_normalizes_j_egtw_checkpoint_args():
     assert overrides["hrot_variant"] == "JE"
     assert overrides["hrot_egtw_tau"] == 0.7
     assert overrides["hrot_egtw_lambda"] == 1.3
+    assert overrides["hrot_egtw_attention_temperature"] == 0.2
+    assert overrides["hrot_egtw_detach_masses"] == "true"
 
 
 def test_infer_hrot_arch_overrides_recovers_variant_and_token_shape():
