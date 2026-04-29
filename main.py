@@ -880,6 +880,8 @@ def get_args():
             "H",
             "I",
             "J",
+            "J_EGTW",
+            "JE",
             "K",
             "L",
             "M",
@@ -911,6 +913,11 @@ def get_args():
     )
     parser.add_argument("--hrot_sinkhorn_tolerance", type=float, default=1e-5)
     parser.add_argument("--hrot_fixed_mass", type=float, default=0.8)
+    parser.add_argument("--hrot_egtw_tau", type=float, default=1.0)
+    parser.add_argument("--hrot_egtw_lambda", type=float, default=1.0)
+    parser.add_argument("--hrot_egtw_eps", type=float, default=1e-8)
+    parser.add_argument("--hrot_egtw_learn_tau", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--hrot_egtw_learn_lambda", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_min_mass", type=float, default=0.1)
     parser.add_argument("--hrot_mass_bonus_init", type=float, default=1.0)
     parser.add_argument("--hrot_transport_cost_threshold_init", type=float, default=None)
@@ -1921,6 +1928,8 @@ def get_model(args):
             f"hyp_backend={getattr(args, 'hrot_hyperbolic_backend', 'auto')}, "
             f"ot_backend={getattr(args, 'hrot_ot_backend', 'native')}, "
             f"fixed_mass={getattr(args, 'hrot_fixed_mass', 0.8)}, "
+            f"egtw_tau={getattr(args, 'hrot_egtw_tau', 1.0)}, "
+            f"egtw_lambda={getattr(args, 'hrot_egtw_lambda', 1.0)}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
@@ -2103,6 +2112,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
         normalized = str(checkpoint_variant).strip().upper().replace("-", "").replace("_", "")
         if normalized == "RL":
             normalized = "T"
+        if normalized in {"JEGTW", "JE"}:
+            normalized = "JE"
         if normalized in {
             "A",
             "B",
@@ -2114,6 +2125,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "H",
             "I",
             "J",
+            "JE",
             "K",
             "L",
             "M",
@@ -2144,6 +2156,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
 
     if "w_q" in keys or "raw_tau_token" in keys:
         return "V"
+    if "raw_egtw_tau" in keys or "raw_egtw_lambda" in keys:
+        return "JE"
     if has_param("q_eam"):
         if "raw_structure_cost_weight" in keys:
             if "raw_transport_cost_threshold" in keys:
@@ -2175,6 +2189,15 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
     variant = infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
     if variant is not None:
         overrides["hrot_variant"] = variant
+        for egtw_key in (
+            "hrot_egtw_tau",
+            "hrot_egtw_lambda",
+            "hrot_egtw_eps",
+            "hrot_egtw_learn_tau",
+            "hrot_egtw_learn_lambda",
+        ):
+            if checkpoint_args.get(egtw_key) is not None:
+                overrides[egtw_key] = checkpoint_args[egtw_key]
         if checkpoint_args.get("hrot_eam_mode") is not None:
             overrides["hrot_eam_mode"] = str(checkpoint_args["hrot_eam_mode"]).strip().lower().replace("-", "_")
         elif variant == "H":

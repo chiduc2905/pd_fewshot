@@ -64,6 +64,8 @@ def _normalize_hrot_variant_name(variant: str) -> str:
     normalized = str(variant).strip().upper().replace("-", "").replace("_", "")
     if normalized in {"RL", "RLITE"}:
         return "T"
+    if normalized in {"JEGTW", "JE"}:
+        return "JE"
     return normalized
 
 
@@ -84,7 +86,7 @@ def _normalize_hrot_ground_cost(ground_cost: str) -> str:
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-V."""
+    """Vectorized HROT few-shot model with ablation variants A-V and JE."""
 
     def __init__(
         self,
@@ -108,6 +110,11 @@ class HROTFSL(BaseConv64FewShotModel):
         sinkhorn_iterations: int = 60,
         sinkhorn_tolerance: float = 1e-5,
         fixed_mass: float = 0.8,
+        egtw_tau: float = 1.0,
+        egtw_lambda: float = 1.0,
+        egtw_eps: float = 1e-8,
+        egtw_learn_tau: bool = False,
+        egtw_learn_lambda: bool = False,
         min_mass: float = 0.1,
         mass_bonus_init: float = 1.0,
         transport_cost_threshold_init: float | None = None,
@@ -138,7 +145,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -155,6 +162,12 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("sinkhorn_iterations must be positive")
         if not 0.0 < fixed_mass <= 1.0:
             raise ValueError("fixed_mass must be in (0, 1]")
+        if egtw_tau <= 0.0:
+            raise ValueError("egtw_tau must be positive")
+        if egtw_lambda < 0.0:
+            raise ValueError("egtw_lambda must be non-negative")
+        if egtw_eps <= 0.0:
+            raise ValueError("egtw_eps must be positive")
         if lambda_rho_rank < 0.0:
             raise ValueError("lambda_rho_rank must be non-negative")
         if rho_rank_margin < 0.0:
@@ -169,16 +182,17 @@ class HROTFSL(BaseConv64FewShotModel):
 
         self.variant = variant
         self.uses_hrot_v = variant == "V"
+        self.uses_egtw_mass = variant == "JE"
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
@@ -215,6 +229,11 @@ class HROTFSL(BaseConv64FewShotModel):
         self.sinkhorn_iterations = int(sinkhorn_iterations)
         self.sinkhorn_tolerance = float(sinkhorn_tolerance)
         self.fixed_mass = float(fixed_mass)
+        self.default_egtw_tau = float(egtw_tau)
+        self.default_egtw_lambda = float(egtw_lambda)
+        self.egtw_eps = float(egtw_eps)
+        self.egtw_learn_tau = bool(egtw_learn_tau)
+        self.egtw_learn_lambda = bool(egtw_learn_lambda)
         self.min_mass = float(min_mass)
         self.lambda_rho = float(lambda_rho)
         self.rho_target = float(rho_target)
@@ -288,6 +307,16 @@ class HROTFSL(BaseConv64FewShotModel):
         self.raw_token_temperature = (
             nn.Parameter(torch.tensor(_inverse_softplus(float(token_temperature)), dtype=torch.float32))
             if self.uses_hyperbolic_token_attention or self.uses_noise_calibrated_transport
+            else None
+        )
+        self.raw_egtw_tau = (
+            nn.Parameter(torch.tensor(_inverse_softplus(float(egtw_tau)), dtype=torch.float32))
+            if self.uses_egtw_mass and self.egtw_learn_tau
+            else None
+        )
+        self.raw_egtw_lambda = (
+            nn.Parameter(torch.tensor(_inverse_softplus(max(float(egtw_lambda), float(egtw_eps))), dtype=torch.float32))
+            if self.uses_egtw_mass and self.egtw_learn_lambda
             else None
         )
         if self.uses_noise_calibrated_transport:
@@ -423,6 +452,18 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_token_temperature is not None:
             return F.softplus(self.raw_token_temperature).clamp_min(self.eps)
         return self.curvature.new_tensor(self.default_token_temperature)
+
+    @property
+    def egtw_tau(self) -> torch.Tensor:
+        if self.raw_egtw_tau is not None:
+            return F.softplus(self.raw_egtw_tau) + self.egtw_eps
+        return self.curvature.new_tensor(self.default_egtw_tau)
+
+    @property
+    def egtw_lambda(self) -> torch.Tensor:
+        if self.raw_egtw_lambda is not None:
+            return F.softplus(self.raw_egtw_lambda)
+        return self.curvature.new_tensor(self.default_egtw_lambda)
 
     @property
     def tau_token(self) -> torch.Tensor:
@@ -1337,6 +1378,71 @@ class HROTFSL(BaseConv64FewShotModel):
             shot_coverage_ratio,
         )
 
+    def _compute_egtw_token_marginals(
+        self,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        if query_tokens.dim() != 3 or support_tokens.dim() != 4:
+            raise ValueError(
+                "EGTW token marginals expect query/support tokens shaped "
+                "(NumQuery, QueryTokens, Dim) and (Way, Shot, SupportTokens, Dim)"
+            )
+        num_query, query_len, embed_dim = query_tokens.shape
+        way_num, shot_num, support_len, support_dim = support_tokens.shape
+        if support_dim != embed_dim:
+            raise ValueError(f"Query/support token dims must match, got {embed_dim} vs {support_dim}")
+
+        calc_dtype = torch.float64 if (self.eval_use_float64 and not self.training) else query_tokens.dtype
+        query_cast = query_tokens.to(dtype=calc_dtype)
+        support_cast = support_tokens.to(dtype=calc_dtype)
+        scale = math.sqrt(float(embed_dim))
+        tau = self.egtw_tau.to(device=query_cast.device, dtype=query_cast.dtype).clamp_min(float(self.egtw_eps))
+        discriminative_weight = self.egtw_lambda.to(device=query_cast.device, dtype=query_cast.dtype)
+        rho0 = query_cast.new_tensor(self.fixed_mass)
+        log_eps = float(self.egtw_eps)
+
+        all_support = support_cast.reshape(way_num * shot_num * support_len, embed_dim)
+        sim_q = torch.matmul(query_cast, all_support.transpose(0, 1)) / scale
+        attn_q = torch.softmax(sim_q, dim=-1)
+        attn_q_blocks = attn_q.reshape(num_query, query_len, way_num, shot_num, support_len)
+        class_attention = attn_q_blocks.sum(dim=(-1, -2))
+        log_class_attention = torch.log(class_attention.clamp_min(log_eps))
+        class_entropy = -(class_attention * log_class_attention).sum(dim=-1)
+        class_confidence = math.log(float(way_num)) - class_entropy
+        query_importance = log_class_attention + discriminative_weight * class_confidence.unsqueeze(-1)
+        query_mass = torch.softmax(query_importance.transpose(1, 2) / tau, dim=-1) * rho0
+
+        sim_s = torch.einsum("wkld,ntd->nwklt", support_cast, query_cast) / scale
+        attn_s = torch.softmax(sim_s, dim=-1)
+        support_entropy = -(attn_s * torch.log(attn_s.clamp_min(log_eps))).sum(dim=-1)
+        support_mass = torch.softmax(-support_entropy / tau, dim=-1) * rho0
+
+        if __debug__:
+            expected_query_mass = query_mass.new_full(query_mass.shape[:-1], self.fixed_mass)
+            expected_support_mass = support_mass.new_full(support_mass.shape[:-1], self.fixed_mass)
+            torch._assert(torch.isfinite(query_mass).all(), "EGTW query masses contain non-finite values")
+            torch._assert(torch.isfinite(support_mass).all(), "EGTW support masses contain non-finite values")
+            torch._assert(
+                torch.isclose(query_mass.sum(dim=-1), expected_query_mass, atol=1e-5, rtol=1e-4).all(),
+                "EGTW query masses must sum to the fixed mass budget",
+            )
+            torch._assert(
+                torch.isclose(support_mass.sum(dim=-1), expected_support_mass, atol=1e-5, rtol=1e-4).all(),
+                "EGTW support masses must sum to the fixed mass budget",
+            )
+
+        diagnostics = {
+            "egtw_class_attention": class_attention.to(dtype=query_tokens.dtype),
+            "egtw_class_entropy": class_entropy.to(dtype=query_tokens.dtype),
+            "egtw_support_entropy": support_entropy.to(dtype=support_tokens.dtype),
+        }
+        return (
+            query_mass.to(dtype=query_tokens.dtype),
+            support_mass.to(dtype=support_tokens.dtype),
+            diagnostics,
+        )
+
     def _compute_hyperbolic_token_marginals(
         self,
         query_tokens_hyp: torch.Tensor,
@@ -2048,7 +2154,48 @@ class HROTFSL(BaseConv64FewShotModel):
                     )
             else:
                 flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
-                if self.uses_hybrid_ablation_eam:
+                transport_match_kwargs = {}
+                if self.uses_egtw_mass:
+                    egtw_query_mass, egtw_support_mass, egtw_diagnostics = self._compute_egtw_token_marginals(
+                        query_euclidean,
+                        support_euclidean,
+                    )
+                    shot_rho = query_euclidean.new_full((query.shape[0], way_num, shot_num), self.fixed_mass)
+                    flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+                    flat_query_mass = (
+                        egtw_query_mass[:, :, None, :]
+                        .expand(-1, -1, shot_num, -1)
+                        .reshape(query.shape[0], way_num * shot_num, query_euclidean.shape[-2])
+                    )
+                    flat_support_mass = egtw_support_mass.reshape(
+                        query.shape[0],
+                        way_num * shot_num,
+                        support_euclidean.shape[-2],
+                    )
+                    transport_match_kwargs = {
+                        "a": flat_query_mass,
+                        "b": flat_support_mass,
+                    }
+                    transport_probe_payload = {
+                        "egtw_query_mass": egtw_query_mass,
+                        "query_token_mass": flat_query_mass.reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            flat_query_mass.shape[-1],
+                        ),
+                        "support_token_mass": egtw_support_mass,
+                        "egtw_tau": self.egtw_tau.detach().to(
+                            device=query_euclidean.device,
+                            dtype=query_euclidean.dtype,
+                        ),
+                        "egtw_lambda": self.egtw_lambda.detach().to(
+                            device=query_euclidean.device,
+                            dtype=query_euclidean.dtype,
+                        ),
+                    }
+                    transport_probe_payload.update(egtw_diagnostics)
+                elif self.uses_hybrid_ablation_eam:
                     shot_rho = self._build_hybrid_rho_per_shot(
                         query_hyperbolic,
                         support_hyperbolic,
@@ -2080,7 +2227,11 @@ class HROTFSL(BaseConv64FewShotModel):
                     flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
                 else:
                     flat_rho = self._build_pairwise_rho(query_hyperbolic, flat_support_hyperbolic)
-                flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match(flat_cost, flat_rho)
+                flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match(
+                    flat_cost,
+                    flat_rho,
+                    **transport_match_kwargs,
+                )
 
                 shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
                 shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
@@ -2090,16 +2241,20 @@ class HROTFSL(BaseConv64FewShotModel):
                 if self.uses_unbalanced_transport:
                     shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
 
-                if self.variant == "J":
+                if self.variant in {"J", "JE"}:
                     logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
                         shot_logits,
                         shot_transport_cost,
                         shot_transport_mass,
                     )
-                    transport_probe_payload = {
+                    j_transport_payload = {
                         "shot_logits": shot_logits,
                         "shot_pool_weights": shot_pool_weights,
                     }
+                    if transport_probe_payload is None:
+                        transport_probe_payload = j_transport_payload
+                    else:
+                        transport_probe_payload.update(j_transport_payload)
                 else:
                     logits = shot_logits.mean(dim=-1)
                     transport_cost = shot_transport_cost.mean(dim=-1)
@@ -2235,6 +2390,10 @@ class HROTFSL(BaseConv64FewShotModel):
             "support_consensus",
             "query_hyperbolic_token_prior",
             "support_hyperbolic_token_prior",
+            "egtw_query_mass",
+            "egtw_class_attention",
+            "egtw_class_entropy",
+            "egtw_support_entropy",
             "adaptive_threshold",
             "adaptive_transport_cost_threshold",
             "shot_logits",
@@ -2271,6 +2430,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "structure_cost_weight",
             "mass_bonus",
             "transport_cost_threshold",
+            "egtw_tau",
+            "egtw_lambda",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

@@ -38,6 +38,29 @@ def test_hrot_eam_mode_cli_accepts_legacy(monkeypatch):
     assert args.hrot_eam_mode == "legacy"
 
 
+def test_hrot_variant_cli_accepts_j_egtw(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "hrot_fsl",
+            "--hrot_variant",
+            "J_EGTW",
+            "--hrot_egtw_tau",
+            "0.7",
+            "--hrot_egtw_lambda",
+            "1.3",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.hrot_variant == "J_EGTW"
+    assert args.hrot_egtw_tau == 0.7
+    assert args.hrot_egtw_lambda == 1.3
+
+
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),
@@ -56,6 +79,26 @@ def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     }
 
     assert infer_hrot_variant_from_state_dict(state_dict) == "R"
+
+
+def test_infer_hrot_variant_normalizes_j_egtw_checkpoint_args():
+    state_dict = {
+        "raw_transport_cost_threshold": torch.tensor(0.0),
+        "eam.network.0.weight": torch.randn(256, 259),
+        "eam.network.0.bias": torch.randn(256),
+    }
+    checkpoint_args = {
+        "hrot_variant": "J_EGTW",
+        "hrot_egtw_tau": 0.7,
+        "hrot_egtw_lambda": 1.3,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+
+    assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "JE"
+    assert overrides["hrot_variant"] == "JE"
+    assert overrides["hrot_egtw_tau"] == 0.7
+    assert overrides["hrot_egtw_lambda"] == 1.3
 
 
 def test_infer_hrot_arch_overrides_recovers_variant_and_token_shape():

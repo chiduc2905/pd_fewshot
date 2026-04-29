@@ -141,7 +141,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -160,7 +160,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["transported_mass"].shape == (2, 3)
     if variant == "V":
         assert outputs["rho"].shape == (2, 6)
-    elif variant in {"G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    elif variant in {"G", "H", "I", "J", "JE", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -455,6 +455,7 @@ def test_hrot_fsl_variant_h_backpropagates_cost_threshold_and_geodesic_eam():
     [
         ("I", 4, True, False, True, True),
         ("J", None, False, False, True, False),
+        ("JE", None, False, False, True, False),
         ("K", 4, False, True, False, True),
         ("L", 3, False, True, True, True),
     ],
@@ -498,7 +499,7 @@ def test_hrot_fsl_post_h_ablation_variants(
         -model.score_scale * outputs["shot_transport_cost"]
         + reward_weight * outputs["shot_transported_mass"]
     )
-    if variant == "J":
+    if variant in {"J", "JE"}:
         expected_logits = torch.logsumexp(expected_shot_logits, dim=-1) - math.log(
             float(expected_shot_logits.shape[-1])
         )
@@ -542,7 +543,7 @@ def test_hrot_fsl_post_h_ablation_variants(
         assert torch.all(outputs["rho"] >= 0.1)
         assert torch.all(outputs["rho"] <= 1.0)
 
-    if variant == "J":
+    if variant in {"J", "JE"}:
         assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
         assert torch.allclose(outputs["shot_pool_weights"], expected_transport_weights, atol=1e-5, rtol=1e-5)
         assert torch.allclose(outputs["transport_cost"], expected_transport_cost, atol=1e-5, rtol=1e-5)
@@ -553,6 +554,109 @@ def test_hrot_fsl_post_h_ablation_variants(
             atol=1e-6,
             rtol=0.0,
         )
+
+
+def test_hrot_fsl_variant_j_egtw_uses_nonuniform_masses_with_j_scoring():
+    torch.manual_seed(39)
+    j_model = _build_model(variant="J")
+    egtw_model = _build_model(variant="J_EGTW")
+    egtw_model.load_state_dict(j_model.state_dict(), strict=True)
+    j_model.eval()
+    egtw_model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        j_outputs = j_model(query, support, return_aux=True)
+        egtw_outputs = egtw_model(query, support, return_aux=True)
+
+    assert egtw_model.variant == "JE"
+    assert egtw_outputs["logits"].shape == j_outputs["logits"].shape == (2, 3)
+    assert egtw_outputs["shot_logits"].shape == (2, 3, 2)
+    assert egtw_outputs["transport_plan"].shape == egtw_outputs["cost_matrix"].shape
+    assert torch.isfinite(egtw_outputs["logits"]).all()
+    assert torch.isfinite(egtw_outputs["transport_plan"]).all()
+
+    flat_support = egtw_outputs["support_euclidean_tokens"].squeeze(0).reshape(6, -1, 24)
+    expected_cost = egtw_model._euclidean_cost(egtw_outputs["query_euclidean_tokens"], flat_support)
+    expected_cost = expected_cost.reshape(2, 3, 2, expected_cost.shape[-2], expected_cost.shape[-1])
+    reward_weight = (egtw_model.score_scale * egtw_model.transport_cost_threshold.detach()).to(
+        dtype=egtw_outputs["shot_transported_mass"].dtype
+    )
+    expected_shot_logits = (
+        -egtw_model.score_scale * egtw_outputs["shot_transport_cost"]
+        + reward_weight * egtw_outputs["shot_transported_mass"]
+    )
+    expected_logits = torch.logsumexp(expected_shot_logits, dim=-1) - math.log(2.0)
+
+    assert torch.allclose(egtw_outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(j_outputs["cost_matrix"], egtw_outputs["cost_matrix"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(egtw_outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(egtw_outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
+
+    query_mass = egtw_outputs["egtw_query_mass"]
+    pair_query_mass = egtw_outputs["query_token_mass"]
+    support_mass = egtw_outputs["support_token_mass"]
+    assert query_mass.shape == (2, 3, egtw_outputs["cost_matrix"].shape[-2])
+    assert pair_query_mass.shape == (2, 3, 2, egtw_outputs["cost_matrix"].shape[-2])
+    assert support_mass.shape == (2, 3, 2, egtw_outputs["cost_matrix"].shape[-1])
+    assert torch.allclose(
+        pair_query_mass,
+        query_mass[:, :, None, :].expand_as(pair_query_mass),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert torch.allclose(
+        query_mass.sum(dim=-1),
+        torch.full_like(query_mass[..., 0], egtw_model.fixed_mass),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert torch.allclose(
+        support_mass.sum(dim=-1),
+        torch.full_like(support_mass[..., 0], egtw_model.fixed_mass),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert torch.allclose(
+        egtw_outputs["egtw_class_attention"].sum(dim=-1),
+        torch.ones_like(egtw_outputs["egtw_class_entropy"]),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert not torch.allclose(
+        query_mass,
+        torch.full_like(query_mass, egtw_model.fixed_mass / float(query_mass.shape[-1])),
+        atol=1e-5,
+        rtol=1e-4,
+    )
+
+    synthetic_query = F.normalize(torch.randn(2, 5, 24), p=2, dim=-1)
+    synthetic_support = F.normalize(torch.randn(3, 2, 7, 24), p=2, dim=-1)
+    synthetic_query_mass, synthetic_support_mass, _ = egtw_model._compute_egtw_token_marginals(
+        synthetic_query,
+        synthetic_support,
+    )
+    assert not torch.allclose(
+        synthetic_support_mass,
+        torch.full_like(synthetic_support_mass, egtw_model.fixed_mass / float(synthetic_support_mass.shape[-1])),
+        atol=1e-5,
+        rtol=1e-4,
+    )
+    assert torch.allclose(
+        synthetic_query_mass.sum(dim=-1),
+        torch.full_like(synthetic_query_mass[..., 0], egtw_model.fixed_mass),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert torch.allclose(
+        synthetic_support_mass.sum(dim=-1),
+        torch.full_like(synthetic_support_mass[..., 0], egtw_model.fixed_mass),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert not torch.allclose(j_outputs["logits"], egtw_outputs["logits"], atol=1e-6, rtol=1e-5)
 
 
 def test_hrot_fsl_variant_i_euclidean_eam_features_match_l2_summary():
