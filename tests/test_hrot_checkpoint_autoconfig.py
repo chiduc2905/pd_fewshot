@@ -67,7 +67,7 @@ def test_hrot_variant_cli_accepts_j_egtw(monkeypatch):
     assert args.hrot_egtw_uniform_mix == 0.1
 
 
-def test_hrot_variant_cli_accepts_j_hlm(monkeypatch):
+def test_hrot_variant_cli_accepts_j_ecot(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -75,22 +75,22 @@ def test_hrot_variant_cli_accepts_j_hlm(monkeypatch):
             "--model",
             "hrot_fsl",
             "--hrot_variant",
-            "J_HLM",
-            "--hrot_hlm_budget_mode",
-            "hybrid",
-            "--hrot_hlm_token_mode",
-            "hybrid",
-            "--hrot_hlm_token_tau",
-            "0.35",
+            "J_ECOT",
+            "--hrot_ecot_rho_bank",
+            "0.45,0.80",
+            "--hrot_ecot_lambda_init",
+            "-12.0",
+            "--hrot_ecot_controller_hidden",
+            "16",
         ],
     )
 
     args = get_args()
 
-    assert args.hrot_variant == "J_HLM"
-    assert args.hrot_hlm_budget_mode == "hybrid"
-    assert args.hrot_hlm_token_mode == "hybrid"
-    assert args.hrot_hlm_token_tau == 0.35
+    assert args.hrot_variant == "J_ECOT"
+    assert args.hrot_ecot_rho_bank == "0.45,0.80"
+    assert args.hrot_ecot_lambda_init == -12.0
+    assert args.hrot_ecot_controller_hidden == 16
 
 
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
@@ -137,7 +137,7 @@ def test_infer_hrot_variant_normalizes_j_egtw_checkpoint_args():
     assert overrides["hrot_egtw_detach_masses"] == "true"
 
 
-def test_infer_hrot_variant_detects_j_hlm_state():
+def test_infer_hrot_variant_maps_old_j_hlm_state_to_j_ecot():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),
         "hierarchical_transport_mass.budget_mlp.0.weight": torch.randn(64, 9),
@@ -153,12 +153,12 @@ def test_infer_hrot_variant_detects_j_hlm_state():
 
     overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
 
-    assert infer_hrot_variant_from_state_dict(state_dict) == "J_HLM"
-    assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "J_HLM"
-    assert overrides["hrot_variant"] == "J_HLM"
-    assert overrides["hrot_hlm_budget_mode"] == "cost"
-    assert overrides["hrot_hlm_token_mode"] == "cost"
-    assert overrides["hrot_hlm_token_tau"] == 0.25
+    assert infer_hrot_variant_from_state_dict(state_dict) == "J_ECOT"
+    assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "J_ECOT"
+    assert overrides["hrot_variant"] == "J_ECOT"
+    assert "hrot_hlm_budget_mode" not in overrides
+    assert "hrot_hlm_token_mode" not in overrides
+    assert "hrot_hlm_token_tau" not in overrides
 
 
 def test_infer_hrot_arch_overrides_recovers_variant_and_token_shape():

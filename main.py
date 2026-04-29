@@ -882,6 +882,7 @@ def get_args():
             "J",
             "J_EGTW",
             "JE",
+            "J_ECOT",
             "J_HLM",
             "K",
             "L",
@@ -923,6 +924,20 @@ def get_args():
     parser.add_argument("--hrot_egtw_detach_masses", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_tau", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_lambda", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--hrot_ecot_rho_bank", type=str, default="0.45,0.60,0.75,0.80,0.90")
+    parser.add_argument("--hrot_ecot_base_rho", type=float, default=None)
+    parser.add_argument("--hrot_ecot_budget_tau", type=float, default=1.0)
+    parser.add_argument("--hrot_ecot_max_lambda", type=float, default=1.0)
+    parser.add_argument("--hrot_ecot_lambda_init", type=float, default=-8.0)
+    parser.add_argument("--hrot_ecot_controller_hidden", type=int, default=32)
+    parser.add_argument("--hrot_ecot_enable_tau_shot", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--hrot_ecot_tau_shot_min", type=float, default=0.5)
+    parser.add_argument("--hrot_ecot_tau_shot_max", type=float, default=2.0)
+    parser.add_argument("--hrot_ecot_enable_threshold_offset", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--hrot_ecot_identity_reg", type=float, default=1e-4)
+    parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
+    # Deprecated compatibility only: old J_HLM configs may still pass these,
+    # but they no longer activate learned shot or token mass.
     parser.add_argument("--hrot_hlm_min_mass", type=float, default=0.1)
     parser.add_argument("--hrot_hlm_init_mass", type=float, default=0.8)
     parser.add_argument(
@@ -1962,11 +1977,12 @@ def get_model(args):
             f"egtw_support_sim={getattr(args, 'hrot_egtw_support_similarity_weight', 0.5)}, "
             f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
             f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
-            f"hlm_budget={getattr(args, 'hrot_hlm_budget_mode', 'cost')}, "
-            f"hlm_token={getattr(args, 'hrot_hlm_token_mode', 'cost')}, "
-            f"hlm_token_tau={getattr(args, 'hrot_hlm_token_tau', 0.25)}, "
-            f"hlm_min_mass={getattr(args, 'hrot_hlm_min_mass', 0.1)}, "
-            f"hlm_init_mass={getattr(args, 'hrot_hlm_init_mass', 0.8)}, "
+            f"ecot_rho_bank={getattr(args, 'hrot_ecot_rho_bank', '0.45,0.60,0.75,0.80,0.90')}, "
+            f"ecot_base_rho={getattr(args, 'hrot_ecot_base_rho', None)}, "
+            f"ecot_budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
+            f"ecot_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
+            f"ecot_controller_hidden={getattr(args, 'hrot_ecot_controller_hidden', 32)}, "
+            f"ecot_tau_shot={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
@@ -2170,8 +2186,10 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             normalized = "T"
         if normalized in {"JEGTW", "JE"}:
             normalized = "JE"
+        if normalized in {"JECOT", "ECOT"}:
+            normalized = "J_ECOT"
         if normalized in {"JHLM", "JHIERMASS", "JHMASS", "JTAHM"}:
-            normalized = "J_HLM"
+            normalized = "J_ECOT"
         if normalized in {
             "A",
             "B",
@@ -2184,7 +2202,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "I",
             "J",
             "JE",
-            "J_HLM",
+            "J_ECOT",
             "K",
             "L",
             "M",
@@ -2215,8 +2233,10 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
 
     if "w_q" in keys or "raw_tau_token" in keys:
         return "V"
+    if "raw_ecot_lambda" in keys or has_param("episode_controller"):
+        return "J_ECOT"
     if has_param("hierarchical_transport_mass"):
-        return "J_HLM"
+        return "J_ECOT"
     if "raw_egtw_tau" in keys or "raw_egtw_lambda" in keys:
         return "JE"
     if has_param("q_eam"):
@@ -2263,25 +2283,22 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
         ):
             if checkpoint_args.get(egtw_key) is not None:
                 overrides[egtw_key] = checkpoint_args[egtw_key]
-        for hlm_key in (
-            "hrot_hlm_min_mass",
-            "hrot_hlm_init_mass",
-            "hrot_hlm_budget_mode",
-            "hrot_hlm_token_mode",
-            "hrot_hlm_token_tau",
-            "hrot_hlm_budget_hidden_dim",
-            "hrot_hlm_token_hidden_dim",
-            "hrot_hlm_detach_cost_features",
-            "hrot_hlm_allow_mass_grad",
-            "hrot_hlm_lambda_rho",
-            "hrot_hlm_lambda_eff",
-            "hrot_hlm_eff_margin",
-            "hrot_hlm_lambda_shot_cov",
-            "hrot_hlm_shot_entropy_floor",
-            "hrot_hlm_return_diagnostics",
+        for ecot_key in (
+            "hrot_ecot_rho_bank",
+            "hrot_ecot_base_rho",
+            "hrot_ecot_budget_tau",
+            "hrot_ecot_max_lambda",
+            "hrot_ecot_lambda_init",
+            "hrot_ecot_controller_hidden",
+            "hrot_ecot_enable_tau_shot",
+            "hrot_ecot_tau_shot_min",
+            "hrot_ecot_tau_shot_max",
+            "hrot_ecot_enable_threshold_offset",
+            "hrot_ecot_identity_reg",
+            "hrot_ecot_policy_entropy_reg",
         ):
-            if checkpoint_args.get(hlm_key) is not None:
-                overrides[hlm_key] = checkpoint_args[hlm_key]
+            if checkpoint_args.get(ecot_key) is not None:
+                overrides[ecot_key] = checkpoint_args[ecot_key]
         if checkpoint_args.get("hrot_eam_mode") is not None:
             overrides["hrot_eam_mode"] = str(checkpoint_args["hrot_eam_mode"]).strip().lower().replace("-", "_")
         elif variant == "H":
