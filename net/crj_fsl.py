@@ -36,6 +36,10 @@ class CRJFSL(HROTFSL):
     )
     _EPISODE_SCALAR_KEYS = (
         "crj_pool_gamma",
+        "crj_config_pool_gamma",
+        "crj_effective_gamma",
+        "crj_active",
+        "crj_shot_num",
         "crj_variance_penalty",
         "crj_min_shots",
         "crj_trim_fraction",
@@ -142,6 +146,10 @@ class CRJFSL(HROTFSL):
             "crj_vanilla_pool_weights": vanilla_weights,
             "crj_robust_pool_weights": robust_weights,
             "crj_pool_gamma": gamma.detach(),
+            "crj_config_pool_gamma": shot_logits.new_tensor(self.crj_pool_gamma),
+            "crj_effective_gamma": gamma.detach(),
+            "crj_active": (gamma > 0.0).to(dtype=shot_logits.dtype),
+            "crj_shot_num": shot_logits.new_tensor(float(shot_num)),
             "crj_variance_penalty": shot_logits.new_tensor(self.crj_variance_penalty),
             "crj_min_shots": shot_logits.new_tensor(float(self.crj_min_shots)),
             "crj_trim_fraction": shot_logits.new_tensor(self.crj_trim_fraction),

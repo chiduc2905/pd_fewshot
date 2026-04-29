@@ -37,16 +37,7 @@ def cfg():
         lambda_rho=0.01,
         rho_target=0.8,
         normalize_tokens=True,
-        mass_mode="reliability",
-        reliability_mix=0.65,
-        reliability_temperature=0.25,
-        support_mode="shotwise",
-        shot_aggregation="softmin",
-        shot_softmin_beta=8.0,
-        structure_prior_weight=0.12,
-        score_mode="radius_margin",
-        radius_alpha=0.5,
-        radius_floor=0.02,
+        shot_aggregation="j_logmeanexp",
     )
 
 
@@ -189,31 +180,27 @@ class TestFGWUOTModel:
         required_keys = {
             "logits", "aux_loss", "rho", "alpha", "score_scale",
             "transport_cost", "transport_plan", "C_feat", "C_final",
-            "query_class_distance", "transport_radius", "query_token_mass",
-            "support_token_mass", "shot_aggregation_weights",
+            "query_class_distance", "transported_mass", "shot_aggregation_weights",
+            "shot_logits", "shot_pool_weights", "shot_transport_cost",
+            "shot_transported_mass",
         }
         for k in required_keys:
             assert k in aux_dict, f"Missing key in aux_dict: {k}"
 
-    def test_score_matches_configured_distance_rule(self, model):
-        """Verify the configured FGWUOT distance-to-logit rule."""
+    def test_score_is_negative_transport(self, model):
+        """1-shot FGWUOT keeps the pre-refine score_scale * (-transport_cost / rho) rule."""
         q, s, qt, st = make_episode(way=4, shot=1, nq=1)
         with torch.no_grad():
             aux = model(q, s, return_aux=True)
 
-        distance = aux["query_class_distance"]
-        radius = aux["transport_radius"]
+        tc = aux["transport_cost"]          # (NQ, Way)
+        rho = aux["rho"]                    # (NQ, Way)
         ss  = aux["score_scale"]            # scalar
         logits = aux["logits"]              # (NQ, Way)
 
-        if model.score_mode == "negative_distance":
-            expected = ss * (-distance)
-        elif model.score_mode == "radius_margin":
-            expected = ss * (-(distance - radius))
-        else:
-            expected = ss * (-torch.relu(distance - radius))
+        expected = ss * (-tc / rho.clamp_min(1e-8))
         assert torch.allclose(logits, expected, atol=1e-4), \
-            "Logit formula must match configured FGWUOT score_mode"
+            "Logit formula: score_scale * (-transport_cost / rho)"
 
     def test_alpha_zero_matches_uot_only(self, model):
         """Setting alpha=0 should match pure UOT (no structure cost)."""
@@ -281,9 +268,33 @@ class TestFGWUOTModel:
             aux = model(q, s, return_aux=True)
         assert aux["shot_distance"].shape == (2, 4, 5)
         assert aux["shot_aggregation_weights"].shape == (2, 4, 5)
+        assert aux["shot_logits"].shape == (2, 4, 5)
+        assert aux["shot_pool_weights"].shape == (2, 4, 5)
+        assert aux["shot_transport_cost"].shape == (2, 4, 5)
+        assert aux["shot_transported_mass"].shape == (2, 4, 5)
         assert aux["transport_plan"].dim() == 5
+        expected_weights = torch.softmax(aux["shot_logits"], dim=-1)
+        expected_logits = torch.logsumexp(aux["shot_logits"], dim=-1) - math.log(5.0)
         assert torch.allclose(
             aux["shot_aggregation_weights"].sum(dim=-1),
-            torch.ones(2, 4),
+            torch.ones_like(aux["logits"]),
+            atol=1e-5,
+        )
+        assert torch.allclose(aux["shot_pool_weights"], expected_weights, atol=1e-5)
+        assert torch.allclose(aux["shot_aggregation_weights"], expected_weights, atol=1e-5)
+        assert torch.allclose(aux["logits"], expected_logits, atol=1e-5)
+        assert torch.allclose(
+            aux["query_class_distance"],
+            (expected_weights * aux["shot_distance"]).sum(dim=-1),
+            atol=1e-5,
+        )
+        assert torch.allclose(
+            aux["transport_cost"],
+            (expected_weights * aux["shot_transport_cost"]).sum(dim=-1),
+            atol=1e-5,
+        )
+        assert torch.allclose(
+            aux["transported_mass"],
+            (expected_weights * aux["shot_transported_mass"]).sum(dim=-1),
             atol=1e-5,
         )

@@ -977,21 +977,12 @@ def get_args():
     parser.add_argument("--fgwuot_lambda_rho", type=float, default=0.01)
     parser.add_argument("--fgwuot_rho_target", type=float, default=0.8)
     parser.add_argument("--fgwuot_normalize_tokens", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--fgwuot_mass_mode", type=str, default="reliability", choices=["uniform", "reliability"])
-    parser.add_argument("--fgwuot_reliability_mix", type=float, default=0.65)
-    parser.add_argument("--fgwuot_reliability_temperature", type=float, default=0.25)
-    parser.add_argument("--fgwuot_support_mode", type=str, default="shotwise", choices=["concat", "shotwise"])
-    parser.add_argument("--fgwuot_shot_aggregation", type=str, default="softmin", choices=["mean", "softmin"])
-    parser.add_argument("--fgwuot_shot_softmin_beta", type=float, default=8.0)
-    parser.add_argument("--fgwuot_structure_prior_weight", type=float, default=0.12)
     parser.add_argument(
-        "--fgwuot_score_mode",
+        "--fgwuot_shot_aggregation",
         type=str,
-        default="radius_margin",
-        choices=["negative_distance", "radius_margin", "robust_radius"],
+        default="j_logmeanexp",
+        choices=["mean", "j_logmeanexp"],
     )
-    parser.add_argument("--fgwuot_radius_alpha", type=float, default=0.5)
-    parser.add_argument("--fgwuot_radius_floor", type=float, default=0.02)
     parser.add_argument("--fgwuot_eps", type=float, default=1e-8)
     parser.add_argument("--jsc_wdro_token_dim", type=int, default=None)
     parser.add_argument("--jsc_wdro_score_scale", type=float, default=16.0)
@@ -1983,15 +1974,9 @@ def get_model(args):
         )
     if args.model == "fgwuot_fsl":
         print(
-            "  fgwuot_fsl: reliability-weighted FGW-UOT over scalogram spatial tokens -> "
-            "shot-aware robust class scoring "
+            "  fgwuot_fsl: FGW-UOT over spatial tokens -> J-style shot pooling "
             f"(token_dim={getattr(args, 'fgwuot_token_dim', 128)}, "
-            f"mass_mode={getattr(args, 'fgwuot_mass_mode', 'reliability')}, "
-            f"reliability_mix={getattr(args, 'fgwuot_reliability_mix', 0.65)}, "
-            f"support_mode={getattr(args, 'fgwuot_support_mode', 'shotwise')}, "
-            f"shot_agg={getattr(args, 'fgwuot_shot_aggregation', 'softmin')}, "
-            f"structure_prior={getattr(args, 'fgwuot_structure_prior_weight', 0.12)}, "
-            f"score_mode={getattr(args, 'fgwuot_score_mode', 'radius_margin')}, "
+            f"shot_agg={getattr(args, 'fgwuot_shot_aggregation', 'j_logmeanexp')}, "
             f"alpha_init={getattr(args, 'fgwuot_alpha_init', 0.5)}, "
             f"tau={getattr(args, 'fgwuot_tau', 0.5)}, "
             f"sinkhorn_eps={getattr(args, 'fgwuot_eps_sinkhorn', 0.1)}, "
@@ -3069,6 +3054,10 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "mean_crj_effective_shots",
         "mean_crj_pool_entropy",
         "crj_pool_gamma",
+        "crj_config_pool_gamma",
+        "crj_effective_gamma",
+        "crj_active",
+        "crj_shot_num",
         "crj_variance_penalty",
         "crj_min_shots",
         "crj_trim_fraction",
@@ -3192,6 +3181,10 @@ def format_diagnostic_summary(metrics):
         "mean_crj_effective_shots",
         "mean_crj_pool_entropy",
         "crj_pool_gamma",
+        "crj_config_pool_gamma",
+        "crj_effective_gamma",
+        "crj_active",
+        "crj_shot_num",
         "crj_variance_penalty",
         "crj_min_shots",
         "mean_budget",
