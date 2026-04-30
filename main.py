@@ -883,6 +883,7 @@ def get_args():
             "J_EGTW",
             "JE",
             "J_ECOT",
+            "CP_ECOT",
             "J_HLM",
             "K",
             "L",
@@ -924,7 +925,7 @@ def get_args():
     parser.add_argument("--hrot_egtw_detach_masses", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_tau", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_lambda", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--hrot_ecot_rho_bank", type=str, default="0.45,0.60,0.75,0.80,0.90")
+    parser.add_argument("--hrot_ecot_rho_bank", type=str, default=None)
     parser.add_argument("--hrot_ecot_base_rho", type=float, default=None)
     parser.add_argument("--hrot_ecot_budget_tau", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_max_lambda", type=float, default=1.0)
@@ -936,6 +937,8 @@ def get_args():
     parser.add_argument("--hrot_ecot_enable_threshold_offset", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_ecot_identity_reg", type=float, default=1e-4)
     parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
+    parser.add_argument("--hrot_ecot_consensus_tau_mode", type=str, default="fixed", choices=["fixed", "sqrt"])
+    parser.add_argument("--hrot_ecot_consensus_tau", type=float, default=1.0)
     # Deprecated compatibility only: old J_HLM configs may still pass these,
     # but they no longer activate learned shot or token mass.
     parser.add_argument("--hrot_hlm_min_mass", type=float, default=0.1)
@@ -1962,10 +1965,14 @@ def get_model(args):
         hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
             getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
         )
+        hrot_variant = getattr(args, "hrot_variant", "E")
+        hrot_ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
+        if hrot_ecot_rho_bank is None:
+            hrot_ecot_rho_bank = "0.50,0.80,0.95" if str(hrot_variant).upper() == "CP_ECOT" else "0.45,0.60,0.75,0.80,0.90"
         print(
             "  hrot_fsl: backbone spatial tokens -> optional Euclidean projector -> "
             "Poincare-ball geometry -> balanced/unbalanced relational transport "
-            f"(variant={getattr(args, 'hrot_variant', 'E')}, "
+            f"(variant={hrot_variant}, "
             f"token_dim={hrot_token_dim}, "
             f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
             f"eam_hidden={getattr(args, 'hrot_eam_hidden_dim', 256)}, "
@@ -1986,12 +1993,14 @@ def get_model(args):
             f"egtw_support_sim={getattr(args, 'hrot_egtw_support_similarity_weight', 0.5)}, "
             f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
             f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
-            f"ecot_rho_bank={getattr(args, 'hrot_ecot_rho_bank', '0.45,0.60,0.75,0.80,0.90')}, "
+            f"ecot_rho_bank={hrot_ecot_rho_bank}, "
             f"ecot_base_rho={getattr(args, 'hrot_ecot_base_rho', None)}, "
             f"ecot_budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
             f"ecot_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
             f"ecot_controller_hidden={getattr(args, 'hrot_ecot_controller_hidden', 32)}, "
             f"ecot_tau_shot={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
+            f"ecot_consensus_tau_mode={getattr(args, 'hrot_ecot_consensus_tau_mode', 'fixed')}, "
+            f"ecot_consensus_tau={getattr(args, 'hrot_ecot_consensus_tau', 1.0)}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
@@ -2197,6 +2206,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             normalized = "JE"
         if normalized in {"JECOT", "ECOT"}:
             normalized = "J_ECOT"
+        if normalized in {"CPECOT"}:
+            normalized = "CP_ECOT"
         if normalized in {"JHLM", "JHIERMASS", "JHMASS", "JTAHM"}:
             normalized = "J_ECOT"
         if normalized in {
@@ -2212,6 +2223,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "J",
             "JE",
             "J_ECOT",
+            "CP_ECOT",
             "K",
             "L",
             "M",
@@ -2305,6 +2317,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_enable_threshold_offset",
             "hrot_ecot_identity_reg",
             "hrot_ecot_policy_entropy_reg",
+            "hrot_ecot_consensus_tau_mode",
+            "hrot_ecot_consensus_tau",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]

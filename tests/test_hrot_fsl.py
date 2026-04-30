@@ -141,7 +141,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -160,7 +160,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["transported_mass"].shape == (2, 3)
     if variant == "V":
         assert outputs["rho"].shape == (2, 6)
-    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -728,6 +728,12 @@ def test_hrot_fsl_variant_j_ecot_shapes_and_policy_outputs():
     assert torch.allclose(outputs["ecot_pi_budget"].sum(), torch.tensor(1.0, dtype=outputs["ecot_pi_budget"].dtype))
     assert outputs["ecot_base_score"].shape == (2, 3, 2)
     assert outputs["ecot_score"].shape == (2, 3, 2)
+    expected_shot_logits = outputs["ecot_base_score"] + outputs["ecot_lambda"] * (
+        outputs["ecot_score"] - outputs["ecot_base_score"]
+    )
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-6, rtol=1e-6)
+    assert "ecot_class_budget_scores" not in outputs
+    assert "ecot_lambda_k" not in outputs
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["shot_logits"]).all()
     assert torch.isfinite(outputs["transport_plan"]).all()
@@ -789,30 +795,104 @@ def test_hrot_fsl_variant_j_ecot_does_not_use_learned_mass_paths():
     assert "support_token_mass" not in outputs
 
 
-def test_hrot_fsl_variant_j_ecot_aux_loss_includes_policy_entropy_regularizer():
+def test_hrot_fsl_variant_cp_ecot_shapes_defaults_and_diagnostics():
     torch.manual_seed(45)
-    model = _build_model(
-        variant="J_ECOT",
-        ecot_identity_reg=0.2,
-        ecot_policy_entropy_reg=0.03,
-        lambda_curvature=0.0,
-        lambda_rho=0.0,
-        lambda_rho_rank=0.0,
-    )
-    model.train()
+    model = _build_model(variant="CP_ECOT")
+    model.eval()
 
     query = torch.randn(1, 2, 3, 64, 64)
     support = torch.randn(1, 3, 2, 3, 64, 64)
-    targets = torch.tensor([1, 0], dtype=torch.long)
 
-    outputs = model(query, support, query_targets=targets, return_aux=True)
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
 
-    expected_policy_loss = -model.ecot_policy_entropy_reg * outputs["ecot_policy_entropy"]
-    expected_ecot_aux = model.ecot_identity_reg * outputs["ecot_identity_loss"] + expected_policy_loss
+    budget_count = len(model.ecot_rho_bank)
+    assert model.variant == "CP_ECOT"
+    assert model.uses_ecot
+    assert model.uses_cp_ecot
+    assert tuple(model.ecot_rho_bank) == (0.50, 0.80, 0.95)
+    assert model.ecot_base_rho == 0.80
+    assert abs(model.ecot_rho_bank[model.ecot_base_idx] - 0.80) <= 1e-6
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["shot_logits"].shape == (2, 3, 2)
+    assert outputs["ecot_base_score"].shape == (2, 3, 2)
+    assert torch.allclose(outputs["shot_logits"], outputs["ecot_base_score"], atol=1e-6, rtol=1e-6)
+    assert outputs["ecot_budget_scores"].shape == (2, 3, 2, budget_count)
+    assert outputs["ecot_class_budget_scores"].shape == (2, 3, budget_count)
+    assert outputs["ecot_class_base_score"].shape == (2, 3)
+    assert outputs["ecot_class_mix_score"].shape == (2, 3)
+    assert outputs["ecot_class_budget_transport_cost"].shape == (2, 3, budget_count)
+    assert outputs["ecot_class_budget_transported_mass"].shape == (2, 3, budget_count)
+    assert torch.allclose(outputs["ecot_tau_k"], torch.tensor(1.0, dtype=outputs["ecot_tau_k"].dtype))
+    assert torch.allclose(outputs["ecot_lambda_k"], outputs["ecot_lambda"] / math.sqrt(2.0), atol=1e-6, rtol=1e-6)
+    assert "ecot_tau_shot" not in outputs
+    assert torch.isfinite(outputs["logits"]).all()
 
-    assert torch.allclose(outputs["ecot_policy_entropy_loss"], expected_policy_loss, atol=1e-6, rtol=1e-6)
-    assert torch.allclose(outputs["ecot_aux_loss"], expected_ecot_aux, atol=1e-6, rtol=1e-6)
-    assert torch.allclose(outputs["aux_loss"], expected_ecot_aux, atol=1e-6, rtol=1e-6)
+
+def test_hrot_fsl_variant_cp_ecot_k1_matches_j_ecot_with_same_bank():
+    torch.manual_seed(46)
+    j_model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.50,0.80,0.95",
+        ecot_base_rho=0.80,
+    )
+    cp_model = _build_model(variant="CP_ECOT")
+    cp_model.load_state_dict(j_model.state_dict())
+    j_model.eval()
+    cp_model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        j_outputs = j_model(query, support, return_aux=True)
+        cp_outputs = cp_model(query, support, return_aux=True)
+
+    assert torch.allclose(
+        cp_outputs["ecot_class_budget_scores"],
+        cp_outputs["ecot_budget_scores"].squeeze(-2),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(cp_outputs["logits"], j_outputs["logits"], atol=1e-5, rtol=1e-5)
+
+
+def test_hrot_fsl_variant_cp_ecot_lambda_identity_matches_base_budget():
+    torch.manual_seed(47)
+    model = _build_model(variant="CP_ECOT", ecot_lambda_init=-30.0)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert torch.allclose(outputs["logits"], outputs["ecot_class_base_score"], atol=1e-5, rtol=1e-5)
+
+
+def test_hrot_fsl_variant_cp_ecot_base_policy_matches_base_budget():
+    torch.manual_seed(48)
+    model = _build_model(variant="CP_ECOT", ecot_lambda_init=30.0)
+    model.eval()
+
+    def base_only_controller(diagnostics):
+        logits = diagnostics.new_full((len(model.ecot_rho_bank),), -80.0)
+        logits[model.ecot_base_idx] = 80.0
+        return {
+            "budget_logits": logits,
+            "raw_tau_shot": diagnostics.new_tensor(0.0),
+        }
+
+    model.episode_controller.forward = base_only_controller
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert torch.allclose(outputs["logits"], outputs["ecot_class_base_score"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["ecot_class_mix_score"], outputs["ecot_class_base_score"], atol=1e-5, rtol=1e-5)
 
 
 def test_hrot_fsl_variant_j_ecot_backpropagates_controller_lambda_and_threshold():
@@ -1781,7 +1861,7 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     assert model.ground_cost == "cosine"
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "CP_ECOT", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",

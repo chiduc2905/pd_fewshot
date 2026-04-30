@@ -360,7 +360,7 @@ MODEL_REGISTRY = {
     "hrot_fsl": {
         "display_name": "HROT-FSL / Episode-Conditioned Optimal Transport J-FSL",
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
-        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT fixed-budget episode controller support",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT and CP_ECOT fixed-budget episode controller support",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "crj_fsl": {
@@ -2243,7 +2243,7 @@ def build_model_from_args(args):
             egtw_detach_masses=_bool_flag(getattr(args, "hrot_egtw_detach_masses", "true"), default=True),
             egtw_learn_tau=_bool_flag(getattr(args, "hrot_egtw_learn_tau", "false"), default=False),
             egtw_learn_lambda=_bool_flag(getattr(args, "hrot_egtw_learn_lambda", "false"), default=False),
-            ecot_rho_bank=getattr(args, "hrot_ecot_rho_bank", "0.45,0.60,0.75,0.80,0.90"),
+            ecot_rho_bank=getattr(args, "hrot_ecot_rho_bank", None),
             ecot_base_rho=getattr(args, "hrot_ecot_base_rho", None),
             ecot_budget_tau=float(getattr(args, "hrot_ecot_budget_tau", 1.0)),
             ecot_max_lambda=float(getattr(args, "hrot_ecot_max_lambda", 1.0)),
@@ -2261,6 +2261,8 @@ def build_model_from_args(args):
             ),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
+            ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),
+            ecot_consensus_tau=float(getattr(args, "hrot_ecot_consensus_tau", 1.0)),
             hlm_min_mass=float(getattr(args, "hrot_hlm_min_mass", 0.1)),
             hlm_init_mass=float(getattr(args, "hrot_hlm_init_mass", 0.8)),
             hlm_budget_mode=str(getattr(args, "hrot_hlm_budget_mode", "cost")),

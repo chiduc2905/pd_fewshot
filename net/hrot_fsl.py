@@ -69,6 +69,8 @@ def _normalize_hrot_variant_name(variant: str) -> str:
         return "JE"
     if normalized in {"JECOT", "ECOT"}:
         return "J_ECOT"
+    if normalized in {"CPECOT"}:
+        return "CP_ECOT"
     if normalized in {"JHLM", "JHIERMASS", "JHMASS", "JTAHM"}:
         warnings.warn(
             "HROT variant J_HLM is deprecated and now maps to J_ECOT; "
@@ -211,7 +213,7 @@ class EpisodeBudgetController(nn.Module):
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-V, JE, and J_ECOT."""
+    """Vectorized HROT few-shot model with ablation variants A-V, JE, J_ECOT, and CP_ECOT."""
 
     def __init__(
         self,
@@ -259,7 +261,7 @@ class HROTFSL(BaseConv64FewShotModel):
         hlm_lambda_shot_cov: float = 0.0,
         hlm_shot_entropy_floor: float = 0.35,
         hlm_return_diagnostics: bool = True,
-        ecot_rho_bank: str | list[float] | tuple[float, ...] = "0.45,0.60,0.75,0.80,0.90",
+        ecot_rho_bank: str | list[float] | tuple[float, ...] | None = None,
         ecot_base_rho: float | None = None,
         ecot_budget_tau: float = 1.0,
         ecot_max_lambda: float = 1.0,
@@ -271,6 +273,8 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_enable_threshold_offset: bool = False,
         ecot_identity_reg: float = 1e-4,
         ecot_policy_entropy_reg: float = 1e-3,
+        ecot_consensus_tau_mode: str = "fixed",
+        ecot_consensus_tau: float = 1.0,
         min_mass: float = 0.1,
         mass_bonus_init: float = 1.0,
         transport_cost_threshold_init: float | None = None,
@@ -301,7 +305,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -358,8 +362,15 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("hlm_lambda_shot_cov must be non-negative")
         if hlm_shot_entropy_floor < 0.0:
             raise ValueError("hlm_shot_entropy_floor must be non-negative")
-        ecot_base_rho = fixed_mass if ecot_base_rho is None else float(ecot_base_rho)
+        if ecot_rho_bank is None:
+            ecot_rho_bank = "0.50,0.80,0.95" if variant == "CP_ECOT" else "0.45,0.60,0.75,0.80,0.90"
+        ecot_base_rho = 0.80 if variant == "CP_ECOT" and ecot_base_rho is None else (
+            fixed_mass if ecot_base_rho is None else float(ecot_base_rho)
+        )
         ecot_rho_bank_values, ecot_base_idx = _parse_ecot_rho_bank(ecot_rho_bank, ecot_base_rho)
+        ecot_consensus_tau_mode = str(ecot_consensus_tau_mode).strip().lower().replace("-", "_")
+        if ecot_consensus_tau_mode not in {"fixed", "sqrt"}:
+            raise ValueError(f"Unsupported ECOT consensus tau mode: {ecot_consensus_tau_mode}")
         if ecot_budget_tau <= 0.0:
             raise ValueError("ecot_budget_tau must be positive")
         if ecot_max_lambda < 0.0:
@@ -372,6 +383,8 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_identity_reg must be non-negative")
         if ecot_policy_entropy_reg < 0.0:
             raise ValueError("ecot_policy_entropy_reg must be non-negative")
+        if ecot_consensus_tau <= 0.0:
+            raise ValueError("ecot_consensus_tau must be positive")
         if lambda_rho_rank < 0.0:
             raise ValueError("lambda_rho_rank must be non-negative")
         if rho_rank_margin < 0.0:
@@ -387,22 +400,23 @@ class HROTFSL(BaseConv64FewShotModel):
         self.variant = variant
         self.uses_hrot_v = variant == "V"
         self.uses_egtw_mass = variant == "JE"
-        self.uses_ecot = variant == "J_ECOT"
+        self.uses_cp_ecot = variant == "CP_ECOT"
+        self.uses_ecot = variant in {"J_ECOT", "CP_ECOT"}
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
         self.uses_episode_controller = self.uses_ecot
         self.uses_budget_bank = self.uses_ecot
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
@@ -473,6 +487,8 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_enable_threshold_offset = bool(ecot_enable_threshold_offset)
         self.ecot_identity_reg = float(ecot_identity_reg)
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
+        self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
+        self.ecot_consensus_tau = float(ecot_consensus_tau)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"
         self.ecot_paper_name = "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning"
         self.min_mass = float(min_mass)
@@ -1683,6 +1699,37 @@ class HROTFSL(BaseConv64FewShotModel):
         transport_mass = (weights * shot_transport_mass).sum(dim=-1)
         return logits, transport_cost, transport_mass, weights, tau_shot
 
+    def _cp_ecot_tau_k(self, shot_num: int, reference: torch.Tensor) -> torch.Tensor:
+        if self.ecot_consensus_tau_mode == "sqrt":
+            tau_value = min(1.5, math.sqrt(float(shot_num)))
+        else:
+            tau_value = self.ecot_consensus_tau
+        return reference.new_tensor(float(tau_value))
+
+    def _pool_cp_ecot_class_budget_scores(
+        self,
+        budget_scores: torch.Tensor,
+        shot_cost_bank: torch.Tensor,
+        shot_mass_bank: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if budget_scores.dim() != 4:
+            raise ValueError(
+                "CP_ECOT budget_scores must have shape (Nq, Way, Shot, Budget), "
+                f"got {tuple(budget_scores.shape)}"
+            )
+        shot_num = budget_scores.shape[-2]
+        tau_k = self._cp_ecot_tau_k(shot_num, budget_scores)
+        scaled = budget_scores / tau_k.clamp_min(self.eps)
+        if shot_num == 1:
+            weights = torch.ones_like(budget_scores)
+            class_budget_scores = budget_scores.squeeze(-2)
+        else:
+            weights = torch.softmax(scaled, dim=-2)
+            class_budget_scores = tau_k * (torch.logsumexp(scaled, dim=-2) - math.log(float(shot_num)))
+        class_budget_cost = (weights * shot_cost_bank).sum(dim=-2)
+        class_budget_mass = (weights * shot_mass_bank).sum(dim=-2)
+        return class_budget_scores, class_budget_cost, class_budget_mass, weights, tau_k
+
     def _forward_ecot_budget_bank(
         self,
         flat_cost: torch.Tensor,
@@ -1691,9 +1738,9 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_num: int,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
-            raise RuntimeError("J_ECOT requires an episode_controller")
+            raise RuntimeError("ECOT variants require an episode_controller")
         if self.ecot_rho_bank_tensor is None:
-            raise RuntimeError("J_ECOT requires an ecot_rho_bank_tensor")
+            raise RuntimeError("ECOT variants require an ecot_rho_bank_tensor")
         if flat_cost.dim() != 4:
             raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
 
@@ -1727,34 +1774,69 @@ class HROTFSL(BaseConv64FewShotModel):
             delta = raw_delta_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
             threshold = (threshold * torch.exp(0.25 * torch.tanh(delta))).clamp_min(self.eps)
 
-        # J_ECOT is not a learned-mass variant. It preserves the low-variance
-        # fixed-budget inductive bias of J-FSL by evaluating a deterministic
-        # bank of fixed UOT budgets and learning only an episode-level policy
-        # over these stable experts. This adapts to episode-level failure modes
-        # such as noisy support shots, class overlap, partial evidence, and
-        # query-support shift without destabilizing the transport marginals.
+        # ECOT variants are not learned-mass variants. They preserve the
+        # low-variance fixed-budget inductive bias of J-FSL by evaluating a
+        # deterministic bank of fixed UOT budgets and learning only an
+        # episode-level policy over these stable experts.
         budget_scores = self.score_scale * (threshold * shot_mass_bank - shot_cost_bank)
         base_score = budget_scores[..., self.ecot_base_idx]
         pi_view = pi_budget.view(1, 1, 1, budget_count)
         ecot_score = (pi_view * budget_scores).sum(dim=-1)
         lambda_ecot = self.ecot_lambda.to(device=flat_cost.device, dtype=flat_cost.dtype)
-        shot_logits = base_score + lambda_ecot * (ecot_score - base_score)
-
         shot_cost_diag = (pi_view * shot_cost_bank).sum(dim=-1)
         shot_mass_diag = (pi_view * shot_mass_bank).sum(dim=-1)
-        logits, transport_cost, transport_mass, shot_pool_weights, tau_shot = self._pool_ecot_shot_scores(
-            shot_logits,
-            shot_cost_diag,
-            shot_mass_diag,
-            controller_outputs.get("raw_tau_shot"),
-        )
+
+        cp_payload: dict[str, torch.Tensor] = {}
+        tau_shot = None
+        if self.uses_cp_ecot:
+            # CP-ECOT preserves consensus by pooling support shots within each
+            # fixed budget before applying the episode-conditioned budget mix.
+            (
+                class_budget_scores,
+                class_budget_cost,
+                class_budget_mass,
+                budget_shot_pool_weights,
+                tau_k,
+            ) = self._pool_cp_ecot_class_budget_scores(
+                budget_scores,
+                shot_cost_bank,
+                shot_mass_bank,
+            )
+            class_base_score = class_budget_scores[..., self.ecot_base_idx]
+            pi_class_view = pi_budget.view(1, 1, budget_count)
+            class_mix_score = (pi_class_view * class_budget_scores).sum(dim=-1)
+            lambda_k = lambda_ecot / math.sqrt(float(shot_num))
+            logits = class_base_score + lambda_k * (class_mix_score - class_base_score)
+            transport_cost = (pi_class_view * class_budget_cost).sum(dim=-1)
+            transport_mass = (pi_class_view * class_budget_mass).sum(dim=-1)
+            shot_logits = base_score
+            shot_pool_weights = budget_shot_pool_weights[..., self.ecot_base_idx]
+            cp_payload.update(
+                {
+                    "ecot_class_budget_scores": class_budget_scores,
+                    "ecot_class_budget_transport_cost": class_budget_cost,
+                    "ecot_class_budget_transported_mass": class_budget_mass,
+                    "ecot_class_base_score": class_base_score,
+                    "ecot_class_mix_score": class_mix_score,
+                    "ecot_lambda_k": lambda_k,
+                    "ecot_tau_k": tau_k,
+                }
+            )
+            identity_loss = (logits - class_base_score).pow(2).mean()
+        else:
+            shot_logits = base_score + lambda_ecot * (ecot_score - base_score)
+            logits, transport_cost, transport_mass, shot_pool_weights, tau_shot = self._pool_ecot_shot_scores(
+                shot_logits,
+                shot_cost_diag,
+                shot_mass_diag,
+                controller_outputs.get("raw_tau_shot"),
+            )
+            identity_loss = (shot_logits - base_score).pow(2).mean()
 
         plan_diag = (pi_view.unsqueeze(-1).unsqueeze(-1) * plan_bank).sum(dim=3)
         shot_rho = flat_cost.new_full((num_query, way_num, shot_num), self.ecot_base_rho)
-        identity_loss = (shot_logits - base_score).pow(2).mean()
         policy_entropy = -(pi_budget.clamp_min(self.eps) * pi_budget.clamp_min(self.eps).log()).sum()
-        policy_entropy_loss = -self.ecot_policy_entropy_reg * policy_entropy
-        ecot_aux_loss = self.ecot_identity_reg * identity_loss + policy_entropy_loss
+        ecot_aux_loss = self.ecot_identity_reg * identity_loss
 
         payload: dict[str, torch.Tensor] = {
             "logits": logits,
@@ -1780,9 +1862,10 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_diagnostics": diagnostics,
             "ecot_identity_loss": identity_loss,
             "ecot_policy_entropy": policy_entropy,
-            "ecot_policy_entropy_loss": policy_entropy_loss,
+            "ecot_policy_entropy_loss": -self.ecot_policy_entropy_reg * policy_entropy,
             "ecot_aux_loss": ecot_aux_loss,
         }
+        payload.update(cp_payload)
         if tau_shot is not None:
             payload["ecot_tau_shot"] = tau_shot
         if raw_delta_threshold is not None:
@@ -2957,6 +3040,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_base_score",
             "ecot_score",
             "ecot_budget_scores",
+            "ecot_class_budget_scores",
+            "ecot_class_budget_transport_cost",
+            "ecot_class_budget_transported_mass",
+            "ecot_class_base_score",
+            "ecot_class_mix_score",
             "ecot_shot_transport_cost_bank",
             "ecot_shot_transported_mass_bank",
         ):
@@ -2979,6 +3067,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_policy_entropy",
             "ecot_policy_entropy_loss",
             "ecot_aux_loss",
+            "ecot_lambda_k",
+            "ecot_tau_k",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

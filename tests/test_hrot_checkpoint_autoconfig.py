@@ -93,6 +93,30 @@ def test_hrot_variant_cli_accepts_j_ecot(monkeypatch):
     assert args.hrot_ecot_controller_hidden == 16
 
 
+def test_hrot_variant_cli_accepts_cp_ecot(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "hrot_fsl",
+            "--hrot_variant",
+            "CP_ECOT",
+            "--hrot_ecot_consensus_tau_mode",
+            "sqrt",
+            "--hrot_ecot_consensus_tau",
+            "1.2",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.hrot_variant == "CP_ECOT"
+    assert args.hrot_ecot_rho_bank is None
+    assert args.hrot_ecot_consensus_tau_mode == "sqrt"
+    assert args.hrot_ecot_consensus_tau == 1.2
+
+
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),
@@ -135,6 +159,27 @@ def test_infer_hrot_variant_normalizes_j_egtw_checkpoint_args():
     assert overrides["hrot_egtw_lambda"] == 1.3
     assert overrides["hrot_egtw_attention_temperature"] == 0.2
     assert overrides["hrot_egtw_detach_masses"] == "true"
+
+
+def test_infer_hrot_variant_uses_cp_ecot_checkpoint_args():
+    state_dict = {
+        "raw_ecot_lambda": torch.tensor(0.0),
+        "episode_controller.network.0.weight": torch.randn(32, 11),
+    }
+    checkpoint_args = {
+        "hrot_variant": "CP_ECOT",
+        "hrot_ecot_rho_bank": "0.50,0.80,0.95",
+        "hrot_ecot_consensus_tau_mode": "sqrt",
+        "hrot_ecot_consensus_tau": 1.2,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+
+    assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "CP_ECOT"
+    assert overrides["hrot_variant"] == "CP_ECOT"
+    assert overrides["hrot_ecot_rho_bank"] == "0.50,0.80,0.95"
+    assert overrides["hrot_ecot_consensus_tau_mode"] == "sqrt"
+    assert overrides["hrot_ecot_consensus_tau"] == 1.2
 
 
 def test_infer_hrot_variant_maps_old_j_hlm_state_to_j_ecot():
