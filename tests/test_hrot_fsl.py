@@ -789,6 +789,32 @@ def test_hrot_fsl_variant_j_ecot_does_not_use_learned_mass_paths():
     assert "support_token_mass" not in outputs
 
 
+def test_hrot_fsl_variant_j_ecot_aux_loss_includes_policy_entropy_regularizer():
+    torch.manual_seed(45)
+    model = _build_model(
+        variant="J_ECOT",
+        ecot_identity_reg=0.2,
+        ecot_policy_entropy_reg=0.03,
+        lambda_curvature=0.0,
+        lambda_rho=0.0,
+        lambda_rho_rank=0.0,
+    )
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets, return_aux=True)
+
+    expected_policy_loss = -model.ecot_policy_entropy_reg * outputs["ecot_policy_entropy"]
+    expected_ecot_aux = model.ecot_identity_reg * outputs["ecot_identity_loss"] + expected_policy_loss
+
+    assert torch.allclose(outputs["ecot_policy_entropy_loss"], expected_policy_loss, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(outputs["ecot_aux_loss"], expected_ecot_aux, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(outputs["aux_loss"], expected_ecot_aux, atol=1e-6, rtol=1e-6)
+
+
 def test_hrot_fsl_variant_j_ecot_backpropagates_controller_lambda_and_threshold():
     torch.manual_seed(44)
     model = _build_model(variant="J_ECOT")

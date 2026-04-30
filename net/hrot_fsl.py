@@ -1753,7 +1753,8 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_rho = flat_cost.new_full((num_query, way_num, shot_num), self.ecot_base_rho)
         identity_loss = (shot_logits - base_score).pow(2).mean()
         policy_entropy = -(pi_budget.clamp_min(self.eps) * pi_budget.clamp_min(self.eps).log()).sum()
-        ecot_aux_loss = self.ecot_identity_reg * identity_loss
+        policy_entropy_loss = -self.ecot_policy_entropy_reg * policy_entropy
+        ecot_aux_loss = self.ecot_identity_reg * identity_loss + policy_entropy_loss
 
         payload: dict[str, torch.Tensor] = {
             "logits": logits,
@@ -1779,7 +1780,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_diagnostics": diagnostics,
             "ecot_identity_loss": identity_loss,
             "ecot_policy_entropy": policy_entropy,
-            "ecot_policy_entropy_loss": -self.ecot_policy_entropy_reg * policy_entropy,
+            "ecot_policy_entropy_loss": policy_entropy_loss,
             "ecot_aux_loss": ecot_aux_loss,
         }
         if tau_shot is not None:
