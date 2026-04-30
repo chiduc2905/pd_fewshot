@@ -1202,6 +1202,15 @@ def get_args():
         default=0,
         help="Offset added to --seed for the final fixed test episode set.",
     )
+    parser.add_argument(
+        "--final_test_seed",
+        type=int,
+        default=None,
+        help=(
+            "Absolute seed for final-test episode sampling. "
+            "When set, this overrides --seed + --final_test_episode_seed_offset."
+        ),
+    )
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -2413,6 +2422,9 @@ def build_episode_seed(args, split_name: str, epoch: int | None = None) -> int:
         offset = int(getattr(args, "selection_episode_seed_offset", 1))
         use_epoch = str(getattr(args, "selection_episode_seed_mode", "fixed")).lower() == "per_epoch"
     elif split_name in {"final_test", "final"}:
+        explicit_seed = getattr(args, "final_test_seed", None)
+        if explicit_seed is not None:
+            return int(explicit_seed)
         offset = int(getattr(args, "final_test_episode_seed_offset", 0))
         use_epoch = False
     else:
@@ -4443,6 +4455,7 @@ def main():
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
 
     final_test_seed = build_episode_seed(args, "final_test")
+    print(f"Final Test  : episode_seed={final_test_seed}")
     final_test_X, final_test_y, final_test_file_paths = test_X, test_y, test_file_paths
     if args.effective_test_protocol == "robust":
         query_pool_name = "test_1shot_query_snr10" if args.shot_num == 1 else "test_5shot_query_snr10"

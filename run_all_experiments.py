@@ -17,6 +17,7 @@ TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
 TRAIN_EPISODES_PER_EPOCH = 130
 TEST_EPISODES_PER_EPOCH = 150
+DEFAULT_FINAL_TEST_SEED = 200042
 FIXED_CUDNN_DETERMINISTIC = "true"
 FIXED_CUDNN_BENCHMARK = "false"
 DEEPEMD_5SHOT_TRAIN_SOLVER = "sinkhorn"
@@ -63,6 +64,15 @@ def get_args():
         help="Final-test protocol. auto uses robust test pools when the dataset provides them.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--final_test_seed",
+        type=int,
+        default=DEFAULT_FINAL_TEST_SEED,
+        help=(
+            "Fixed final-test episode seed passed to main.py. "
+            "Default keeps the previous seed-42 benchmark episodes."
+        ),
+    )
     parser.add_argument("--shot_num", type=int, default=None, choices=[1, 5], help="Optional fixed shot number")
     parser.add_argument("--mode_id", type=int, default=None, choices=[1, 2, 3, 4], help="Optional sample mode")
     parser.add_argument(
@@ -366,6 +376,7 @@ def run_experiment(
     dataset_name,
     project,
     seed,
+    final_test_seed,
     gpu_id,
     fewshot_backbone,
     num_workers,
@@ -395,6 +406,7 @@ def run_experiment(
     print(f"Backbone    : {applied_backbone}")
     print(f"Test Proto  : {test_protocol}")
     print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
+    print(f"Test Seed   : final_test_seed={final_test_seed}")
     if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
         print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
     if model.startswith("spif"):
@@ -513,8 +525,8 @@ def run_experiment(
                 "per_epoch",
                 "--selection_episode_seed_offset",
                 "100000",
-                "--final_test_episode_seed_offset",
-                "200000",
+                "--final_test_seed",
+                str(final_test_seed),
             ]
         )
         if model.startswith("spif"):
@@ -712,6 +724,7 @@ def main():
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
+        print(f"Test Seed   : final_test_seed={args.final_test_seed}")
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -800,6 +813,7 @@ def main():
             dataset_name=args.dataset_name,
             project=args.project,
             seed=args.seed,
+            final_test_seed=args.final_test_seed,
             gpu_id=args.gpu_id,
             fewshot_backbone=args.fewshot_backbone,
             num_workers=args.num_workers,
