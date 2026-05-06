@@ -925,17 +925,52 @@ def get_args():
     parser.add_argument("--hrot_egtw_detach_masses", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_tau", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--hrot_egtw_learn_lambda", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--hrot_ecot_rho_bank", type=str, default=None)
+    parser.add_argument(
+        "--hrot_pre_transport_shot_pool",
+        "--ecot_pre_transport_shot_pool",
+        dest="hrot_pre_transport_shot_pool",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--hrot_ecot_rho_bank", "--ecot_rho_bank", dest="hrot_ecot_rho_bank", type=str, default=None)
     parser.add_argument("--hrot_ecot_base_rho", type=float, default=None)
     parser.add_argument("--hrot_ecot_budget_tau", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_max_lambda", type=float, default=1.0)
-    parser.add_argument("--hrot_ecot_lambda_init", type=float, default=-8.0)
+    parser.add_argument(
+        "--hrot_ecot_lambda_init",
+        "--ecot_lambda_init",
+        dest="hrot_ecot_lambda_init",
+        type=float,
+        default=-8.0,
+    )
     parser.add_argument("--hrot_ecot_controller_hidden", type=int, default=32)
-    parser.add_argument("--hrot_ecot_enable_tau_shot", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--hrot_ecot_uniform_budget_policy",
+        "--ecot_uniform_budget_policy",
+        dest="hrot_ecot_uniform_budget_policy",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument(
+        "--hrot_ecot_enable_tau_shot",
+        "--ecot_enable_tau_shot",
+        dest="hrot_ecot_enable_tau_shot",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
     parser.add_argument("--hrot_ecot_tau_shot_min", type=float, default=0.5)
     parser.add_argument("--hrot_ecot_tau_shot_max", type=float, default=2.0)
     parser.add_argument("--hrot_ecot_enable_threshold_offset", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--hrot_ecot_identity_reg", type=float, default=1e-4)
+    parser.add_argument(
+        "--hrot_ecot_identity_reg",
+        "--ecot_identity_reg",
+        dest="hrot_ecot_identity_reg",
+        type=float,
+        default=1e-4,
+    )
     parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
     parser.add_argument("--hrot_ecot_consensus_tau_mode", type=str, default="fixed", choices=["fixed", "sqrt"])
     parser.add_argument("--hrot_ecot_consensus_tau", type=float, default=1.0)
@@ -1993,11 +2028,13 @@ def get_model(args):
             f"egtw_support_sim={getattr(args, 'hrot_egtw_support_similarity_weight', 0.5)}, "
             f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
             f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
+            f"pre_transport_shot_pool={getattr(args, 'hrot_pre_transport_shot_pool', 'false')}, "
             f"ecot_rho_bank={hrot_ecot_rho_bank}, "
             f"ecot_base_rho={getattr(args, 'hrot_ecot_base_rho', None)}, "
             f"ecot_budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
             f"ecot_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
             f"ecot_controller_hidden={getattr(args, 'hrot_ecot_controller_hidden', 32)}, "
+            f"ecot_uniform_budget_policy={getattr(args, 'hrot_ecot_uniform_budget_policy', 'false')}, "
             f"ecot_tau_shot={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
             f"ecot_consensus_tau_mode={getattr(args, 'hrot_ecot_consensus_tau_mode', 'fixed')}, "
             f"ecot_consensus_tau={getattr(args, 'hrot_ecot_consensus_tau', 1.0)}, "
@@ -2305,12 +2342,14 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             if checkpoint_args.get(egtw_key) is not None:
                 overrides[egtw_key] = checkpoint_args[egtw_key]
         for ecot_key in (
+            "hrot_pre_transport_shot_pool",
             "hrot_ecot_rho_bank",
             "hrot_ecot_base_rho",
             "hrot_ecot_budget_tau",
             "hrot_ecot_max_lambda",
             "hrot_ecot_lambda_init",
             "hrot_ecot_controller_hidden",
+            "hrot_ecot_uniform_budget_policy",
             "hrot_ecot_enable_tau_shot",
             "hrot_ecot_tau_shot_min",
             "hrot_ecot_tau_shot_max",

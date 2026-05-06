@@ -246,6 +246,7 @@ class HROTFSL(BaseConv64FewShotModel):
         egtw_detach_masses: bool = True,
         egtw_learn_tau: bool = False,
         egtw_learn_lambda: bool = False,
+        pre_transport_shot_pool: bool = False,
         hlm_min_mass: float = 0.1,
         hlm_init_mass: float = 0.8,
         hlm_budget_mode: str = "cost",
@@ -267,6 +268,7 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_max_lambda: float = 1.0,
         ecot_lambda_init: float = -8.0,
         ecot_controller_hidden: int = 32,
+        ecot_uniform_budget_policy: bool = False,
         ecot_enable_tau_shot: bool = True,
         ecot_tau_shot_min: float = 0.5,
         ecot_tau_shot_max: float = 2.0,
@@ -462,6 +464,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.egtw_detach_masses = bool(egtw_detach_masses)
         self.egtw_learn_tau = bool(egtw_learn_tau)
         self.egtw_learn_lambda = bool(egtw_learn_lambda)
+        self.pre_transport_shot_pool = bool(pre_transport_shot_pool)
         self.hlm_min_mass = float(hlm_min_mass)
         self.hlm_init_mass = float(hlm_init_mass)
         self.hlm_budget_mode = hlm_budget_mode
@@ -481,6 +484,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_budget_tau = float(ecot_budget_tau)
         self.ecot_max_lambda = float(ecot_max_lambda)
         self.ecot_controller_hidden = int(ecot_controller_hidden)
+        self.ecot_uniform_budget_policy = bool(ecot_uniform_budget_policy)
         self.ecot_enable_tau_shot = bool(ecot_enable_tau_shot)
         self.ecot_tau_shot_min = float(ecot_tau_shot_min)
         self.ecot_tau_shot_max = float(ecot_tau_shot_max)
@@ -1768,7 +1772,11 @@ class HROTFSL(BaseConv64FewShotModel):
         )
         controller_outputs = self.episode_controller(diagnostics)
         budget_logits = controller_outputs["budget_logits"]
-        pi_budget = torch.softmax(budget_logits / float(self.ecot_budget_tau), dim=-1)
+        if self.ecot_uniform_budget_policy:
+            budget_logits = torch.zeros_like(budget_logits)
+            pi_budget = torch.full_like(budget_logits, 1.0 / float(budget_count))
+        else:
+            pi_budget = torch.softmax(budget_logits / float(self.ecot_budget_tau), dim=-1)
         raw_delta_threshold = controller_outputs.get("raw_delta_threshold")
         if raw_delta_threshold is not None:
             delta = raw_delta_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
@@ -2390,16 +2398,22 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_geodesic_distance = None
         transport_probe_payload = None
         if self.uses_shot_decomposed_transport:
-            flat_support_euclidean = support_euclidean.reshape(
-                way_num * shot_num,
-                support_euclidean.shape[-2],
-                support_euclidean.shape[-1],
-            )
-            flat_support_hyperbolic = support_hyperbolic.reshape(
-                way_num * shot_num,
-                support_hyperbolic.shape[-2],
-                support_hyperbolic.shape[-1],
-            )
+            matching_shot_num = shot_num
+            if self.uses_ecot and self.pre_transport_shot_pool:
+                matching_shot_num = 1
+                flat_support_euclidean = merge_support_tokens(support_euclidean, merge_mode="mean")
+                flat_support_hyperbolic = merge_support_tokens(support_hyperbolic, merge_mode="mean")
+            else:
+                flat_support_euclidean = support_euclidean.reshape(
+                    way_num * shot_num,
+                    support_euclidean.shape[-2],
+                    support_euclidean.shape[-1],
+                )
+                flat_support_hyperbolic = support_hyperbolic.reshape(
+                    way_num * shot_num,
+                    support_hyperbolic.shape[-2],
+                    support_hyperbolic.shape[-1],
+                )
             if self.uses_noise_calibrated_transport:
                 if self.q_eam is None:
                     raise RuntimeError("HROT-Q requires a dedicated q_eam head")
@@ -2753,7 +2767,7 @@ class HROTFSL(BaseConv64FewShotModel):
                     ecot_payload = self._forward_ecot_budget_bank(
                         flat_cost,
                         way_num=way_num,
-                        shot_num=shot_num,
+                        shot_num=matching_shot_num,
                     )
                     logits = ecot_payload["logits"]
                     transport_cost = ecot_payload["transport_cost"]
@@ -2765,7 +2779,7 @@ class HROTFSL(BaseConv64FewShotModel):
                     cost = flat_cost.reshape(
                         query.shape[0],
                         way_num,
-                        shot_num,
+                        matching_shot_num,
                         flat_cost.shape[-2],
                         flat_cost.shape[-1],
                     )
@@ -2995,8 +3009,14 @@ class HROTFSL(BaseConv64FewShotModel):
             if transport_probe_payload is not None:
                 outputs.update(transport_probe_payload)
         if return_aux:
-            payload_support_euclidean = support_euclidean if self.uses_shot_decomposed_transport else class_euclidean
-            payload_support_hyperbolic = support_hyperbolic if self.uses_shot_decomposed_transport else class_hyperbolic
+            if self.uses_ecot and self.pre_transport_shot_pool:
+                payload_support_euclidean = merge_support_tokens(support_euclidean, merge_mode="mean")
+                payload_support_hyperbolic = merge_support_tokens(support_hyperbolic, merge_mode="mean")
+            else:
+                payload_support_euclidean = support_euclidean if self.uses_shot_decomposed_transport else class_euclidean
+                payload_support_hyperbolic = (
+                    support_hyperbolic if self.uses_shot_decomposed_transport else class_hyperbolic
+                )
             outputs.update(
                 {
                     "transport_plan": plan,

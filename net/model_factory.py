@@ -2243,12 +2243,20 @@ def build_model_from_args(args):
             egtw_detach_masses=_bool_flag(getattr(args, "hrot_egtw_detach_masses", "true"), default=True),
             egtw_learn_tau=_bool_flag(getattr(args, "hrot_egtw_learn_tau", "false"), default=False),
             egtw_learn_lambda=_bool_flag(getattr(args, "hrot_egtw_learn_lambda", "false"), default=False),
+            pre_transport_shot_pool=_bool_flag(
+                getattr(args, "hrot_pre_transport_shot_pool", "false"),
+                default=False,
+            ),
             ecot_rho_bank=getattr(args, "hrot_ecot_rho_bank", None),
             ecot_base_rho=getattr(args, "hrot_ecot_base_rho", None),
             ecot_budget_tau=float(getattr(args, "hrot_ecot_budget_tau", 1.0)),
             ecot_max_lambda=float(getattr(args, "hrot_ecot_max_lambda", 1.0)),
             ecot_lambda_init=float(getattr(args, "hrot_ecot_lambda_init", -8.0)),
             ecot_controller_hidden=int(getattr(args, "hrot_ecot_controller_hidden", 32)),
+            ecot_uniform_budget_policy=_bool_flag(
+                getattr(args, "hrot_ecot_uniform_budget_policy", "false"),
+                default=False,
+            ),
             ecot_enable_tau_shot=_bool_flag(
                 getattr(args, "hrot_ecot_enable_tau_shot", "true"),
                 default=True,

@@ -10,6 +10,8 @@ scalogram/
 scalogram_*/
 prpd_images_for_cnn/
 PD-data-*/
+*.png
+*.PNG
 data/
 dataset/
 datasets/
