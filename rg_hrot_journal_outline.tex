@@ -1,0 +1,790 @@
+\documentclass[journal]{IEEEtran}
+
+% =========================================================
+% Packages for IEEE Transactions journal paper
+% =========================================================
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{siunitx}
+\usepackage{url}
+\usepackage[caption=false,font=footnotesize]{subfig}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{stfloats}
+\usepackage{booktabs}
+\usepackage{multirow}
+\DeclareSIUnit\sample{Sa}
+
+\newcommand{\method}{EC-MROT}
+\newcommand{\Rbank}{\mathcal{R}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Dtrain}{\mathcal{D}_{\mathrm{train}}}
+\newcommand{\Dval}{\mathcal{D}_{\mathrm{val}}}
+\newcommand{\Dtest}{\mathcal{D}_{\mathrm{test}}}
+\newcommand{\Sset}{\mathcal{S}}
+\newcommand{\Qset}{\mathcal{Q}}
+\newcommand{\1}{\mathbf{1}}
+\newcommand{\placeholdercell}[2]{%
+    \fbox{\parbox[c][#1][c]{#2}{\centering\tiny Placeholder}}
+}
+
+\begin{document}
+
+\title{Noise-Robust Few-Shot Partial Discharge Diagnosis from Time--Frequency Scalograms via Episode-Conditioned Mass-Response Optimal Transport}
+
+\author{Chi Duc Nguyen,
+        Quoc Anh Pham,
+        Duc Thinh Dao,
+        Hong Hoang Si,
+        Thi Lan Huong Nguyen,
+        and Manh Cuong Hoang%
+\thanks{Chi Duc Nguyen, Quoc Anh Pham, Duc Thinh Dao, Hong Hoang Si, Thi Lan Huong Nguyen, and Manh Cuong Hoang are with the School of Electrical and Electronic Engineering, Hanoi University of Science and Technology, Hanoi, Vietnam.}%
+\thanks{Corresponding authors: Hong Hoang Si and Thi Lan Huong Nguyen.}%
+\thanks{This work was supported by Vietnam Electricity (EVN) under Grant No. 07/HD-EVN-PCHANAM.}%
+}
+
+\markboth{IEEE Transactions on Instrumentation and Measurement,~Vol.~XX, No.~XX, 2026}%
+{Nguyen \MakeLowercase{\textit{et al.}}: Episode-Conditioned Mass-Response Optimal Transport for PD Diagnosis}
+
+\maketitle
+
+% =========================================================
+\begin{abstract}
+Partial discharge (PD) classification is essential for insulation condition assessment and reliability-oriented maintenance of high-voltage equipment. In practical monitoring scenarios, however, diagnostic models must operate with only a small number of labeled measurements, while the acquired signals are often affected by background interference and non-discharge disturbances. Although deep learning has achieved promising performance in PD diagnosis, its dependence on large annotated datasets limits its applicability under measurement-constrained field conditions. This paper presents \method{} (Episode-Conditioned Mass-Response Optimal Transport), a noise-robust few-shot learning framework for pulse-level PD diagnosis from time--frequency scalograms. A controlled high-voltage laboratory platform is used to acquire representative discharge and background pulses, which are extracted, normalized, and transformed into scalogram representations to retain localized time--frequency discharge patterns. Instead of treating each scalogram as a global image, the proposed framework formulates few-shot PD diagnosis as a partial-evidence matching problem, in which discriminative local discharge structures are compared across query and support samples while background-dominated regions are adaptively suppressed. This design enables robust metric learning from scarce labeled examples and improves the reliability of support-based classification under uneven shot quality and background noise. Comprehensive experiments are conducted under low-label and episodic 1-shot/5-shot settings, with comparisons against conventional machine-learning classifiers, fine-tuned deep transfer-learning models, and representative few-shot baselines. Additional noise-stress and ablation analyses further verify the contribution of the proposed episode-conditioned mass-response transport strategy. The results demonstrate that \method{} achieves competitive and noise-resilient PD classification with substantially fewer labeled samples, indicating its potential as a practical data-efficient diagnostic solution for high-voltage insulation monitoring.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Partial discharge, few-shot learning, scalogram, continuous wavelet transform, optimal transport, unbalanced optimal transport, high-frequency current transformer, noise robustness.
+\end{IEEEkeywords}
+
+% =========================================================
+
+
+\section{Introduction}
+\label{sec:introduction}
+
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=\textwidth]{figs/fig1_block_diagram.pdf}
+    \vspace{-25pt}
+    \caption{Block diagram of the PD measurement system, including the high-voltage supply, artificial defect specimens, HFCT-based sensing unit, oscilloscope, and host computer for pulse-level dataset construction.}
+    \label{fig:block_diagram}
+\end{figure*}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\columnwidth,height=0.23\textheight,keepaspectratio]{figs/waveform/corona_008.pdf}
+    \caption{Representative corona-discharge pulse waveform used in the pulse-level benchmark prior to time--frequency transformation.}
+    \label{fig:raw_waveforms}
+\end{figure}
+
+Partial discharge (PD) is a localized electrical discharge phenomenon that occurs within an insulation system without completely bridging the electrodes. It is widely recognized as an early indicator of insulation degradation in high-voltage apparatus; therefore, reliable PD measurement is essential for insulation condition assessment, defect identification, and maintenance planning~\cite{IEC60270,KreugerBook,StonePD,Wu2015PDOverview}. Beyond detection, discharge-type classification is crucial because corona, surface, internal discharge, and background or no-PD events reflect different physical mechanisms, degradation paths, and diagnostic implications. However, pulse-level PD classification remains challenging in practice because discharge pulses are transient, stochastic, and vulnerable to electromagnetic interference, sensor-dependent responses, background noise, and overlapping defect signatures.
+
+Data-driven PD classification has progressed from handcrafted-feature pipelines to deep representation learning. Conventional methods typically extract temporal, spectral, statistical, or phase-resolved partial discharge (PRPD) descriptors and then apply classifiers such as support vector machines, random forests, or $k$-nearest neighbors. Although such methods provide useful baselines, their performance is strongly affected by feature design and measurement variability~\cite{Sahoo2024MeasurementPDMLDL}. Deep models alleviate manual feature engineering by learning from raw waveforms, PRPD maps, spectrograms, or time--frequency images. Among these representations, continuous wavelet transform (CWT) scalograms are attractive for pulse-level diagnosis because they encode non-stationary discharge pulses as localized time--frequency patterns. Recent work in TIM has evaluated wavelet scalograms for PD pattern classification under noisy cable-insulation conditions~\cite{Sahoo2024TIMScalogram}, while a related comparative study examined statistical-feature-based machine learning and CWT-scalogram-based deep models for artificially generated corona, surface, and internal PD signals~\cite{Sahoo2024MeasurementPDMLDL}. These studies motivate scalogram-based PD representation learning, but they also leave an important issue unresolved: discriminative discharge evidence can be spatially sparse in the time--frequency plane, whereas background-dominated or weakly informative regions may dominate the global image appearance.
+
+The scarcity of labeled PD data further limits the deployment of supervised deep models. In practical monitoring scenarios, collecting representative labeled pulses for every defect type, equipment condition, sensor configuration, and noise environment is costly and often infeasible. Recent studies have therefore investigated semi-supervised learning, small-sample diagnosis, transfer-oriented learning, and uncertainty-aware classification to reduce annotation demands and improve robustness under challenging conditions~\cite{Tai2024AccessSemiSupervisedPD,Yang2025TIMSemiSupervisedPD,Jing2025MeasurementTRSMM,Sharma2025TIMBayesianPD}. Despite their practical value, these approaches do not directly address episodic few-shot PD diagnosis, where a model must classify query scalograms from only a handful of labeled support pulses under uneven noise and background contamination.
+
+Few-shot learning (FSL) offers a suitable paradigm for this low-label setting by classifying query samples through comparison with a small support set rather than retraining a task-specific classifier from scratch. Metric-based FSL is particularly relevant to data-efficient diagnosis, and recent TIM studies have demonstrated the applicability of few-shot and self-supervised representation learning to instrumentation-oriented fault diagnosis~\cite{Wang2024TIMSSLFewShot,Vu2024TIMFewShotBearing}. Nevertheless, generic few-shot models are not fully aligned with noisy PD scalogram recognition. Global-embedding comparisons may suppress weak but diagnostically meaningful local discharge structures, whereas fixed local matching can still align background-dominated regions as valid evidence. Thus, robust few-shot PD diagnosis requires adaptive partial-evidence matching rather than purely global image-level similarity.
+
+To address these limitations, this paper proposes \textbf{\method{}}, an episode-conditioned mass-response optimal-transport framework for few-shot PD scalogram classification. The proposed method formulates noisy pulse-level recognition as a partial-evidence matching problem. Query and support scalograms are represented as local spatial tokens, and support-level unbalanced optimal transport is used to compare discriminative local evidence while reducing the influence of irrelevant or background-dominated regions. An episode-conditioned budget measure over the mass-response path further adapts the matching behavior to the evidence quality and difficulty of each few-shot episode, enabling support-based classification under scarce labels, uneven support quality, and background-noise contamination.
+
+The main contributions of this paper are summarized as follows:
+\begin{itemize}
+    \item A controlled pulse-level PD/no-PD scalogram diagnosis setting is established using high-voltage measurements, pulse extraction, normalization, and CWT-based time--frequency transformation. The evaluation protocol explicitly considers low-label 1-shot and 5-shot conditions with noisy and background-contaminated samples.
+
+    \item A novel \method{} framework is proposed for noise-robust few-shot PD diagnosis. The model performs support-level unbalanced optimal transport over local scalogram tokens and uses an episode-conditioned budget measure over a mass-response path to support partial-evidence matching for sparse and noisy PD scalograms.
+
+    \item A comprehensive evaluation is conducted against conventional machine-learning baselines, transfer-learning and deep baselines, representative metric-based few-shot methods, and local or transport-style matching baselines. Additional noise-stress tests, ablation studies, and computational-complexity analysis assess the effectiveness and practicality of the proposed framework.
+\end{itemize}
+
+% =========================================================
+\section{Related Work}
+\label{sec:related_work}
+% =========================================================
+
+\subsection{PD Classification and Scalogram Representations}
+PD classification has been widely studied using handcrafted descriptors, phase-resolved partial discharge (PRPD) patterns, raw pulse waveforms, and time--frequency representations. Conventional methods typically extract statistical, temporal, spectral, or PRPD-based features and then employ classifiers such as support vector machines, random forests, or $k$-nearest neighbors. These approaches remain useful as lightweight diagnostic baselines, but their performance depends strongly on feature design and measurement conditions~\cite{Wu2015PDOverview,Sahoo2024MeasurementPDMLDL}. Deep learning methods reduce manual feature engineering by learning representations directly from waveforms, PRPD maps, spectrograms, or scalogram images. Among these representations, continuous wavelet transform (CWT) scalograms are particularly suitable for pulse-level PD diagnosis because they preserve localized time--frequency structures of short, non-stationary discharge pulses. Recent studies have demonstrated the effectiveness of wavelet scalograms for PD pattern classification under noisy insulation measurement conditions~\cite{Sahoo2024TIMScalogram,Sahoo2024MeasurementPDMLDL}. However, supervised scalogram classifiers still require sufficient labeled samples and may be affected by background interference, weak discharge signatures, and domain changes across sensors or test conditions.
+
+\begin{figure}[!t]
+    \centering
+    \begin{minipage}[c]{\columnwidth}
+        \centering
+        {\footnotesize\bfseries Waveform \hfill Scalogram\par}
+        \vspace{2pt}
+        \setlength{\tabcolsep}{1pt}
+        \renewcommand{\arraystretch}{1.02}
+        \begin{tabular}{@{}>{\centering\arraybackslash}m{0.66\columnwidth}>{\centering\arraybackslash}m{0.31\columnwidth}@{}}
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/waveform/surface_00001.pdf} &
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/scalogram/surface_00001.png} \\
+            \multicolumn{2}{c}{{\scriptsize\textbf{(a) Surface Discharge}}} \\
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/waveform/corona_00007.pdf} &
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/scalogram/corona_00007.png} \\
+            \multicolumn{2}{c}{{\scriptsize\textbf{(b) Corona Discharge}}} \\
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/waveform/internal_00007.pdf} &
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/scalogram/internal_00007.png} \\
+            \multicolumn{2}{c}{{\scriptsize\textbf{(c) Internal Discharge}}} \\
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/waveform/notpd_0024.pdf} &
+            \includegraphics[width=\linewidth,height=0.115\textheight,keepaspectratio]{figs/scalogram/notpd_0024.png} \\
+            \multicolumn{2}{c}{{\scriptsize\textbf{(d) High-Frequency Noise}}} \\
+        \end{tabular}
+    \end{minipage}
+    \caption{Representative waveform--scalogram pairs for the four evaluated classes. The left column presents the pulse waveform and the right column shows the corresponding continuous-wavelet scalogram for (a) surface discharge, (b) corona discharge, (c) internal discharge, and (d) high-frequency noise.}
+    \label{fig:pd_examples_placeholder}
+\end{figure}
+
+Recent label-efficient PD studies have attempted to reduce this dependence on dense annotations through semi-supervised learning, small-sample diagnosis, transfer-oriented learning, and uncertainty-aware classification~\cite{Tai2024AccessSemiSupervisedPD,Yang2025TIMSemiSupervisedPD,Jing2025MeasurementTRSMM,Sharma2025TIMBayesianPD}. These works are important for practical PD monitoring, but they do not directly address episodic few-shot diagnosis from only a few labeled support pulses. In particular, noisy pulse-level scalograms present a distinct challenge: diagnostic evidence may be sparse and localized, whereas background or no-PD regions may dominate a large part of the time--frequency image.
+
+\subsection{Few-Shot Learning for Low-Data Diagnosis}
+Few-shot learning (FSL) aims to recognize new classes from a small support set. Metric-based FSL methods classify query samples by comparing them with support examples in an embedding space, as in Prototypical Networks, Relation Networks, and strong training baselines for few-shot classification~\cite{snell2017prototypical,sung2018relation,chen2019closer}. Subsequent methods improve this paradigm through feature adaptation, covariance or distribution-based class representations, attention mechanisms, and self-supervised representation learning~\cite{ye2020few,li2019covariance,Wang2024TIMSSLFewShot,Vu2024TIMFewShotBearing}. Such methods are attractive for instrumentation and fault diagnosis because they reduce the need for large labeled datasets.
+
+Despite their success, many few-shot methods rely mainly on global image-level embeddings or class prototypes. This assumption is not ideal for PD scalograms. A global embedding may be dominated by noise bands or background regions, while a prototype formed from a few support examples may be unreliable when support-shot quality is uneven. For pulse-level PD recognition, the classifier should be able to compare local discharge evidence while avoiding over-reliance on irrelevant time--frequency regions. This motivates few-shot models that operate on local descriptors rather than only on global embeddings.
+
+\subsection{Optimal Transport in Few-Shot Learning}
+Optimal transport (OT) provides a principled framework for comparing two empirical distributions by estimating a minimum-cost transport plan between them~\cite{Cuturi2013Sinkhorn,PeyreCuturi2019}. In few-shot learning, OT has been used to compare query and support representations at the level of spatial features rather than only through global vectors. EMD-based few-shot models, for example, treat deep feature maps as sets of local descriptors and compute a transport-based similarity between query and support images~\cite{zhang2020deepemd}. Such OT-based formulations are useful because they preserve local correspondence information and can better handle cases where discriminative evidence occupies only part of the image.
+
+However, directly applying standard OT-style matching to noisy PD scalograms has limitations. Balanced or near-full transport tends to enforce broad mass conservation, which may force background-dominated regions to participate in the matching process even when only a subset of time--frequency regions contains reliable discharge evidence. This is undesirable for PD pulses, where useful signatures can be sparse, weak, and localized. In addition, using a single fixed transport condition for all episodes may be suboptimal because support examples can differ in noise level, pulse strength, and diagnostic quality.
+
+Unbalanced optimal transport (UOT) relaxes the strict mass-conservation constraint of classical OT and is therefore more suitable for partial matching when the two distributions contain irrelevant or unmatched regions~\cite{Chizat2018UOT}. This property is particularly relevant to few-shot PD scalogram classification: the model should be able to transport only reliable local evidence while reducing the contribution of noisy or background-dominated tokens. Building on this motivation, the proposed \method{} uses UOT as the few-shot matching primitive, but differs from standard fixed OT matching by preserving support examples as separate evidence measures, evaluating a discrete quadrature over a mass-response path, and learning an episode-conditioned budget measure over the resulting responses. Thus, the novelty lies not in introducing a new OT solver or in the particular grid values, but in adapting UOT to noisy few-shot scalogram recognition through mass-response integration, base-budget homotopy, and entropic support-risk aggregation.
+
+% =========================================================
+\section{Experimental Setup \& Methodology}
+\label{sec:experimental_setup_methodology}
+% =========================================================
+
+\subsection{Proposed \method{} Architecture}
+\label{sec:proposed_method}
+
+The proposed \method{} is an episode-conditioned unbalanced-transport classifier for few-shot PD scalogram recognition. Unlike prototype-based methods that first collapse the support set into a single class vector, \method{} keeps each support example as an independent local-token measure until after transport. This design is important for noisy PD scalograms, where only a subset of time--frequency regions may contain discriminative discharge evidence and different support examples may have different diagnostic quality.
+
+\subsubsection{Local Scalogram Tokenization}
+Let $f_\theta(\cdot)$ denote the convolutional feature encoder. For a scalogram image $x$, the encoder produces a spatial feature map $f_\theta(x)\in\R^{C_f\times H_f\times W_f}$. The feature map is flattened into $L=H_fW_f$ local descriptors and projected to a lower-dimensional token space:
+\begin{equation}
+    \tilde{\mathbf{Z}}(x)
+    = \operatorname{flatten}(f_\theta(x)) \in \R^{L\times C_f},
+\end{equation}
+\begin{equation}
+    \mathbf{Z}(x)
+    = \operatorname{norm}_2\!\left(
+        \mathbf{W}_p\,\operatorname{LN}(\tilde{\mathbf{Z}}(x))
+      \right)
+    \in \R^{L\times d},
+    \label{eq:ecot_token_projection}
+\end{equation}
+where $\operatorname{LN}(\cdot)$ is layer normalization, $\mathbf{W}_p$ is a learned linear projection, and $\operatorname{norm}_2(\cdot)$ denotes token-wise $\ell_2$ normalization. In the implemented model, a ResNet-12-style few-shot encoder is used by default, with $C_f=640$ and $d=128$. The method itself is not tied to a specific backbone, provided that the encoder preserves a spatial feature grid.
+
+For query image $x_i^q$ and the $k$-th support image of class $c$, we write
+\begin{equation}
+    \mathbf{Z}_i^q
+    = \{\mathbf{z}_{i,t}^q\}_{t=1}^{L_q}, \qquad
+    \mathbf{Z}_{c,k}^s
+    = \{\mathbf{z}_{c,k,\ell}^s\}_{\ell=1}^{L_s}.
+\end{equation}
+The support representation of class $c$ is therefore
+\begin{equation}
+    \mathcal{Z}_c^s
+    = \{\mathbf{Z}_{c,1}^s,\ldots,\mathbf{Z}_{c,K}^s\},
+\end{equation}
+not a prototype, centroid, or class-level merged token set.
+
+\subsubsection{Support-Level Ground Cost}
+For every query--support-example pair $(i,c,k)$, \method{} constructs a local ground-cost matrix
+\begin{equation}
+    \mathbf{D}_{i,c,k}(t,\ell)
+    =
+    \left\|
+        \mathbf{z}_{i,t}^q-\mathbf{z}_{c,k,\ell}^s
+    \right\|_2^2,
+    \label{eq:ecot_ground_cost}
+\end{equation}
+where $t=1,\ldots,L_q$ and $\ell=1,\ldots,L_s$. Since the tokens are $\ell_2$-normalized, this squared Euclidean cost acts as a stable local dissimilarity measure over scalogram evidence. The implementation also supports cosine cost, but the reported \method{} configuration uses the Euclidean token cost in \eqref{eq:ecot_ground_cost}.
+
+\subsubsection{Mass-Response Path and Discrete Quadrature}
+Instead of predicting a free transport mass for each query--support pair, \method{} evaluates a deterministic set of fixed unbalanced-transport budgets
+\begin{equation}
+    \Rbank=\{\rho_1,\rho_2,\ldots,\rho_B\}, \qquad 0<\rho_b\le 1 .
+\end{equation}
+The default bank is
+\begin{equation}
+    \Rbank=\{0.45,0.60,0.75,0.80,0.90\},
+\end{equation}
+with base budget $\rho_0=0.80$. These values are treated as quadrature nodes along a mass-response path, not as the central novelty of the method. For budget $\rho_b$, uniform query and support marginals are scaled as
+\begin{equation}
+    \mathbf{a}_b(t)=\frac{\rho_b}{L_q},
+    \qquad
+    \mathbf{b}_b(\ell)=\frac{\rho_b}{L_s}.
+    \label{eq:ecot_marginals}
+\end{equation}
+For each $(i,c,k,b)$, \method{} solves the entropic unbalanced optimal transport problem
+\begin{equation}
+\begin{aligned}
+    \mathbf{P}_{i,c,k,b}^{\star}
+    =
+    \arg\min_{\mathbf{P}\ge 0}\;
+    &\langle \mathbf{P},\mathbf{D}_{i,c,k}\rangle
+    + \varepsilon \sum_{t,\ell}
+        \mathbf{P}_{t,\ell}
+        \left(\log \mathbf{P}_{t,\ell}-1\right) \\
+    &+ \tau_q
+        \operatorname{KL}(\mathbf{P}\mathbf{1}\,\|\,\mathbf{a}_b)
+    + \tau_s
+        \operatorname{KL}(\mathbf{P}^{\top}\mathbf{1}\,\|\,\mathbf{b}_b).
+\end{aligned}
+\label{eq:ecot_uot}
+\end{equation}
+The KL terms relax exact row and column mass conservation, allowing irrelevant or background-dominated local scalogram regions to receive little transported mass. The solver is implemented as a differentiable log-domain unbalanced Sinkhorn iteration. The default solver parameters are $\varepsilon=0.1$, $60$ iterations, tolerance $10^{-5}$, and $\tau_q=\tau_s=0.5$.
+
+For each mass-budget expert, the transport cost and realized transported mass are
+\begin{equation}
+    C_{i,c,k,b}
+    =
+    \sum_{t,\ell}
+    \mathbf{P}_{i,c,k,b}^{\star}(t,\ell)
+    \mathbf{D}_{i,c,k}(t,\ell),
+\end{equation}
+\begin{equation}
+    M_{i,c,k,b}
+    =
+    \sum_{t,\ell}
+    \mathbf{P}_{i,c,k,b}^{\star}(t,\ell).
+\end{equation}
+Because the transport is unbalanced, $M_{i,c,k,b}$ is the mass actually retained by the relaxed solver and is not constrained to be exactly $\rho_b$.
+
+\subsubsection{Threshold-Calibrated Mass--Cost Scoring}
+Each mass-budget expert is converted into a support-level evidence score:
+\begin{equation}
+    s_{i,c,k,b}
+    =
+    \alpha\left(T\,M_{i,c,k,b}-C_{i,c,k,b}\right),
+    \label{eq:ecot_budget_score}
+\end{equation}
+where $\alpha>0$ is a score scale and $T>0$ is a learnable transport-cost threshold parameterized by a softplus transform. In the default configuration, $\alpha=16$ and $T$ is initialized to $1/16$. Equation~\eqref{eq:ecot_budget_score} rewards transported mass only when the matched local evidence has sufficiently low cost. Thus, high scores correspond to substantial reliable evidence, whereas noisy or weakly aligned regions contribute little.
+
+\subsubsection{Episode-Conditioned Budget Measure}
+The mass-response path produces a mass--cost response curve for every query--class--support candidate. \method{} summarizes this response at the episode level using a detached diagnostic vector
+\begin{equation}
+    \mathbf{g}
+    =
+    [
+    \mu_s,\sigma_s,
+    \mu_C,\sigma_C,
+    \mu_M,\sigma_M,
+    \mu_\Delta,\sigma_\Delta,
+    \mu_H,
+    \mu_{\nabla\rho},\sigma_{\nabla\rho}
+    ] ,
+    \label{eq:ecot_diagnostics}
+\end{equation}
+where the entries denote the mean and standard deviation of budget scores, transport costs, transported masses, base-budget class margins, base-budget support entropy, and the score slope between the largest and smallest budgets. These diagnostics are computed from the transport responses, not directly from image pixels.
+
+A lightweight controller maps $\mathbf{g}$ to an episode-level measure over mass-budget experts:
+\begin{equation}
+    \boldsymbol{\ell}^{\rho}
+    =
+    h_\psi(\mathbf{g}),
+    \qquad
+    \pi_b
+    =
+    \frac{
+        \exp(\ell_b^{\rho}/\tau_\rho)
+    }{
+        \sum_{r=1}^{B}\exp(\ell_r^{\rho}/\tau_\rho)
+    },
+    \label{eq:ecot_budget_policy}
+\end{equation}
+where $h_\psi(\cdot)$ is a two-layer MLP with layer normalization and GELU activation, and $\tau_\rho$ is the budget-measure temperature. The final controller layer is initialized with zero weights and a positive bias on the base-budget logit. Consequently, training starts close to the stable single-budget transport model and gradually learns when an episode benefits from lower or higher evidence budgets.
+
+The mixed mass-response score is
+\begin{equation}
+    \bar{s}_{i,c,k}^{\mathrm{mix}}
+    =
+    \sum_{b=1}^{B}\pi_b s_{i,c,k,b}.
+\end{equation}
+This sum is a discrete approximation to the response-path integral
+\begin{equation}
+    S_{\mathrm{mix}}(q,c,k \mid E)
+    =
+    \sum_{b=1}^{B}\pi_b(E)s_{\rho_b}(q,c,k)
+    \approx
+    \int s_{\rho}(q,c,k)\,d\pi_E(\rho).
+\end{equation}
+To further stabilize optimization, \method{} uses a base-budget homotopy:
+\begin{equation}
+    s_{i,c,k}^{\method}
+    =
+    s_{i,c,k,b_0}
+    +
+    \lambda_{\mathrm{hom}}
+    \left(
+        \bar{s}_{i,c,k}^{\mathrm{mix}}
+        -
+        s_{i,c,k,b_0}
+    \right),
+    \label{eq:ecot_base_anchor}
+\end{equation}
+where $b_0$ indexes the base budget $\rho_0$, and
+\begin{equation}
+    \lambda_{\mathrm{hom}}
+    =
+    \lambda_{\max}\sigma(\eta_{\lambda}).
+\end{equation}
+In the implementation, $\lambda_{\max}=1$ and $\eta_{\lambda}$ is initialized to a negative value, so the model begins nearly identical to the base fixed-budget UOT classifier before moving toward adaptive mass-response integration.
+
+\subsubsection{Entropic Support-Risk Aggregation}
+After transport, support examples are aggregated at the score level. For $K=1$, the class score is simply
+\begin{equation}
+    S_{i,c}=s_{i,c,1}^{\method}.
+\end{equation}
+For $K>1$, \method{} uses temperature-controlled log-mean-exp pooling, interpreted as entropic support-risk aggregation:
+\begin{equation}
+    S_{i,c}
+    =
+    \tau_K
+    \left[
+        \log\sum_{k=1}^{K}
+        \exp\left(\frac{s_{i,c,k}^{\method}}{\tau_K}\right)
+        -
+        \log K
+    \right],
+    \label{eq:ecot_shot_pooling}
+\end{equation}
+where
+\begin{equation}
+    \tau_K
+    =
+    \tau_{\min}
+    +
+    (\tau_{\max}-\tau_{\min})\sigma(\eta_K).
+\end{equation}
+The default bounds are $\tau_{\min}=0.5$ and $\tau_{\max}=2.0$. The associated support weights are
+\begin{equation}
+    w_{i,c,k}
+    =
+    \operatorname{softmax}_{k}
+    \left(
+        \frac{s_{i,c,k}^{\method}}{\tau_K}
+    \right),
+\end{equation}
+which are also used to aggregate diagnostic quantities such as class-level transport cost and transported mass. This pooling adaptively emphasizes stronger support evidence without claiming that the support set has been decomposed into independent physical factors.
+
+The predicted label is obtained by
+\begin{equation}
+    \hat{y}_i
+    =
+    \arg\max_c S_{i,c}.
+\end{equation}
+
+\subsubsection{Training Objective}
+The model is trained episodically with cross-entropy over query labels:
+\begin{equation}
+    \mathcal{L}_{\mathrm{ce}}
+    =
+    -\frac{1}{|\Qset|}
+    \sum_{(x_i^q,y_i^q)\in\Qset}
+    \log
+    \frac{\exp(S_{i,y_i^q})}
+    {\sum_c \exp(S_{i,c})}.
+\end{equation}
+A small identity regularizer keeps the episode-conditioned score close to the base-budget score during early training:
+\begin{equation}
+    \mathcal{L}_{\mathrm{id}}
+    =
+    \frac{1}{NQK}
+    \sum_{i,c,k}
+    \left(
+        s_{i,c,k}^{\method}
+        -
+        s_{i,c,k,b_0}
+    \right)^2.
+\end{equation}
+The final objective is
+\begin{equation}
+    \mathcal{L}
+    =
+    \mathcal{L}_{\mathrm{ce}}
+    +
+    \beta_{\mathrm{id}}\mathcal{L}_{\mathrm{id}},
+    \label{eq:ecot_loss}
+\end{equation}
+with $\beta_{\mathrm{id}}=10^{-4}$ by default. All encoder, token-projection, threshold, controller, and pooling-temperature parameters are optimized end-to-end through the differentiable transport scores. The computational cost scales with $NQBK$ transport solves per class, but all query--class--support--budget problems are vectorized in the implementation.
+
+\subsection{Experimental Setup}
+The experimental platform consists of a controllable high-voltage source, artificial insulation-defect specimens, an HFCT-based sensing path, a digital oscilloscope, and an offline pulse-processing pipeline. The acquired PD pulses are segmented, amplitude-normalized, and converted into CWT scalograms for pulse-level classification. All experiments follow the same train/validation/test split and the same episodic evaluation protocol.
+
+\subsection{Dataset Description}
+The benchmark contains 1873 scalogram images from four classes: corona discharge, internal discharge, high-frequency noise/background, and surface discharge. The dataset is divided into training, validation, and test sets with 1393, 232, and 248 samples, respectively. The validation and test sets are class-balanced, containing 58 and 62 samples per class. Table~\ref{tab:dataset_summary} summarizes the dataset composition.
+
+\begin{table}[t]
+\centering
+\caption{Dataset summary for the four-class PD scalogram benchmark.}
+\label{tab:dataset_summary}
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{0pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
+\toprule
+Class & Train & Val & Test & Total \\
+\midrule
+Corona & 434 & 58 & 62 & 554 \\
+Internal & 270 & 58 & 62 & 390 \\
+High Frequency Noise & 380 & 58 & 62 & 500 \\
+Surface & 309 & 58 & 62 & 429 \\
+\midrule
+Total & 1393 & 232 & 248 & 1873 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+The acquired continuous recordings are segmented into short windows, and candidate discharge events are extracted from each window. Each detected pulse is temporally aligned and cropped into a fixed-length segment before time--frequency transformation. For an input pulse $x(t)$ and mother wavelet $g(t)$, the continuous wavelet transform (CWT) is defined as
+\begin{equation}
+    W_x(\tau,a)=\frac{1}{\sqrt{a}}\int x(t)g^*\left(\frac{t-\tau}{a}\right)dt,
+    \label{eq:cwt}
+\end{equation}
+where $a$ denotes scale and $\tau$ denotes temporal shift. The corresponding scalogram is computed as
+\begin{equation}
+    \mathcal{X}(\tau,a)=|W_x(\tau,a)|^2 .
+    \label{eq:scalogram}
+\end{equation}
+The resulting time--frequency images are log-compressed to preserve weak discharge structures while reducing the dynamic range of high-energy components. For few-shot models, each scalogram is resized to $84\times84$. Transfer-learning baselines use the native input resolution required by the pretrained backbone, such as $224\times224$.
+
+To evaluate data efficiency, the training set is subsampled into low-label regimes containing 60, 160, 240, and 1393 training samples. For the four-class setting, the 60-, 160-, and 240-sample regimes correspond to 15, 40, and 60 training samples per class, respectively. The validation and test sets are kept fixed across all regimes.
+
+Each few-shot episode consists of a support set and a query set:
+\begin{equation}
+    \Sset=
+    \{(x_{c,k}^{s},c)\mid c=1,\ldots,N,\;k=1,\ldots,K\},
+    \label{eq:support_set}
+\end{equation}
+\begin{equation}
+    \Qset=\{(x_j^q,y_j^q)\}_{j=1}^{NQ},
+    \label{eq:query_set}
+\end{equation}
+where $N$ is the number of classes, $K$ is the number of support shots per class, and $Q$ is the number of query samples per class. The standard protocol uses $N=4$, $K\in\{1,5\}$, and $Q=1$. Therefore, each 1-shot episode contains 4 support and 4 query scalograms, whereas each 5-shot episode contains 20 support and 4 query scalograms. The prediction rule is
+\begin{equation}
+    \hat{y}_j=\arg\max_c S_{j,c},
+    \label{eq:prediction}
+\end{equation}
+where $S_{j,c}$ is the class score for query sample $x_j^q$ and class $c$.
+
+
+\begin{table*}[!t]
+\centering
+\caption{Benchmark comparison of few-shot PD scalogram classification under different training-data regimes. The reported value is the mean test accuracy (\%). The best result in each populated column is highlighted in bold.}
+\vspace{-2pt}
+\label{tab:benchmark_pd_scalogram_fewshot}
+\small
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{0pt}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lcccccccc@{}}
+\toprule
+\multirow{2}{*}{Method}
+& \multicolumn{2}{c}{60 samples}
+& \multicolumn{2}{c}{160 samples}
+& \multicolumn{2}{c}{240 samples}
+& \multicolumn{2}{c}{1393 samples} \\
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-5}
+\cmidrule(lr){6-7}
+\cmidrule(lr){8-9}
+& 1-shot & 5-shot
+& 1-shot & 5-shot
+& 1-shot & 5-shot
+& 1-shot & 5-shot \\
+\midrule
+Cosine Baseline~\cite{chen2019closer} & 71.50 & 79.83 & 81.00 & 90.00 & 83.00 & 90.50 & 91.33 & 94.67 \\
+ProtoNet~\cite{snell2017prototypical} & 70.17 & 82.00 & 80.00 & 86.17 & 81.67 & 87.83 & 91.17 & 94.33 \\
+RelationNet~\cite{sung2018relation} & 80.33 & 82.00 & 78.33 & 89.33 & 84.83 & 89.33 & 95.50 & 94.67 \\
+DN4~\cite{li2019dn4} & 73.50 & 85.67 & 84.50 & 88.83 & 85.00 & 89.83 & 93.33 & \textbf{95.83} \\
+FEAT~\cite{ye2020few} & 77.33 & 84.50 & 76.33 & 90.83 & 89.50 & 92.00 & 92.67 & 93.00 \\
+FRN~\cite{wertheimer2021frn} & 67.50 & 79.17 & 81.83 & 71.33 & 76.17 & 84.33 & 93.67 & 92.17 \\
+CovaMNet~\cite{li2019covariance} & 65.83 & 70.33 & 78.83 & 90.67 & 82.67 & 84.50 & 80.50 & 90.17 \\
+DeepBDC~\cite{xie2022deepbdc} & 68.50 & 80.50 & 80.17 & 83.33 & 84.00 & 89.83 & 95.17 & 95.00 \\
+DeepEMD~\cite{zhang2020deepemd} & 81.33 & 87.00 & 86.83 & 91.00 & 89.00 & 92.17 & 96.00 & \textbf{95.83} \\
+\method{} (Ours) & \textbf{82.17} & \textbf{88.67} & \textbf{87.67} & \textbf{91.67} & \textbf{92.67} & \textbf{93.67} & \textbf{97.83} & \textbf{95.83} \\
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\clearpage
+\subsection{Compact Transfer-Learning and Few-Shot Benchmark}
+
+\begin{table}[!t]
+\centering
+\caption{Compact comparison of transfer-learning strategies and selected 5-shot baselines on PD pulse classification. All entries are placeholders to be replaced by the final verified benchmark values.}
+\label{tab:tl_fsl_comparison}
+\scriptsize
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}llcc@{}}
+\toprule
+\textbf{Model} & \textbf{Strategy} & \textbf{60} & \textbf{1393} \\
+\midrule
+MobileNetV3-Small & Frozen & TODO & TODO \\
+MobileNetV3-Small & Fine-tuned & TODO & TODO \\
+ResNet18 & Frozen & TODO & TODO \\
+ResNet18 & Fine-tuned & TODO & TODO \\
+ResNet50 & Frozen & TODO & TODO \\
+ResNet50 & Fine-tuned & TODO & TODO \\
+VGG16-BN & Frozen & TODO & TODO \\
+VGG16-BN & Fine-tuned & TODO & TODO \\
+DenseNet121 & Frozen & TODO & TODO \\
+DenseNet121 & Fine-tuned & TODO & TODO \\
+\midrule
+DN4~\cite{li2019dn4} & 5-shot & TODO & TODO \\
+DeepEMD~\cite{zhang2020deepemd} & 5-shot & TODO & TODO \\
+\method{} & 5-shot & TODO & TODO \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\refstepcounter{figure}
+\begin{center}
+    \fbox{\parbox[c][0.16\textheight][c]{0.98\columnwidth}{\centering Placeholder for the compact benchmark figure comparing conventional ML, transfer-learning, and few-shot models under the 60-sample and 1393-sample training regimes.}}
+\end{center}
+{\footnotesize Fig.~\thefigure. Placeholder for the compact benchmark figure placed directly below Table~\ref{tab:tl_fsl_comparison}.\label{fig:compact_benchmark_placeholder}\par}
+
+\subsection{Ablation Study}
+
+\begin{table*}[t]
+\centering
+\caption{Major-module ablation of \method{}. Each variant removes or replaces one core component of the proposed framework while keeping the same backbone, data split, optimizer, scheduler, and episodic protocol.}
+\label{tab:ecmrot_major_module_ablation}
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{3.2pt}
+\scriptsize
+\begin{tabular}{l l c c c c}
+\toprule
+\textbf{Variant} &
+\textbf{Disabled / replaced component} &
+\multicolumn{2}{c}{\textbf{Low-label}} &
+\multicolumn{2}{c}{\textbf{1393 samples}} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+ & & \textbf{1-shot} & \textbf{5-shot} & \textbf{1-shot} & \textbf{5-shot} \\
+\midrule
+M1: Architectural control
+& Pre-transport prototype pooling before UOT matching
+& TODO & TODO & TODO & TODO \\
+
+M2: Response path removed
+& Mass-response path collapsed to single budget $\rho=0.80$
+& TODO & TODO & TODO & TODO \\
+
+M3: Budget measure removed
+& Episode-conditioned budget measure replaced by uniform measure
+& TODO & TODO & TODO & TODO \\
+
+M4: Homotopy removed
+& Base-budget homotopy removed
+& TODO & TODO & TODO & TODO \\
+
+M5: Support-risk temperature fixed
+& Entropic support-risk aggregation fixed
+& TODO & TODO & TODO & TODO \\
+
+\textbf{Full \method{}}
+& Mass-response quadrature + episode-conditioned budget measure + base-budget homotopy + entropic support-risk aggregation
+& \textbf{TODO} & \textbf{TODO} & \textbf{TODO} & \textbf{TODO} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+
+\begin{table}[t]
+\centering
+\caption{Robustness under background-noise stress tests at three SNR settings. Final values should be filled using completed robustness runs.}
+\label{tab:noise_robustness}
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{0pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lccc@{}}
+\toprule
+Method & TODO SNR & TODO SNR & TODO SNR \\
+\midrule
+ProtoNet & TODO & TODO & TODO \\
+DN4 & TODO & TODO & TODO \\
+DeepEMD & TODO & TODO & TODO \\
+\method{} & TODO & TODO & TODO \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\subsection{Discussion}
+
+\textbf{TODO.}
+
+
+% =========================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% =========================================================
+
+\section*{Acknowledgment}
+This work was supported by Vietnam Electricity (EVN) under Grant No. 07/HD-EVN-PCHANAM.
+
+% =========================================================
+% References: use your .bib file in the final paper.
+% =========================================================
+\clearpage
+\bibliographystyle{IEEEtran}
+
+\begin{thebibliography}{99}
+
+\bibitem{IEC62478}
+International Electrotechnical Commission,
+\emph{IEC TS 62478: High-Voltage Test Techniques---Measurement of Partial Discharges by Electromagnetic and Acoustic Methods},
+IEC TS 62478:2016, Geneva, Switzerland, 2016.
+
+\bibitem{IEC60270}
+International Electrotechnical Commission,
+\emph{IEC 60270: High-Voltage Test Techniques---Partial Discharge Measurements},
+IEC 60270:2000+AMD1:2015 CSV, Geneva, Switzerland, 2015.
+
+\bibitem{KreugerBook}
+F. H. Kreuger,
+\emph{Partial Discharge Detection in High-Voltage Equipment}.
+London, U.K.: Butterworths, 1989.
+
+\bibitem{StonePD}
+G. C. Stone,
+``Partial discharge diagnostics and electrical equipment insulation condition assessment,''
+\emph{IEEE Transactions on Dielectrics and Electrical Insulation},
+vol. 12, no. 5, pp. 891--904, Oct. 2005,
+doi: 10.1109/TDEI.2005.1522184.
+
+\bibitem{Wu2015PDOverview}
+M. Wu, H. Cao, J. Cao, H.-L. Nguyen, J. B. Gomes, and S. P. Krishnaswamy,
+``An overview of state-of-the-art partial discharge analysis techniques for condition monitoring,''
+\emph{IEEE Electrical Insulation Magazine},
+vol. 31, no. 6, pp. 22--35, Nov.--Dec. 2015,
+doi: 10.1109/MEI.2015.7303259.
+
+\bibitem{Sahoo2024TIMScalogram}
+R. Sahoo and S. Karmakar,
+``Effectiveness of wavelet scalogram on partial discharge pattern classification of XLPE cable insulation,''
+\emph{IEEE Transactions on Instrumentation and Measurement},
+vol. 73, pp. 1--10, 2024,
+doi: 10.1109/TIM.2024.3363790.
+
+\bibitem{Sahoo2024MeasurementPDMLDL}
+R. Sahoo and S. Karmakar,
+``Comparative analysis of machine learning and deep learning techniques on classification of artificially created partial discharge signal,''
+\emph{Measurement},
+vol. 235, Art. no. 114947, 2024,
+doi: 10.1016/j.measurement.2024.114947.
+
+\bibitem{Tai2024AccessSemiSupervisedPD}
+H. T. Tai, Y. Youn, H.-S. Choi, and Y.-H. Kim,
+``Semi-supervised learning-based partial discharge diagnosis in gas-insulated switchgear,''
+\emph{IEEE Access},
+vol. 12, pp. 115171--115181, 2024,
+doi: 10.1109/ACCESS.2024.3445974.
+
+\bibitem{Yang2025TIMSemiSupervisedPD}
+J. Yang, K. Hu, F. Wang, J. Zhang, J. Bao, and W. Liu,
+``A partial discharge diagnosis method for GIS based on a semi-supervised classification framework and density peak clustering algorithm,''
+\emph{IEEE Transactions on Instrumentation and Measurement},
+vol. 74, pp. 1--13, 2025,
+doi: 10.1109/TIM.2025.3548215.
+
+\bibitem{Jing2025MeasurementTRSMM}
+Q. Jing, J. Yan, Y. Wang, J. Huang, H. Xiao, R. Ding, J. Wang, and Y. Geng,
+``A novel small-sample diagnosis method for GIS partial discharge by transfer robust support matrix machine,''
+\emph{Measurement},
+vol. 255, Art. no. 118054, 2025,
+doi: 10.1016/j.measurement.2025.118054.
+
+\bibitem{Sharma2025TIMBayesianPD}
+A. Sharma, H. Devarajan, S. Govindarajan, T. B. Shanker, J. A. Ardila-Rey, and S. Nandi,
+``High-confidence classification of partial discharge acoustic signals using Bayesian networks for uncertainty quantification,''
+\emph{IEEE Transactions on Instrumentation and Measurement},
+vol. 74, Art. no. 3506511, pp. 1--11, 2025,
+doi: 10.1109/TIM.2025.3529048.
+
+\bibitem{Wang2024TIMSSLFewShot}
+H. Wang, X. Wang, Y. Yang, K. Gryllias, and Z. Liu,
+``A few-shot machinery fault diagnosis framework based on self-supervised signal representation learning,''
+\emph{IEEE Transactions on Instrumentation and Measurement},
+vol. 73, pp. 1--14, 2024,
+doi: 10.1109/TIM.2024.3352689.
+
+\bibitem{Vu2024TIMFewShotBearing}
+M.-H. Vu, V.-Q. Nguyen, T.-T. Tran, V.-T. Pham, and M.-T. Lo,
+``Few-shot bearing fault diagnosis via ensembling transformer-based model with Mahalanobis distance metric learning from multiscale features,''
+\emph{IEEE Transactions on Instrumentation and Measurement},
+vol. 73, Art. no. 2513618, pp. 1--18, 2024,
+doi: 10.1109/TIM.2024.3381270.
+
+\bibitem{snell2017prototypical}
+J. Snell, K. Swersky, and R. Zemel,
+``Prototypical networks for few-shot learning,''
+in \emph{Proc. Adv. Neural Inf. Process. Syst. (NeurIPS)}, 2017.
+
+\bibitem{sung2018relation}
+F. Sung, Y. Yang, L. Zhang, T. Xiang, P. H. S. Torr, and T. M. Hospedales,
+``Learning to compare: Relation network for few-shot learning,''
+in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2018, pp. 1199--1208.
+
+\bibitem{chen2019closer}
+W.-Y. Chen, Y.-C. Liu, Z. Kira, Y.-C. F. Wang, and J.-B. Huang,
+``A closer look at few-shot classification,''
+in \emph{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2019.
+
+\bibitem{ye2020few}
+H.-J. Ye, H. Hu, D.-C. Zhan, and F. Sha,
+``Few-shot learning via embedding adaptation with set-to-set functions,''
+in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2020, pp. 8808--8817.
+
+\bibitem{li2019covariance}
+W. Li, J. Xu, J. Huo, L. Wang, Y. Gao, and J. Luo,
+``Distribution consistency based covariance metric networks for few-shot learning,''
+in \emph{Proc. AAAI Conf. Artif. Intell.}, vol. 33, no. 1, pp. 8642--8649, 2019,
+doi: 10.1609/aaai.v33i01.33018642.
+
+\bibitem{li2019dn4}
+W. Li, L. Wang, J. Xu, J. Huo, Y. Gao, and J. Luo,
+``Revisiting local descriptor based image-to-class measure for few-shot learning,''
+in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2019, pp. 7260--7268.
+
+\bibitem{Cuturi2013Sinkhorn}
+M. Cuturi,
+``Sinkhorn distances: Lightspeed computation of optimal transport,''
+in \emph{Proc. Adv. Neural Inf. Process. Syst. (NeurIPS)}, 2013.
+
+\bibitem{PeyreCuturi2019}
+G. Peyr\'e and M. Cuturi,
+``Computational optimal transport,''
+\emph{Foundations and Trends in Machine Learning},
+vol. 11, no. 5--6, pp. 355--602, 2019,
+doi: 10.1561/2200000073.
+
+\bibitem{zhang2020deepemd}
+C. Zhang, Y. Cai, G. Lin, and C. Shen,
+``DeepEMD: Few-shot image classification with differentiable earth mover's distance and structured classifiers,''
+in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2020, pp. 12203--12213.
+
+\bibitem{wertheimer2021frn}
+D. Wertheimer, L. Tang, and B. Hariharan,
+``Few-shot classification with feature map reconstruction networks,''
+in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2021, pp. 8012--8021.
+
+\bibitem{xie2022deepbdc}
+J. Xie, F. Long, J. Lv, Q. Wang, and P. Li,
+``Joint distribution matters: Deep Brownian distance covariance for few-shot classification,''
+in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2022, pp. 7972--7981.
+
+\bibitem{Chizat2018UOT}
+L. Chizat, G. Peyr\'e, B. Schmitzer, and F.-X. Vialard,
+``Unbalanced optimal transport: Dynamic and Kantorovich formulations,''
+\emph{Journal of Functional Analysis},
+vol. 274, no. 11, pp. 3090--3123, 2018,
+doi: 10.1016/j.jfa.2018.03.008.
+
+\end{thebibliography}
+\end{document}

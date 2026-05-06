@@ -115,6 +115,41 @@ def resolve_class_dirs(root_path):
     return mapping
 
 
+def collect_split_files(split_path, classes=None):
+    """Collect canonical class image files from one split folder."""
+    class_names = list(classes or CLASS_ORDER)
+    split_files = []
+    class_dirs = resolve_class_dirs(split_path)
+    for class_name in class_names:
+        canonical = canonicalize_class_name(class_name)
+        if canonical is None:
+            print(f"Warning: Unknown class name for split loading: {class_name}")
+            continue
+        class_path = class_dirs.get(canonical)
+        if class_path is None:
+            print(f"Warning: Class folder not found: {split_path}/{class_name}")
+            continue
+
+        files = list_image_files(class_path)
+        label = CLASS_MAP[canonical]
+        split_files.extend([(os.path.join(class_path, f), label) for f in files])
+    return split_files
+
+
+def load_external_scalogram_split(split_path, transform, classes=None):
+    """Load an external test split using an existing train-derived transform."""
+    split_files = collect_split_files(split_path, classes=classes)
+    images, labels = [], []
+    for fpath, label in split_files:
+        img = Image.open(fpath).convert('RGB')
+        images.append(transform(img).numpy())
+        labels.append(label)
+
+    images = np.array(images) if images else np.array([])
+    labels = np.array(labels) if labels else np.array([])
+    return images, labels, split_files
+
+
 class PDScalogramPreSplit:
     """Dataset loader for pre-split folders (train/val/test already separated).
     

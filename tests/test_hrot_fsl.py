@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from net.ec_mrot import ECMROT
 from net.hrot_fsl import HROTFSL
 from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbolic_distance_matrix, safe_project_to_ball
 from net.model_factory import build_model_from_args
@@ -57,6 +58,42 @@ def _build_model(**overrides) -> HROTFSL:
     )
     kwargs.update(overrides)
     return HROTFSL(**kwargs)
+
+
+def _build_ec_mrot_model(**overrides) -> ECMROT:
+    kwargs = dict(
+        backbone_name="conv64f",
+        image_size=64,
+        hidden_dim=64,
+        token_dim=24,
+        eam_hidden_dim=32,
+        curvature_init=1.0,
+        projection_scale=0.1,
+        token_temperature=0.1,
+        score_scale=8.0,
+        tau_q=0.5,
+        tau_c=0.5,
+        sinkhorn_epsilon=0.1,
+        sinkhorn_iterations=12,
+        sinkhorn_tolerance=1e-5,
+        fixed_mass=0.8,
+        min_mass=0.1,
+        mass_bonus_init=1.0,
+        lambda_rho=0.05,
+        rho_target=0.8,
+        lambda_rho_rank=0.05,
+        rho_rank_margin=0.05,
+        rho_rank_temperature=0.05,
+        lambda_curvature=0.01,
+        min_curvature=0.05,
+        normalize_euclidean_tokens=True,
+        eval_use_float64=True,
+        hyperbolic_backend="auto",
+        ot_backend="native",
+        eps=1e-6,
+    )
+    kwargs.update(overrides)
+    return ECMROT(**kwargs)
 
 
 def test_hyperbolic_distance_and_frechet_mean_basic_properties():
@@ -793,6 +830,105 @@ def test_hrot_fsl_variant_j_ecot_does_not_use_learned_mass_paths():
     assert torch.allclose(outputs["rho"], torch.full_like(outputs["rho"], model.ecot_base_rho), atol=1e-6, rtol=0.0)
     assert "query_token_mass" not in outputs
     assert "support_token_mass" not in outputs
+
+
+def test_ec_mrot_default_matches_hrot_j_ecot_outputs():
+    torch.manual_seed(49)
+    hrot_model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.45,0.60,0.75,0.80,0.90",
+        ecot_base_rho=0.80,
+        ecot_lambda_init=-8.0,
+        ecot_identity_reg=1e-4,
+        ecot_uniform_budget_policy=False,
+        ecot_enable_tau_shot=True,
+    )
+    ec_mrot_model = _build_ec_mrot_model()
+    assert set(hrot_model.state_dict()) == set(ec_mrot_model.state_dict())
+    ec_mrot_model.load_state_dict(hrot_model.state_dict(), strict=True)
+    hrot_model.eval()
+    ec_mrot_model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        hrot_outputs = hrot_model(query, support, return_aux=True)
+        ec_mrot_outputs = ec_mrot_model(query, support, return_aux=True)
+
+    for key in (
+        "logits",
+        "shot_logits",
+        "transport_cost",
+        "transported_mass",
+        "ecot_pi_budget",
+        "ecot_budget_logits",
+        "ecot_lambda",
+        "ecot_rho_bank",
+        "ecot_base_score",
+        "ecot_score",
+        "ecot_budget_scores",
+        "ecot_identity_loss",
+        "ecot_aux_loss",
+    ):
+        assert torch.allclose(ec_mrot_outputs[key], hrot_outputs[key], atol=1e-6, rtol=1e-6), key
+
+    assert torch.allclose(ec_mrot_outputs["ec_mrot_budget_weights"], hrot_outputs["ecot_pi_budget"])
+    assert torch.allclose(ec_mrot_outputs["ec_mrot_episode_budget_measure"], hrot_outputs["ecot_pi_budget"])
+    assert torch.allclose(ec_mrot_outputs["ec_mrot_response_grid"], hrot_outputs["ecot_rho_bank"])
+    assert torch.allclose(ec_mrot_outputs["ec_mrot_base_budget_score"], hrot_outputs["ecot_base_score"])
+    assert torch.allclose(ec_mrot_outputs["ec_mrot_mass_response_score"], hrot_outputs["ecot_score"])
+    assert torch.allclose(ec_mrot_outputs["ec_mrot_homotopy_lambda"], hrot_outputs["ecot_lambda"])
+
+
+def test_ec_mrot_optional_regularizers_are_off_by_default_and_payload_is_present():
+    torch.manual_seed(50)
+    model = _build_ec_mrot_model()
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.variant == "J_ECOT"
+    assert not model.uses_learned_mass
+    assert not model.uses_hyperbolic_geometry
+    assert model.ec_mrot_response_mode == "discrete_quadrature"
+    assert model.ec_mrot_budget_kl_reg == 0.0
+    assert model.ec_mrot_budget_entropy_reg == 0.0
+    assert outputs["ec_mrot_budget_kl_loss"].item() == 0.0
+    assert outputs["ec_mrot_budget_entropy_loss"].item() == 0.0
+    assert outputs["ec_mrot_response_grid_spacing_loss"].item() == 0.0
+    assert outputs["ec_mrot_response_grid"].shape == outputs["ecot_rho_bank"].shape
+    assert torch.allclose(outputs["ec_mrot_budget_weights"].sum(), torch.tensor(1.0, dtype=outputs["logits"].dtype))
+
+
+def test_ec_mrot_learnable_response_grid_is_ordered_and_regularized():
+    torch.manual_seed(51)
+    model = _build_ec_mrot_model(
+        learn_response_grid=True,
+        budget_prior="base_anchored",
+        budget_kl_reg=0.25,
+        budget_entropy_reg=0.1,
+        grid_spacing_reg=0.5,
+    )
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    outputs = model(query, support, return_aux=True)
+    grid = outputs["ec_mrot_response_grid"]
+
+    assert torch.all(grid > 0.0)
+    assert torch.all(grid < 1.0)
+    assert torch.all(grid[1:] > grid[:-1])
+    assert abs(float(grid[model.ecot_base_idx].detach()) - model.ecot_base_rho) <= 1e-5
+    assert outputs["ec_mrot_budget_kl_loss"].item() >= 0.0
+    assert torch.isfinite(outputs["ec_mrot_budget_entropy_loss"])
+    assert torch.isfinite(outputs["aux_loss"])
 
 
 def test_hrot_fsl_variant_cp_ecot_shapes_defaults_and_diagnostics():
@@ -1931,6 +2067,81 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
 
 
+def test_ec_mrot_model_factory_builds_default_j_ecot_clone():
+    args = SimpleNamespace(
+        model="ec_mrot",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        token_dim=24,
+        hrot_token_dim=24,
+        hrot_eam_hidden_dim=32,
+        hrot_curvature_init=1.0,
+        hrot_projection_scale=0.1,
+        hrot_token_temperature=0.1,
+        hrot_score_scale=8.0,
+        hrot_tau_q=0.5,
+        hrot_tau_c=0.5,
+        hrot_sinkhorn_epsilon=0.1,
+        hrot_sinkhorn_iterations=10,
+        hrot_sinkhorn_tolerance=1e-5,
+        hrot_fixed_mass=0.8,
+        hrot_pre_transport_shot_pool="false",
+        hrot_ecot_rho_bank=None,
+        hrot_ecot_base_rho=None,
+        hrot_ecot_budget_tau=1.0,
+        hrot_ecot_max_lambda=1.0,
+        hrot_ecot_lambda_init=-8.0,
+        hrot_ecot_controller_hidden=32,
+        hrot_ecot_uniform_budget_policy="false",
+        hrot_ecot_enable_tau_shot="true",
+        hrot_ecot_tau_shot_min=0.5,
+        hrot_ecot_tau_shot_max=2.0,
+        hrot_ecot_enable_threshold_offset="false",
+        hrot_ecot_identity_reg=1e-4,
+        hrot_ecot_policy_entropy_reg=1e-3,
+        hrot_min_mass=0.1,
+        hrot_mass_bonus_init=1.0,
+        hrot_lambda_rho=0.05,
+        hrot_rho_target=0.8,
+        hrot_lambda_rho_rank=0.05,
+        hrot_rho_rank_margin=0.05,
+        hrot_rho_rank_temperature=0.05,
+        hrot_lambda_curvature=0.01,
+        hrot_min_curvature=0.05,
+        hrot_structure_cost_init=0.05,
+        hrot_normalize_euclidean_tokens="true",
+        hrot_normalize_rho="false",
+        hrot_eval_use_float64="true",
+        hrot_hyperbolic_backend="native",
+        hrot_ot_backend="native",
+        hrot_eps=1e-6,
+        ec_mrot_response_mode="discrete_quadrature",
+        ec_mrot_learn_response_grid="false",
+        ec_mrot_budget_prior="uniform",
+        ec_mrot_budget_kl_reg=0.0,
+        ec_mrot_budget_entropy_reg=0.0,
+        ec_mrot_homotopy_schedule="none",
+        ec_mrot_grid_spacing_reg=0.0,
+    )
+    model = build_model_from_args(args)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert isinstance(model, ECMROT)
+    assert model.variant == "J_ECOT"
+    assert tuple(model.ecot_rho_bank) == (0.45, 0.60, 0.75, 0.80, 0.90)
+    assert model.ecot_base_rho == 0.80
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["ec_mrot_episode_budget_measure"].shape == outputs["ecot_pi_budget"].shape
+    assert torch.isfinite(outputs["logits"]).all()
+
+
 def test_hrot_fsl_raw_backbone_tokens_bypass_projector():
     args = SimpleNamespace(
         model="hrot_fsl",
@@ -1998,18 +2209,30 @@ def test_forward_scores_routes_query_targets_and_aux_to_hrot():
         if not isinstance(node, ast.If):
             continue
         test = node.test
-        if (
-            isinstance(test, ast.Compare)
-            and isinstance(test.left, ast.Attribute)
-            and test.left.attr == "model"
-            and len(test.ops) == 1
-            and isinstance(test.ops[0], ast.Eq)
-            and len(test.comparators) == 1
-            and isinstance(test.comparators[0], ast.Constant)
-            and test.comparators[0].value == "hrot_fsl"
-        ):
-            hrot_branch = node
-            break
+        if isinstance(test, ast.Compare) and isinstance(test.left, ast.Attribute) and test.left.attr == "model":
+            if (
+                len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == "hrot_fsl"
+            ):
+                hrot_branch = node
+                break
+            if (
+                len(test.ops) == 1
+                and isinstance(test.ops[0], ast.In)
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], (ast.Set, ast.Tuple, ast.List))
+            ):
+                values = {
+                    item.value
+                    for item in test.comparators[0].elts
+                    if isinstance(item, ast.Constant)
+                }
+                if "hrot_fsl" in values:
+                    hrot_branch = node
+                    break
 
     assert hrot_branch is not None, "forward_scores must keep a dedicated hrot_fsl branch"
 

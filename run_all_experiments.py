@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -26,6 +27,20 @@ DEEPEMD_5SHOT_TRAIN_SFC_STEPS = 15
 DEEPEMD_5SHOT_TRAIN_SFC_BS = 20
 DEEPEMD_5SHOT_TEST_EXACT = "false"
 DEEPEMD_5SHOT_TEST_SFC = "false"
+
+
+def default_dataset_path():
+    local = Path(__file__).resolve().parent.parent.parent / "dataset" / "scalogram_27_1"
+    return str(local) if local.is_dir() else "/workspace/pd_fewshot/scalogram_27_1"
+
+
+def default_noise_test_root():
+    local = (
+        Path(__file__).resolve().parent.parent.parent
+        / "dataset"
+        / "scalogram_27_1_pd_noise_benchmark_test_moderate"
+    )
+    return str(local) if local.is_dir() else None
 
 
 def log_cli_command(args, log_path="results/cli_commands.log"):
@@ -52,16 +67,28 @@ def get_args():
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/workspace/pd_fewshot/scalogram_27_1_hrot_robust",
-        help="Path to dataset",
+        default=default_dataset_path(),
+        help="Path to clean train/val/test dataset",
     )
     parser.add_argument("--dataset_name", type=str, default="knee_aug_split", help="Dataset name for logging")
     parser.add_argument(
         "--test_protocol",
         type=str,
         default="auto",
-        choices=["auto", "clean", "robust"],
-        help="Final-test protocol. auto uses robust test pools when the dataset provides them.",
+        choices=["auto", "clean", "noise"],
+        help="Final-test protocol. auto uses --noise_test_root when SNR test folders are available.",
+    )
+    parser.add_argument(
+        "--noise_test_root",
+        type=str,
+        default=default_noise_test_root(),
+        help="Root containing SNR benchmark test folders such as test_snr5db_rf_1_15mhz.",
+    )
+    parser.add_argument(
+        "--noise_test_splits",
+        type=str,
+        default="auto",
+        help="Comma-separated SNR split folders to test, or auto to use all test_snr* folders.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
@@ -165,29 +192,99 @@ def get_pulse_fewshot_root():
     return Path(__file__).resolve().parent
 
 
-def dataset_has_hrot_robust_layout(dataset_path):
+def sanitize_result_tag(value):
+    tag = re.sub(r"[^A-Za-z0-9]+", "_", str(value).strip()).strip("_").lower()
+    return tag or "test"
+
+
+def snr_sort_key(split_name):
+    name = str(split_name).lower()
+    match = re.search(r"snr(?:_minus)?(\d+)db", name)
+    if not match:
+        return (1, name)
+    value = int(match.group(1))
+    if "snr_minus" in name:
+        value = -value
+    return (0, value, name)
+
+
+def split_has_class_dirs(split_path):
+    expected = {"surface", "internal", "corona", "notpd", "nopd", "not_pd"}
+    if not Path(split_path).is_dir():
+        return False
+    child_dirs = {
+        child.name.lower()
+        for child in Path(split_path).iterdir()
+        if child.is_dir()
+    }
+    return bool(child_dirs & expected)
+
+
+def discover_noise_test_splits(noise_test_root, requested_splits="auto"):
+    if not noise_test_root:
+        return []
+    root = Path(noise_test_root)
+    if not root.is_dir():
+        return []
+
+    requested = str(requested_splits or "auto").strip()
+    if requested.lower() == "auto":
+        names = [
+            child.name
+            for child in root.iterdir()
+            if child.is_dir()
+            and child.name.lower().startswith("test_snr")
+            and split_has_class_dirs(child)
+        ]
+        if not names:
+            names = [
+                child.name
+                for child in root.iterdir()
+                if child.is_dir() and split_has_class_dirs(child)
+            ]
+        return sorted(names, key=snr_sort_key)
+    return [name.strip() for name in requested.split(",") if name.strip()]
+
+
+def dataset_has_training_layout(dataset_path):
     root = Path(dataset_path)
-    required = [
-        "train",
-        "val",
-        "test_clean",
-        "test_1shot_support_snr10",
-        "test_1shot_query_snr10",
-        "test_5shot_support_outlier_snr0",
-        "test_5shot_query_snr10",
-    ]
-    return all((root / name).is_dir() for name in required)
+    return (
+        (root / "train").is_dir()
+        and (root / "val").is_dir()
+        and ((root / "test").is_dir() or (root / "test_clean").is_dir())
+    )
 
 
-def resolve_test_protocol(requested_protocol, dataset_path):
+def dataset_has_noise_benchmark_layout(dataset_path):
+    return bool(discover_noise_test_splits(dataset_path, "auto"))
+
+
+def infer_training_dataset_path(noise_test_root):
+    root = Path(noise_test_root)
+    name = root.name
+    base_name = name.split("_pd_noise_benchmark_test")[0]
+    if not base_name or base_name == name:
+        return None
+    candidate = root.parent / base_name
+    return candidate if dataset_has_training_layout(candidate) else None
+
+
+def resolve_test_protocol(requested_protocol, noise_test_root, noise_test_splits="auto"):
     requested_protocol = str(requested_protocol).lower()
     if requested_protocol == "auto":
-        return "robust" if dataset_has_hrot_robust_layout(dataset_path) else "clean"
+        return "noise" if discover_noise_test_splits(noise_test_root, noise_test_splits) else "clean"
+    if requested_protocol == "noise" and not discover_noise_test_splits(noise_test_root, noise_test_splits):
+        raise ValueError("--test_protocol noise requires --noise_test_root with at least one SNR test folder.")
     return requested_protocol
 
 
-def result_protocol_suffix(test_protocol):
-    return "_robust" if str(test_protocol).lower() == "robust" else ""
+def result_protocol_suffix(test_protocol, test_split_name=None):
+    if test_split_name:
+        return f"_{sanitize_result_tag(test_split_name)}"
+    test_protocol = str(test_protocol).lower()
+    if test_protocol in {"auto", "clean", ""}:
+        return ""
+    return f"_{sanitize_result_tag(test_protocol)}"
 
 
 def build_spifce_ablation_variants(suite_name):
@@ -386,6 +483,8 @@ def run_experiment(
     spif_global_only,
     spif_local_only,
     test_protocol,
+    noise_test_root,
+    noise_test_splits,
     passthrough_args=None,
     variant_args=None,
     experiment_tag=None,
@@ -405,6 +504,9 @@ def run_experiment(
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
     print(f"Test Proto  : {test_protocol}")
+    if str(test_protocol).lower() == "noise":
+        print(f"Noise Root  : {noise_test_root}")
+        print(f"Noise Splits: {', '.join(discover_noise_test_splits(noise_test_root, noise_test_splits))}")
     print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
     print(f"Test Seed   : final_test_seed={final_test_seed}")
     if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
@@ -514,6 +616,9 @@ def run_experiment(
         cmd.extend(["--fewshot_backbone", applied_backbone])
     if not use_external_smnet:
         cmd.extend(["--test_protocol", test_protocol])
+        if str(test_protocol).lower() == "noise":
+            cmd.extend(["--noise_test_root", noise_test_root])
+            cmd.extend(["--noise_test_splits", noise_test_splits])
         cmd.extend(["--deepemd_fast_val", "true"])
         cmd.extend(
             [
@@ -570,7 +675,7 @@ def run_experiment(
         return False
 
 
-def generate_comparison_charts(dataset_name, shots, models, test_protocol="clean"):
+def generate_comparison_charts(dataset_name, shots, models, test_protocol="clean", test_split_names=None):
     import re
 
     try:
@@ -581,6 +686,45 @@ def generate_comparison_charts(dataset_name, shots, models, test_protocol="clean
 
     results_dir = "results/"
     model_display_names = {model_name: get_model_metadata(model_name)["display_name"] for model_name in models}
+    if test_split_names:
+        for test_split_name in test_split_names:
+            protocol_suffix = result_protocol_suffix(test_protocol, test_split_name)
+            for samples in SAMPLES_LIST:
+                samples_str = f"{samples}samples" if samples is not None else "allsamples"
+                model_results = {}
+
+                for model in models:
+                    display_name = model_display_names[model]
+                    model_results[display_name] = {}
+
+                    for shot in shots:
+                        result_file = os.path.join(
+                            results_dir,
+                            f"results_{dataset_name}_{model}_{samples_str}_{shot}shot{protocol_suffix}.txt",
+                        )
+                        if os.path.exists(result_file):
+                            with open(result_file, "r") as handle:
+                                content = handle.read()
+                            match = re.search(r"Accuracy\s*:\s*([\d.]+)\s*(?:\+/-|Â±)", content)
+                            if match:
+                                model_results[display_name][f"{shot}shot"] = float(match.group(1))
+
+                model_results = {
+                    name: scores
+                    for name, scores in model_results.items()
+                    if all(f"{shot}shot" in scores for shot in shots)
+                }
+                if not model_results:
+                    continue
+
+                training_samples = samples if samples is not None else "All"
+                save_path = os.path.join(
+                    results_dir,
+                    f"model_comparison_{dataset_name}_{samples_str}{protocol_suffix}.png",
+                )
+                plot_model_comparison_bar(model_results, training_samples, save_path)
+                print(f"Model comparison chart saved to {save_path}")
+        return
     protocol_suffix = result_protocol_suffix(test_protocol)
 
     for samples in SAMPLES_LIST:
@@ -621,11 +765,30 @@ def main():
     args = get_args()
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
-    effective_test_protocol = resolve_test_protocol(args.test_protocol, args.dataset_path)
-    if effective_test_protocol == "robust" and not dataset_has_hrot_robust_layout(args.dataset_path):
-        raise ValueError(
-            "--test_protocol robust requires train/val/test_clean and all HROT robust test pools."
+    if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
+        args.noise_test_root = args.dataset_path
+        inferred_dataset_path = infer_training_dataset_path(args.dataset_path)
+        if inferred_dataset_path is None:
+            raise ValueError(
+                "--dataset_path points to a noise benchmark root. "
+                "Pass the clean train/val/test dataset with --dataset_path, "
+                "or place the matching clean dataset beside the noise root."
+            )
+        print(
+            "Interpreting --dataset_path as --noise_test_root; "
+            f"using clean dataset: {inferred_dataset_path}"
         )
+        args.dataset_path = str(inferred_dataset_path)
+    effective_test_protocol = resolve_test_protocol(
+        args.test_protocol,
+        args.noise_test_root,
+        args.noise_test_splits,
+    )
+    noise_test_split_names = (
+        discover_noise_test_splits(args.noise_test_root, args.noise_test_splits)
+        if effective_test_protocol == "noise"
+        else []
+    )
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
     requested_models = [model.strip() for model in args.models.split(",") if model.strip()]
     valid_models = set(get_model_choices())
@@ -697,6 +860,9 @@ def main():
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
         print(f"Test Proto  : {effective_test_protocol}")
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
         print(f"Total       : {len(experiments)} ablation experiment(s)")
         print("=" * 72)
     elif args.mode_id is not None:
@@ -745,6 +911,9 @@ def main():
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
         print(f"Total       : {len(experiments)} experiment(s)")
         print("=" * 72)
     else:
@@ -794,6 +963,9 @@ def main():
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
         print(f"Total       : {len(experiments)} experiments")
         print("=" * 72)
 
@@ -823,6 +995,8 @@ def main():
             spif_global_only=args.spif_global_only,
             spif_local_only=args.spif_local_only,
             test_protocol=effective_test_protocol,
+            noise_test_root=args.noise_test_root,
+            noise_test_splits=args.noise_test_splits,
             passthrough_args=args.passthrough_args,
             variant_args=experiment["variant_args"],
             experiment_tag=experiment["experiment_tag"],
@@ -849,7 +1023,13 @@ def main():
         print("\n" + "=" * 60)
         print("Generating comparison charts...")
         print("=" * 60)
-        generate_comparison_charts(args.dataset_name, shots, requested_models, effective_test_protocol)
+        generate_comparison_charts(
+            args.dataset_name,
+            shots,
+            requested_models,
+            effective_test_protocol,
+            noise_test_split_names if effective_test_protocol == "noise" else None,
+        )
     else:
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")

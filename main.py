@@ -3,6 +3,7 @@
 import csv
 import os
 import argparse
+import re
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -22,7 +23,7 @@ except ImportError:
     THOP_AVAILABLE = False
     print("Warning: thop not installed. Run 'pip install thop' for FLOPs calculation.")
 
-from dataset import load_dataset
+from dataset import load_dataset, load_external_scalogram_split
 from dataloader.dataloader import FewshotDataset, RobustFewshotDataset
 from function.function import (
     ContrastiveLoss,
@@ -933,9 +934,17 @@ def get_args():
         default="false",
         choices=["true", "false"],
     )
-    parser.add_argument("--hrot_ecot_rho_bank", "--ecot_rho_bank", dest="hrot_ecot_rho_bank", type=str, default=None)
-    parser.add_argument("--hrot_ecot_base_rho", type=float, default=None)
-    parser.add_argument("--hrot_ecot_budget_tau", type=float, default=1.0)
+    parser.add_argument(
+        "--hrot_ecot_rho_bank",
+        "--ecot_rho_bank",
+        "--ec_mrot_mass_response_grid",
+        "--ec_mrot_response_grid",
+        dest="hrot_ecot_rho_bank",
+        type=str,
+        default=None,
+    )
+    parser.add_argument("--hrot_ecot_base_rho", "--ec_mrot_base_budget", dest="hrot_ecot_base_rho", type=float, default=None)
+    parser.add_argument("--hrot_ecot_budget_tau", "--ec_mrot_budget_tau", dest="hrot_ecot_budget_tau", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_max_lambda", type=float, default=1.0)
     parser.add_argument(
         "--hrot_ecot_lambda_init",
@@ -974,6 +983,13 @@ def get_args():
     parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
     parser.add_argument("--hrot_ecot_consensus_tau_mode", type=str, default="fixed", choices=["fixed", "sqrt"])
     parser.add_argument("--hrot_ecot_consensus_tau", type=float, default=1.0)
+    parser.add_argument("--ec_mrot_response_mode", type=str, default="discrete_quadrature", choices=["discrete_quadrature"])
+    parser.add_argument("--ec_mrot_learn_response_grid", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--ec_mrot_budget_prior", type=str, default="uniform", choices=["uniform", "base_anchored"])
+    parser.add_argument("--ec_mrot_budget_kl_reg", type=float, default=0.0)
+    parser.add_argument("--ec_mrot_budget_entropy_reg", type=float, default=0.0)
+    parser.add_argument("--ec_mrot_homotopy_schedule", type=str, default="none", choices=["none", "linear", "cosine"])
+    parser.add_argument("--ec_mrot_grid_spacing_reg", type=float, default=0.0)
     # Deprecated compatibility only: old J_HLM configs may still pass these,
     # but they no longer activate learned shot or token mass.
     parser.add_argument("--hrot_hlm_min_mass", type=float, default=0.1)
@@ -1198,8 +1214,20 @@ def get_args():
         "--test_protocol",
         type=str,
         default="auto",
-        choices=["auto", "clean", "robust"],
-        help="Final-test protocol. auto uses robust test pools when the dataset provides them.",
+        choices=["auto", "clean", "robust", "noise"],
+        help="Final-test protocol. auto uses --noise_test_root first, then robust pools, otherwise clean test.",
+    )
+    parser.add_argument(
+        "--noise_test_root",
+        type=str,
+        default=None,
+        help="Root containing external SNR test folders such as test_snr5db_rf_1_15mhz.",
+    )
+    parser.add_argument(
+        "--noise_test_splits",
+        type=str,
+        default="auto",
+        help="Comma-separated SNR split folders to test, or auto to use all test_snr* folders.",
     )
     parser.add_argument(
         "--model_selection_split",
@@ -2049,6 +2077,35 @@ def get_model(args):
             f"compact_eam_prior_mix={getattr(args, 'hrot_compact_eam_prior_mix', 0.5)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
+    if args.model == "ec_mrot":
+        hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
+        hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
+            getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
+        )
+        mass_response_grid = getattr(args, "hrot_ecot_rho_bank", None) or "0.45,0.60,0.75,0.80,0.90"
+        base_budget = getattr(args, "hrot_ecot_base_rho", None)
+        if base_budget is None:
+            base_budget = 0.80
+        print(
+            "  ec_mrot: backbone spatial tokens -> mass-response UOT quadrature -> "
+            "episode-conditioned budget measure -> base-budget homotopy -> "
+            "entropic support-risk aggregation "
+            f"(token_dim={hrot_token_dim}, "
+            f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
+            f"response_mode={getattr(args, 'ec_mrot_response_mode', 'discrete_quadrature')}, "
+            f"mass_response_grid={mass_response_grid}, "
+            f"base_budget={base_budget}, "
+            f"budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
+            f"homotopy_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
+            f"identity_reg={getattr(args, 'hrot_ecot_identity_reg', 1e-4)}, "
+            f"uniform_measure={getattr(args, 'hrot_ecot_uniform_budget_policy', 'false')}, "
+            f"support_risk_temperature={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
+            f"learn_response_grid={getattr(args, 'ec_mrot_learn_response_grid', 'false')}, "
+            f"budget_prior={getattr(args, 'ec_mrot_budget_prior', 'uniform')}, "
+            f"budget_kl_reg={getattr(args, 'ec_mrot_budget_kl_reg', 0.0)}, "
+            f"budget_entropy_reg={getattr(args, 'ec_mrot_budget_entropy_reg', 0.0)}, "
+            f"homotopy_schedule={getattr(args, 'ec_mrot_homotopy_schedule', 'none')})"
+        )
     if args.model == "crj_fsl":
         crj_raw_tokens = _bool_flag(
             getattr(args, "crj_use_raw_backbone_tokens", getattr(args, "hrot_use_raw_backbone_tokens", "false")),
@@ -2510,6 +2567,96 @@ def infer_source_ids(file_paths):
     return [os.path.splitext(os.path.basename(path))[0] for path in file_paths]
 
 
+def sanitize_result_tag(value):
+    tag = re.sub(r"[^A-Za-z0-9]+", "_", str(value).strip()).strip("_").lower()
+    return tag or "test"
+
+
+def snr_sort_key(split_name):
+    name = str(split_name).lower()
+    match = re.search(r"snr(?:_minus)?(\d+)db", name)
+    if not match:
+        return (1, name)
+    value = int(match.group(1))
+    if "snr_minus" in name:
+        value = -value
+    return (0, value, name)
+
+
+def split_has_class_dirs(split_path):
+    if not os.path.isdir(split_path):
+        return False
+    expected = {"surface", "internal", "corona", "notpd", "nopd", "not_pd"}
+    child_dirs = {
+        name.lower()
+        for name in os.listdir(split_path)
+        if os.path.isdir(os.path.join(split_path, name))
+    }
+    return bool(child_dirs & expected)
+
+
+def discover_noise_test_splits(noise_test_root, requested_splits="auto"):
+    if not noise_test_root:
+        return []
+    root = os.path.abspath(noise_test_root)
+    if not os.path.isdir(root):
+        raise ValueError(f"noise_test_root not found: {root}")
+
+    requested = str(requested_splits or "auto").strip()
+    if requested.lower() == "auto":
+        names = [
+            name
+            for name in os.listdir(root)
+            if os.path.isdir(os.path.join(root, name))
+            and name.lower().startswith("test_snr")
+            and split_has_class_dirs(os.path.join(root, name))
+        ]
+        if not names:
+            names = [
+                name
+                for name in os.listdir(root)
+                if os.path.isdir(os.path.join(root, name))
+                and split_has_class_dirs(os.path.join(root, name))
+            ]
+        names = sorted(names, key=snr_sort_key)
+    else:
+        names = [name.strip() for name in requested.split(",") if name.strip()]
+
+    splits = []
+    for name in names:
+        split_path = os.path.join(root, name)
+        if not os.path.isdir(split_path):
+            raise ValueError(f"Noise test split not found: {split_path}")
+        if not split_has_class_dirs(split_path):
+            raise ValueError(f"Noise test split has no class folders: {split_path}")
+        splits.append((name, split_path))
+    return splits
+
+
+def load_noise_test_pools(args, dataset):
+    splits = discover_noise_test_splits(
+        getattr(args, "noise_test_root", None),
+        getattr(args, "noise_test_splits", "auto"),
+    )
+    pools = {}
+    for split_name, split_path in splits:
+        images, labels, files = load_external_scalogram_split(
+            split_path,
+            transform=dataset.transform,
+            classes=getattr(dataset, "classes", None),
+        )
+        if len(images) == 0:
+            raise ValueError(f"Noise test split is empty: {split_path}")
+        pools[split_name] = {
+            "images": torch.from_numpy(images.astype(np.float32)),
+            "labels": torch.from_numpy(labels).long(),
+            "files": [path for path, _ in files],
+            "path": split_path,
+        }
+        print(f"Loaded noise test split {split_name}: {len(images)} samples")
+    return pools
+
+
 def get_dataset_split_arrays(dataset, split_name):
     images = getattr(dataset, f"X_{split_name}", None)
     labels = getattr(dataset, f"y_{split_name}", None)
@@ -2526,8 +2673,13 @@ def get_dataset_split_arrays(dataset, split_name):
 def get_effective_test_protocol(args, dataset):
     requested = str(getattr(args, "test_protocol", "auto")).lower()
     has_robust = bool(getattr(dataset, "has_hrot_robust_protocol", False))
+    has_noise_root = bool(getattr(args, "noise_test_root", None))
     if requested == "auto":
+        if has_noise_root:
+            return "noise"
         return "robust" if has_robust else "clean"
+    if requested == "noise" and not has_noise_root:
+        raise ValueError("--test_protocol noise requires --noise_test_root.")
     if requested == "robust" and not has_robust:
         raise ValueError(
             "--test_protocol robust requires an HROT robust dataset with "
@@ -2538,8 +2690,13 @@ def get_effective_test_protocol(args, dataset):
 
 
 def get_test_protocol_suffix(args):
+    test_name = str(getattr(args, "current_test_name", "") or "").strip()
+    if test_name:
+        return f"_{sanitize_result_tag(test_name)}"
     protocol = str(getattr(args, "effective_test_protocol", getattr(args, "test_protocol", "clean"))).lower()
-    return "_robust" if protocol == "robust" else ""
+    if protocol in {"auto", "clean", ""}:
+        return ""
+    return f"_{sanitize_result_tag(protocol)}"
 
 
 def build_robust_test_dataset(args, clean_X, clean_y, clean_file_paths, robust_pools, return_indices=False):
@@ -2732,7 +2889,7 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
-    if args.model == "hrot_fsl":
+    if args.model in {"hrot_fsl", "ec_mrot"}:
         return net(
             query,
             support,
@@ -3207,6 +3364,13 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "crj_min_shots",
         "crj_trim_fraction",
         "crj_clip_logit",
+        "ec_mrot_homotopy_lambda",
+        "ec_mrot_budget_kl",
+        "ec_mrot_budget_kl_loss",
+        "ec_mrot_budget_entropy",
+        "ec_mrot_budget_entropy_loss",
+        "ec_mrot_response_grid_spacing_loss",
+        "ec_mrot_aux_loss",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -3475,6 +3639,13 @@ def maybe_load_scheduler_state(scheduler, scheduler_state, checkpoint_path):
         print(f"Warning: failed to load scheduler state from {checkpoint_path}: {exc}")
 
 
+def maybe_set_model_training_progress(net, progress):
+    module = net.module if hasattr(net, "module") else net
+    setter = getattr(module, "set_homotopy_progress", None)
+    if setter is not None:
+        setter(progress)
+
+
 def train_loop(net, train_X, train_y, selection_X, selection_y, args):
     device = torch.device(args.device)
     relation_loss_fn = RelationLoss().to(device)
@@ -3543,6 +3714,8 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         return best_acc, history
 
     for epoch in range(start_epoch, args.num_epochs + 1):
+        denom = max(args.num_epochs - 1, 1)
+        maybe_set_model_training_progress(net, (epoch - 1) / float(denom))
         train_seed = build_episode_seed(args, "train", epoch=epoch)
         train_ds = FewshotDataset(
             train_X,
@@ -3851,8 +4024,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     non_blocking = _pin_memory_enabled(args) and device.type == "cuda"
     num_episodes = len(loader)
     meta = get_model_metadata(args.model)
+    current_test_name = str(getattr(args, "current_test_name", "") or "").strip()
     print(f"\n{'=' * 60}")
     print(f"Final Test: {meta['display_name']} | {args.dataset_name} | {args.shot_num}-shot")
+    if current_test_name:
+        print(f"Test Split: {current_test_name}")
     print(f"{num_episodes} episodes x {args.way_num} classes x {args.query_num_test} query")
     print("=" * 60)
 
@@ -4043,28 +4219,41 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     if test_diag_summary:
         print(f"  TestDiag: {test_diag_summary}")
 
-    wandb.log(
-        {
-            "test_accuracy_mean": acc_mean,
-            "test_accuracy_std": acc_std,
-            "test_accuracy_ci95": acc_ci95,
-            "test_accuracy_worst": acc_worst,
-            "test_accuracy_best": acc_best,
-            "test_precision": prec,
-            "test_recall": rec,
-            "test_f1": f1,
-            "test_p_value": p_val,
-            "inference_time_mean_ms": time_mean,
-            "inference_time_std_ms": time_std,
-            **prefix_diagnostics(test_diag, "diag/test_"),
-        }
-    )
+    test_metrics = {
+        "test_accuracy_mean": acc_mean,
+        "test_accuracy_std": acc_std,
+        "test_accuracy_ci95": acc_ci95,
+        "test_accuracy_worst": acc_worst,
+        "test_accuracy_best": acc_best,
+        "test_precision": prec,
+        "test_recall": rec,
+        "test_f1": f1,
+        "test_p_value": p_val,
+        "inference_time_mean_ms": time_mean,
+        "inference_time_std_ms": time_std,
+        **prefix_diagnostics(test_diag, "diag/test_"),
+    }
+    if current_test_name:
+        metric_scope = sanitize_result_tag(current_test_name)
+        test_metrics.update(
+            {
+                f"noise/{metric_scope}/accuracy_mean": acc_mean,
+                f"noise/{metric_scope}/accuracy_ci95": acc_ci95,
+                f"noise/{metric_scope}/f1": f1,
+                f"noise/{metric_scope}/inference_time_mean_ms": time_mean,
+            }
+        )
+    wandb.log(test_metrics)
 
     wandb.run.summary["test_accuracy_mean"] = acc_mean
     wandb.run.summary["test_accuracy_ci95"] = acc_ci95
     wandb.run.summary["model_selection_split"] = get_model_selection_split(args)
     wandb.run.summary["merge_val_into_train"] = _bool_flag(getattr(args, "merge_val_into_train", "false"), default=False)
     wandb.run.summary["test_protocol"] = getattr(args, "effective_test_protocol", getattr(args, "test_protocol", "clean"))
+    if current_test_name:
+        summary_scope = sanitize_result_tag(current_test_name)
+        wandb.run.summary[f"noise/{summary_scope}/accuracy_mean"] = acc_mean
+        wandb.run.summary[f"noise/{summary_scope}/accuracy_ci95"] = acc_ci95
 
     support_summary = {}
     if support_summary_count > 0.0:
@@ -4233,6 +4422,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         handle.write(
             f"Test Protocol: {getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
         )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        if getattr(args, "noise_test_root", None):
+            handle.write(f"Noise Test Root: {args.noise_test_root}\n")
         handle.write(f"Model Selection Split: {get_model_selection_split(args)}\n")
         handle.write(
             f"Merged Val Into Train: {_bool_flag(getattr(args, 'merge_val_into_train', 'false'), default=False)}\n"
@@ -4380,6 +4573,7 @@ def main():
             "labels": split_y,
             "files": split_arrays["files"],
         }
+    noise_pools = load_noise_test_pools(args, dataset) if args.effective_test_protocol == "noise" else {}
 
     pretty_map = {
         "surface": "Surface",
@@ -4432,6 +4626,19 @@ def main():
                 "labels": pool_y,
                 "files": pool_files,
             }
+        for split_name, pool in noise_pools.items():
+            pool_X, pool_y, pool_files = filter_classes(
+                pool["images"],
+                pool["labels"],
+                selected,
+                pool["files"],
+            )
+            noise_pools[split_name] = {
+                **pool,
+                "images": pool_X,
+                "labels": pool_y,
+                "files": pool_files,
+            }
         print(f"Train: {len(train_X)}, Val: {len(val_X)}, Test: {len(test_X)}")
     else:
         args.class_names = all_class_names
@@ -4450,6 +4657,8 @@ def main():
             "test": (test_X, test_y, test_file_paths),
         }
         for split_name, pool in robust_pools.items():
+            profile_splits[split_name] = (pool["images"], pool["labels"], pool["files"])
+        for split_name, pool in noise_pools.items():
             profile_splits[split_name] = (pool["images"], pool["labels"], pool["files"])
         profile_payload = export_dataset_noise_profile(
             profile_splits,
@@ -4475,6 +4684,8 @@ def main():
             "query_num_val": args.query_num_val,
             "query_num_test": args.query_num_test,
             "test_protocol": args.effective_test_protocol,
+            "noise_test_root": getattr(args, "noise_test_root", None),
+            "noise_test_splits": list(noise_pools.keys()),
             "selection_split": selection_split,
             "merge_val_into_train": merge_val_into_train,
         },
@@ -4509,27 +4720,80 @@ def main():
 
     final_test_seed = build_episode_seed(args, "final_test")
     print(f"Final Test  : episode_seed={final_test_seed}")
-    final_test_X, final_test_y, final_test_file_paths = test_X, test_y, test_file_paths
-    if args.effective_test_protocol == "robust":
+    final_test_runs = []
+    return_indices = args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False)
+
+    if args.effective_test_protocol == "noise":
+        if not noise_pools:
+            raise ValueError("--test_protocol noise did not find any SNR test split.")
+        for split_name, pool in noise_pools.items():
+            test_ds = FewshotDataset(
+                pool["images"],
+                pool["labels"],
+                args.episode_num_test,
+                args.way_num,
+                args.shot_num,
+                args.query_num_test,
+                final_test_seed,
+                return_indices=return_indices,
+            )
+            test_loader = DataLoader(
+                test_ds,
+                **_build_loader_kwargs(
+                    args,
+                    batch_size=1,
+                    shuffle=False,
+                    worker_seed=final_test_seed,
+                ),
+            )
+            final_test_runs.append(
+                {
+                    "name": split_name,
+                    "loader": test_loader,
+                    "test_X": pool["images"],
+                    "test_y": pool["labels"],
+                    "test_file_paths": pool["files"],
+                }
+            )
+        print(
+            "Noise final test: "
+            f"{len(final_test_runs)} SNR split(s): {', '.join(run['name'] for run in final_test_runs)}"
+        )
+    elif args.effective_test_protocol == "robust":
         query_pool_name = "test_1shot_query_snr10" if args.shot_num == 1 else "test_5shot_query_snr10"
         query_pool = robust_pools.get(query_pool_name)
         if query_pool is None:
             raise ValueError(f"Missing robust query pool: {query_pool_name}")
-        final_test_X = query_pool["images"]
-        final_test_y = query_pool["labels"]
-        final_test_file_paths = query_pool["files"]
         test_ds = build_robust_test_dataset(
             args,
             clean_X=test_X,
             clean_y=test_y,
             clean_file_paths=test_file_paths,
             robust_pools=robust_pools,
-            return_indices=args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False),
+            return_indices=return_indices,
+        )
+        test_loader = DataLoader(
+            test_ds,
+            **_build_loader_kwargs(
+                args,
+                batch_size=1,
+                shuffle=False,
+                worker_seed=final_test_seed,
+            ),
+        )
+        final_test_runs.append(
+            {
+                "name": "",
+                "loader": test_loader,
+                "test_X": query_pool["images"],
+                "test_y": query_pool["labels"],
+                "test_file_paths": query_pool["files"],
+            }
         )
         print(
             "Robust final test: "
             f"{args.shot_num}-shot, query_pool={query_pool_name}, "
-            f"query_samples={len(final_test_X)}"
+            f"query_samples={len(query_pool['images'])}"
         )
     else:
         test_ds = FewshotDataset(
@@ -4540,17 +4804,26 @@ def main():
             args.shot_num,
             args.query_num_test,
             final_test_seed,
-            return_indices=args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False),
+            return_indices=return_indices,
         )
-    test_loader = DataLoader(
-        test_ds,
-        **_build_loader_kwargs(
-            args,
-            batch_size=1,
-            shuffle=False,
-            worker_seed=final_test_seed,
-        ),
-    )
+        test_loader = DataLoader(
+            test_ds,
+            **_build_loader_kwargs(
+                args,
+                batch_size=1,
+                shuffle=False,
+                worker_seed=final_test_seed,
+            ),
+        )
+        final_test_runs.append(
+            {
+                "name": "",
+                "loader": test_loader,
+                "test_X": test_X,
+                "test_y": test_y,
+                "test_file_paths": test_file_paths,
+            }
+        )
 
     if selection_split == "test":
         selection_X, selection_y = test_X, test_y
@@ -4566,25 +4839,29 @@ def main():
             path = get_best_model_path(args)
             print(f"Testing with best checkpoint: {path}")
             load_model_weights(net, path, args.device)
-            test_final(
-                net,
-                test_loader,
-                args,
-                test_X=final_test_X,
-                test_y=final_test_y,
-                test_file_paths=final_test_file_paths,
-            )
+            for run in final_test_runs:
+                args.current_test_name = run["name"]
+                test_final(
+                    net,
+                    run["loader"],
+                    args,
+                    test_X=run["test_X"],
+                    test_y=run["test_y"],
+                    test_file_paths=run["test_file_paths"],
+                )
     else:
         if args.weights:
             load_model_weights(net, args.weights, args.device)
-            test_final(
-                net,
-                test_loader,
-                args,
-                test_X=final_test_X,
-                test_y=final_test_y,
-                test_file_paths=final_test_file_paths,
-            )
+            for run in final_test_runs:
+                args.current_test_name = run["name"]
+                test_final(
+                    net,
+                    run["loader"],
+                    args,
+                    test_X=run["test_X"],
+                    test_y=run["test_y"],
+                    test_file_paths=run["test_file_paths"],
+                )
         else:
             print("Error: Please specify --weights for test mode")
 
