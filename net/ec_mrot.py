@@ -1,22 +1,18 @@
 """Paper-facing EC-MROT model route.
 
 EC-MROT expands to Episode-Conditioned Mass-Response Optimal Transport.
-The default implementation is an exact, separate clone of the current
-``HROTFSL(variant="J_ECOT")`` behavior:
+``HROTFSL(variant="J_ECOT")`` supplies the fixed-budget OT experts, but the
+default EC-MROT response operator is no longer a paper-facing alias for
+J-ECOT. It keeps rho=0.80 as the low-variance anchor and adds a
+class-competitive counterfactual residual from the mass-response path.
 
-* no learned token mass,
-* no hyperbolic-core claim,
-* no threshold-offset module unless explicitly enabled,
-* the fixed response grid [0.45, 0.60, 0.75, 0.80, 0.90],
-* base budget 0.80,
-* base-budget homotopy initialized near the base model.
-
-The paper-facing names below intentionally describe the same mechanics in a
-more theory-aligned way. The rho grid is not the novelty; it is a discrete
-quadrature rule over a mass-response path. The controller estimates an
-episode-conditioned budget measure over that path. The base anchor is a
-homotopy from stable base-budget UOT to adaptive response integration. The
-shot-level log-mean-exp pooling is entropic support-risk aggregation.
+For each query/class pair, EC-MROT asks whether moving along the fixed-budget
+path improves that class more than it improves competing classes in the same
+episode. Only that centered response is added back to the base-rho score, and
+it is gated by base-margin confidence plus response stability. The ablation
+``rho_bank={0.80}`` therefore remains an exact fixed-budget baseline, while the
+full model has an explicit mechanism that cannot be reproduced by the M2
+single-budget ablation.
 """
 
 from __future__ import annotations
@@ -48,14 +44,19 @@ def _format_grid(values: tuple[float, ...]) -> str:
     return ",".join(f"{value:.8g}" for value in values)
 
 
+def _inverse_sigmoid(value: float) -> float:
+    if not 0.0 < value < 1.0:
+        raise ValueError("inverse sigmoid expects a value in (0, 1)")
+    return math.log(value / (1.0 - value))
+
+
 class ECMROT(HROTFSL):
     """Episode-Conditioned Mass-Response OT.
 
-    This class deliberately subclasses the current J_ECOT implementation rather
-    than editing it. With all EC-MROT flags at their defaults, state-dict keys,
-    logits, legacy ``ecot_*`` diagnostics, and auxiliary losses match the
-    existing J_ECOT path. EC-MROT adds paper-facing aliases and optional
-    theory-motivated regularizers behind explicit flags.
+    The legacy ``discrete_quadrature`` response mode is retained as an exact
+    J-ECOT-compatible baseline. The default ``counterfactual_residual`` mode
+    uses the same OT expert bank, but applies the mass-response path as a
+    class-competitive residual over the base-rho score.
     """
 
     def __init__(
@@ -64,7 +65,7 @@ class ECMROT(HROTFSL):
         variant: str = "J_ECOT",
         mass_response_grid: str | list[float] | tuple[float, ...] | None = None,
         base_budget: float = DEFAULT_BASE_BUDGET,
-        response_mode: str = "discrete_quadrature",
+        response_mode: str = "counterfactual_residual",
         learn_response_grid: bool | str = False,
         budget_prior: str = "uniform",
         budget_kl_reg: float = 0.0,
@@ -73,10 +74,17 @@ class ECMROT(HROTFSL):
         homotopy_schedule: str = "none",
         grid_spacing_reg: float = 0.0,
         grid_min_spacing: float = 0.02,
+        response_strength_init: float = 0.35,
+        response_strength_max: float = 1.0,
+        local_response_gain: float = 2.0,
+        episode_prior_gain: float = 0.10,
+        margin_temperature: float = 1.0,
+        stability_temperature: float = 1.0,
+        residual_gate_floor: float = 0.15,
         **kwargs: Any,
     ) -> None:
         response_mode = str(response_mode).strip().lower().replace("-", "_")
-        if response_mode not in {"discrete_quadrature"}:
+        if response_mode not in {"discrete_quadrature", "counterfactual_residual"}:
             raise ValueError(f"Unsupported EC-MROT response_mode: {response_mode}")
 
         budget_prior = str(budget_prior).strip().lower().replace("-", "_")
@@ -95,6 +103,20 @@ class ECMROT(HROTFSL):
             raise ValueError("grid_spacing_reg must be non-negative")
         if float(grid_min_spacing) < 0.0:
             raise ValueError("grid_min_spacing must be non-negative")
+        if float(response_strength_max) <= 0.0:
+            raise ValueError("response_strength_max must be positive")
+        if not 0.0 < float(response_strength_init) < float(response_strength_max):
+            raise ValueError("response_strength_init must be in (0, response_strength_max)")
+        if float(local_response_gain) < 0.0:
+            raise ValueError("local_response_gain must be non-negative")
+        if float(episode_prior_gain) < 0.0:
+            raise ValueError("episode_prior_gain must be non-negative")
+        if float(margin_temperature) <= 0.0:
+            raise ValueError("margin_temperature must be positive")
+        if float(stability_temperature) <= 0.0:
+            raise ValueError("stability_temperature must be positive")
+        if not 0.0 <= float(residual_gate_floor) <= 1.0:
+            raise ValueError("residual_gate_floor must be in [0, 1]")
 
         requested_variant = str(variant).strip().upper().replace("-", "_")
         if requested_variant not in {"J_ECOT", "JECOT", "ECOT"}:
@@ -120,8 +142,21 @@ class ECMROT(HROTFSL):
         self.ec_mrot_homotopy_progress = 1.0
         self.ec_mrot_grid_spacing_reg = float(grid_spacing_reg)
         self.ec_mrot_grid_min_spacing = float(grid_min_spacing)
+        self.ec_mrot_response_strength_max = float(response_strength_max)
+        self.ec_mrot_local_response_gain = float(local_response_gain)
+        self.ec_mrot_episode_prior_gain = float(episode_prior_gain)
+        self.ec_mrot_margin_temperature = float(margin_temperature)
+        self.ec_mrot_stability_temperature = float(stability_temperature)
+        self.ec_mrot_residual_gate_floor = float(residual_gate_floor)
         self.ec_mrot_display_name = "EC-MROT"
         self.ec_mrot_paper_name = "Episode-Conditioned Mass-Response Optimal Transport"
+
+        self.raw_ec_mrot_response_strength: nn.Parameter | None = None
+        if self.ec_mrot_response_mode == "counterfactual_residual":
+            strength_unit = float(response_strength_init) / float(response_strength_max)
+            self.raw_ec_mrot_response_strength = nn.Parameter(
+                torch.tensor(_inverse_sigmoid(strength_unit), dtype=torch.float32)
+            )
 
         self.ec_mrot_response_grid_left_raw_gaps: nn.Parameter | None = None
         self.ec_mrot_response_grid_right_raw_gaps: nn.Parameter | None = None
@@ -179,6 +214,12 @@ class ECMROT(HROTFSL):
     def ecot_lambda(self) -> torch.Tensor:
         homotopy_lambda = super().ecot_lambda
         return homotopy_lambda * self._homotopy_schedule_scale(homotopy_lambda)
+
+    @property
+    def ec_mrot_response_strength(self) -> torch.Tensor:
+        if self.raw_ec_mrot_response_strength is None:
+            return self.ecot_lambda
+        return self.ec_mrot_response_strength_max * torch.sigmoid(self.raw_ec_mrot_response_strength)
 
     def _positive_normalized_gaps(
         self,
@@ -248,6 +289,51 @@ class ECMROT(HROTFSL):
         logits = -((response_grid - base) / response_grid.new_tensor(0.10)).pow(2)
         return torch.softmax(logits, dim=-1)
 
+    def _pool_response_budget_scores(
+        self,
+        budget_scores: torch.Tensor,
+        shot_cost_bank: torch.Tensor,
+        shot_mass_bank: torch.Tensor,
+        raw_tau_shot: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Pool support shots independently for every response-budget expert."""
+
+        shot_num = budget_scores.shape[-2]
+        tau_shot = None
+        if raw_tau_shot is not None:
+            tau_min = budget_scores.new_tensor(self.ecot_tau_shot_min)
+            tau_max = budget_scores.new_tensor(self.ecot_tau_shot_max)
+            tau_shot = tau_min + (tau_max - tau_min) * torch.sigmoid(
+                raw_tau_shot.to(device=budget_scores.device, dtype=budget_scores.dtype)
+            )
+
+        if shot_num == 1:
+            shot_weights = torch.ones_like(budget_scores)
+            class_budget_scores = budget_scores.squeeze(-2)
+        else:
+            tau = tau_shot if tau_shot is not None else budget_scores.new_tensor(1.0)
+            scaled = budget_scores / tau.clamp_min(self.eps)
+            shot_weights = torch.softmax(scaled, dim=-2)
+            class_budget_scores = tau * (torch.logsumexp(scaled, dim=-2) - math.log(float(shot_num)))
+
+        class_budget_cost = (shot_weights * shot_cost_bank).sum(dim=-2)
+        class_budget_mass = (shot_weights * shot_mass_bank).sum(dim=-2)
+        return class_budget_scores, class_budget_cost, class_budget_mass, shot_weights, tau_shot
+
+    def _base_margin_gate(self, base_class_score: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if base_class_score.shape[-1] <= 1:
+            margin = torch.zeros_like(base_class_score)
+            return torch.ones_like(base_class_score), margin
+
+        top2 = torch.topk(base_class_score, k=2, dim=-1).values
+        best = top2[..., 0].unsqueeze(-1)
+        second = top2[..., 1].unsqueeze(-1)
+        is_best = base_class_score >= best - self.eps
+        best_other = torch.where(is_best, second, best)
+        margin = base_class_score - best_other
+        temperature = base_class_score.new_tensor(self.ec_mrot_margin_temperature)
+        return torch.sigmoid(margin / temperature.clamp_min(self.eps)), margin
+
     def _forward_ecot_budget_bank(
         self,
         flat_cost: torch.Tensor,
@@ -298,36 +384,127 @@ class ECMROT(HROTFSL):
             delta = raw_delta_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
             threshold = (threshold * torch.exp(0.25 * torch.tanh(delta))).clamp_min(self.eps)
 
-        # Each grid node is a deterministic mass-budget expert. The
-        # episode-conditioned budget measure integrates those expert scores.
+        # Each grid node is a deterministic fixed-budget expert.
         budget_scores = self.score_scale * (threshold * shot_mass_bank - shot_cost_bank)
-        base_budget_score = budget_scores[..., self.ecot_base_idx]
-        budget_view = budget_weights.view(1, 1, 1, budget_count)
-        mass_response_score = (budget_view * budget_scores).sum(dim=-1)
         homotopy_lambda = self.ecot_lambda.to(device=flat_cost.device, dtype=flat_cost.dtype)
-        shot_cost_diag = (budget_view * shot_cost_bank).sum(dim=-1)
-        shot_mass_diag = (budget_view * shot_mass_bank).sum(dim=-1)
-
-        shot_logits = base_budget_score + homotopy_lambda * (mass_response_score - base_budget_score)
-        (
-            logits,
-            transport_cost,
-            transport_mass,
-            shot_pool_weights,
-            support_risk_temperature,
-        ) = self._pool_ecot_shot_scores(
-            shot_logits,
-            shot_cost_diag,
-            shot_mass_diag,
-            controller_outputs.get("raw_tau_shot"),
-        )
-        identity_loss = (shot_logits - base_budget_score).pow(2).mean()
-
-        plan_diag = (budget_view.unsqueeze(-1).unsqueeze(-1) * plan_bank).sum(dim=3)
-        shot_rho = flat_cost.new_full((num_query, way_num, shot_num), self.ecot_base_rho)
         policy_entropy = -(
             budget_weights.clamp_min(self.eps) * budget_weights.clamp_min(self.eps).log()
         ).sum()
+
+        extra_payload: dict[str, torch.Tensor] = {}
+        local_policy_entropy = policy_entropy.new_zeros(())
+        support_risk_temperature = None
+
+        if self.ec_mrot_response_mode == "discrete_quadrature":
+            base_budget_score = budget_scores[..., self.ecot_base_idx]
+            budget_view = budget_weights.view(1, 1, 1, budget_count)
+            mass_response_score = (budget_view * budget_scores).sum(dim=-1)
+            shot_cost_diag = (budget_view * shot_cost_bank).sum(dim=-1)
+            shot_mass_diag = (budget_view * shot_mass_bank).sum(dim=-1)
+
+            shot_logits = base_budget_score + homotopy_lambda * (mass_response_score - base_budget_score)
+            (
+                logits,
+                transport_cost,
+                transport_mass,
+                shot_pool_weights,
+                support_risk_temperature,
+            ) = self._pool_ecot_shot_scores(
+                shot_logits,
+                shot_cost_diag,
+                shot_mass_diag,
+                controller_outputs.get("raw_tau_shot"),
+            )
+            identity_loss = (shot_logits - base_budget_score).pow(2).mean()
+            plan_diag = (budget_view.unsqueeze(-1).unsqueeze(-1) * plan_bank).sum(dim=3)
+            shot_rho = flat_cost.new_full((num_query, way_num, shot_num), self.ecot_base_rho)
+            response_strength = homotopy_lambda
+        else:
+            (
+                class_budget_scores,
+                class_budget_cost,
+                class_budget_mass,
+                budget_shot_pool_weights,
+                support_risk_temperature,
+            ) = self._pool_response_budget_scores(
+                budget_scores,
+                shot_cost_bank,
+                shot_mass_bank,
+                controller_outputs.get("raw_tau_shot"),
+            )
+            base_budget_score = budget_scores[..., self.ecot_base_idx]
+            base_class_score = class_budget_scores[..., self.ecot_base_idx]
+
+            response_delta = class_budget_scores - base_class_score.unsqueeze(-1)
+            centered_response_delta = response_delta - response_delta.mean(dim=1, keepdim=True)
+            local_temperature = flat_cost.new_tensor(self.ec_mrot_margin_temperature)
+            local_signal = torch.tanh(centered_response_delta.detach() / local_temperature.clamp_min(self.eps))
+            episode_prior = budget_logits.detach() - budget_logits.detach().mean()
+            local_budget_logits = (
+                self.ec_mrot_local_response_gain * local_signal
+                + self.ec_mrot_episode_prior_gain * episode_prior.view(1, 1, budget_count)
+            )
+            class_budget_weights = torch.softmax(local_budget_logits, dim=-1)
+            local_policy_entropy = -(
+                class_budget_weights.clamp_min(self.eps) * class_budget_weights.clamp_min(self.eps).log()
+            ).sum(dim=-1).mean()
+
+            class_response_score = (class_budget_weights * class_budget_scores).sum(dim=-1)
+            counterfactual_residual = (class_budget_weights * centered_response_delta).sum(dim=-1)
+            margin_gate, base_margin = self._base_margin_gate(base_class_score)
+            response_energy = centered_response_delta.abs().mean(dim=-1)
+            response_spread = centered_response_delta.std(dim=-1, unbiased=False)
+            stability_temperature = flat_cost.new_tensor(self.ec_mrot_stability_temperature)
+            stability_gate = torch.sigmoid(
+                (response_energy - response_spread) / stability_temperature.clamp_min(self.eps)
+            )
+            gate_floor = flat_cost.new_tensor(self.ec_mrot_residual_gate_floor)
+            response_gate = gate_floor + (1.0 - gate_floor) * margin_gate * stability_gate
+            response_strength = self.ec_mrot_response_strength.to(device=flat_cost.device, dtype=flat_cost.dtype)
+
+            logits = base_class_score + response_strength * response_gate * counterfactual_residual
+            transport_cost = (class_budget_weights * class_budget_cost).sum(dim=-1)
+            transport_mass = (class_budget_weights * class_budget_mass).sum(dim=-1)
+
+            budget_weight_view = class_budget_weights.unsqueeze(-2)
+            mass_response_score = (budget_weight_view * budget_scores).sum(dim=-1)
+            shot_cost_diag = (budget_weight_view * shot_cost_bank).sum(dim=-1)
+            shot_mass_diag = (budget_weight_view * shot_mass_bank).sum(dim=-1)
+            shot_logits = base_budget_score + response_strength * response_gate.unsqueeze(-1) * (
+                mass_response_score - base_budget_score
+            )
+            shot_pool_weights = (budget_weight_view * budget_shot_pool_weights).sum(dim=-1)
+            plan_diag = (
+                class_budget_weights.unsqueeze(2).unsqueeze(-1).unsqueeze(-1) * plan_bank
+            ).sum(dim=3)
+            effective_budget = (class_budget_weights * response_grid.view(1, 1, budget_count)).sum(dim=-1)
+            shot_rho = effective_budget.unsqueeze(-1).expand(num_query, way_num, shot_num)
+            identity_loss = (response_strength * response_gate * counterfactual_residual).pow(2).mean()
+
+            extra_payload.update(
+                {
+                    "ecot_class_budget_scores": class_budget_scores,
+                    "ecot_class_budget_transport_cost": class_budget_cost,
+                    "ecot_class_budget_transported_mass": class_budget_mass,
+                    "ecot_class_base_score": base_class_score,
+                    "ecot_class_mix_score": class_response_score,
+                    "ec_mrot_class_budget_scores": class_budget_scores,
+                    "ec_mrot_class_budget_weights": class_budget_weights,
+                    "ec_mrot_class_base_budget_score": base_class_score,
+                    "ec_mrot_class_mass_response_score": class_response_score,
+                    "ec_mrot_counterfactual_residual": counterfactual_residual,
+                    "ec_mrot_centered_response_delta": centered_response_delta,
+                    "ec_mrot_response_gate": response_gate,
+                    "ec_mrot_base_margin": base_margin,
+                    "ec_mrot_margin_gate": margin_gate,
+                    "ec_mrot_stability_gate": stability_gate,
+                    "ec_mrot_response_energy": response_energy,
+                    "ec_mrot_response_spread": response_spread,
+                    "ec_mrot_effective_budget": effective_budget,
+                    "ec_mrot_local_budget_logits": local_budget_logits,
+                    "ec_mrot_local_budget_entropy": local_policy_entropy,
+                }
+            )
 
         budget_prior = self._budget_prior_weights(response_grid)
         budget_kl = (
@@ -390,6 +567,7 @@ class ECMROT(HROTFSL):
             "ec_mrot_episode_budget_measure": budget_weights,
             "ec_mrot_budget_logits": budget_logits,
             "ec_mrot_homotopy_lambda": homotopy_lambda,
+            "ec_mrot_response_strength": response_strength,
             "ec_mrot_base_budget_score": base_budget_score,
             "ec_mrot_mass_response_score": mass_response_score,
             "ec_mrot_response_grid": response_grid,
@@ -404,6 +582,7 @@ class ECMROT(HROTFSL):
             "ec_mrot_response_grid_raw_spacing_loss": spacing_loss,
             "ec_mrot_aux_loss": ecot_aux_loss,
         }
+        payload.update(extra_payload)
         if support_risk_temperature is not None:
             payload["ecot_tau_shot"] = support_risk_temperature
             payload["ec_mrot_support_risk_temperature"] = support_risk_temperature
@@ -424,6 +603,20 @@ class ECMROT(HROTFSL):
             "ec_mrot_base_budget_score",
             "ec_mrot_mass_response_score",
             "ec_mrot_budget_scores",
+            "ec_mrot_class_budget_scores",
+            "ec_mrot_class_budget_weights",
+            "ec_mrot_class_base_budget_score",
+            "ec_mrot_class_mass_response_score",
+            "ec_mrot_counterfactual_residual",
+            "ec_mrot_centered_response_delta",
+            "ec_mrot_response_gate",
+            "ec_mrot_base_margin",
+            "ec_mrot_margin_gate",
+            "ec_mrot_stability_gate",
+            "ec_mrot_response_energy",
+            "ec_mrot_response_spread",
+            "ec_mrot_effective_budget",
+            "ec_mrot_local_budget_logits",
         )
         for key in cat_keys:
             if key in batch_outputs[0]:
@@ -443,11 +636,13 @@ class ECMROT(HROTFSL):
 
         scalar_mean_keys = (
             "ec_mrot_homotopy_lambda",
+            "ec_mrot_response_strength",
             "ec_mrot_support_risk_temperature",
             "ec_mrot_budget_kl",
             "ec_mrot_budget_kl_loss",
             "ec_mrot_budget_entropy",
             "ec_mrot_budget_entropy_loss",
+            "ec_mrot_local_budget_entropy",
             "ec_mrot_response_grid_spacing_loss",
             "ec_mrot_response_grid_raw_spacing_loss",
             "ec_mrot_aux_loss",
@@ -458,4 +653,3 @@ class ECMROT(HROTFSL):
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
 
         return HROTFSLResult(stacked)
-

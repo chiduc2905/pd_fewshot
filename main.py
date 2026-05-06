@@ -983,13 +983,25 @@ def get_args():
     parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
     parser.add_argument("--hrot_ecot_consensus_tau_mode", type=str, default="fixed", choices=["fixed", "sqrt"])
     parser.add_argument("--hrot_ecot_consensus_tau", type=float, default=1.0)
-    parser.add_argument("--ec_mrot_response_mode", type=str, default="discrete_quadrature", choices=["discrete_quadrature"])
+    parser.add_argument(
+        "--ec_mrot_response_mode",
+        type=str,
+        default="counterfactual_residual",
+        choices=["counterfactual_residual", "discrete_quadrature"],
+    )
     parser.add_argument("--ec_mrot_learn_response_grid", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--ec_mrot_budget_prior", type=str, default="uniform", choices=["uniform", "base_anchored"])
     parser.add_argument("--ec_mrot_budget_kl_reg", type=float, default=0.0)
     parser.add_argument("--ec_mrot_budget_entropy_reg", type=float, default=0.0)
     parser.add_argument("--ec_mrot_homotopy_schedule", type=str, default="none", choices=["none", "linear", "cosine"])
     parser.add_argument("--ec_mrot_grid_spacing_reg", type=float, default=0.0)
+    parser.add_argument("--ec_mrot_response_strength_init", type=float, default=0.35)
+    parser.add_argument("--ec_mrot_response_strength_max", type=float, default=1.0)
+    parser.add_argument("--ec_mrot_local_response_gain", type=float, default=2.0)
+    parser.add_argument("--ec_mrot_episode_prior_gain", type=float, default=0.10)
+    parser.add_argument("--ec_mrot_margin_temperature", type=float, default=1.0)
+    parser.add_argument("--ec_mrot_stability_temperature", type=float, default=1.0)
+    parser.add_argument("--ec_mrot_residual_gate_floor", type=float, default=0.15)
     # Deprecated compatibility only: old J_HLM configs may still pass these,
     # but they no longer activate learned shot or token mass.
     parser.add_argument("--hrot_hlm_min_mass", type=float, default=0.1)
@@ -2088,11 +2100,11 @@ def get_model(args):
             base_budget = 0.80
         print(
             "  ec_mrot: backbone spatial tokens -> mass-response UOT quadrature -> "
-            "episode-conditioned budget measure -> base-budget homotopy -> "
+            "class-competitive counterfactual residual -> margin/stability gate -> "
             "entropic support-risk aggregation "
             f"(token_dim={hrot_token_dim}, "
             f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
-            f"response_mode={getattr(args, 'ec_mrot_response_mode', 'discrete_quadrature')}, "
+            f"response_mode={getattr(args, 'ec_mrot_response_mode', 'counterfactual_residual')}, "
             f"mass_response_grid={mass_response_grid}, "
             f"base_budget={base_budget}, "
             f"budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
@@ -2104,7 +2116,10 @@ def get_model(args):
             f"budget_prior={getattr(args, 'ec_mrot_budget_prior', 'uniform')}, "
             f"budget_kl_reg={getattr(args, 'ec_mrot_budget_kl_reg', 0.0)}, "
             f"budget_entropy_reg={getattr(args, 'ec_mrot_budget_entropy_reg', 0.0)}, "
-            f"homotopy_schedule={getattr(args, 'ec_mrot_homotopy_schedule', 'none')})"
+            f"homotopy_schedule={getattr(args, 'ec_mrot_homotopy_schedule', 'none')}, "
+            f"response_strength_init={getattr(args, 'ec_mrot_response_strength_init', 0.35)}, "
+            f"local_response_gain={getattr(args, 'ec_mrot_local_response_gain', 2.0)}, "
+            f"episode_prior_gain={getattr(args, 'ec_mrot_episode_prior_gain', 0.10)})"
         )
     if args.model == "crj_fsl":
         crj_raw_tokens = _bool_flag(
@@ -3365,10 +3380,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "crj_trim_fraction",
         "crj_clip_logit",
         "ec_mrot_homotopy_lambda",
+        "ec_mrot_response_strength",
         "ec_mrot_budget_kl",
         "ec_mrot_budget_kl_loss",
         "ec_mrot_budget_entropy",
         "ec_mrot_budget_entropy_loss",
+        "ec_mrot_local_budget_entropy",
         "ec_mrot_response_grid_spacing_loss",
         "ec_mrot_aux_loss",
     }

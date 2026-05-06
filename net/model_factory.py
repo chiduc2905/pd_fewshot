@@ -366,7 +366,7 @@ MODEL_REGISTRY = {
     "ec_mrot": {
         "display_name": "EC-MROT",
         "paper_name": "Episode-Conditioned Mass-Response Optimal Transport",
-        "architecture": "Backbone spatial tokens -> fixed-budget UOT mass-response path -> episode-conditioned budget measure -> base-budget homotopy -> entropic support-risk aggregation",
+        "architecture": "Backbone spatial tokens -> fixed-budget UOT mass-response path -> base-rho anchor -> class-competitive counterfactual response residual -> margin/stability-gated support-risk aggregation",
         "metric": "Episode-Conditioned Mass-Response Optimal Transport",
     },
     "crj_fsl": {
@@ -2348,7 +2348,7 @@ def build_model_from_args(args):
             resnet12_dropblock_size=5,
             mass_response_grid=mass_response_grid,
             base_budget=float(base_budget),
-            response_mode=str(getattr(args, "ec_mrot_response_mode", "discrete_quadrature")),
+            response_mode=str(getattr(args, "ec_mrot_response_mode", "counterfactual_residual")),
             learn_response_grid=_bool_flag(
                 getattr(args, "ec_mrot_learn_response_grid", "false"),
                 default=False,
@@ -2359,6 +2359,13 @@ def build_model_from_args(args):
             budget_tau=float(budget_tau),
             homotopy_schedule=str(getattr(args, "ec_mrot_homotopy_schedule", "none")),
             grid_spacing_reg=float(getattr(args, "ec_mrot_grid_spacing_reg", 0.0)),
+            response_strength_init=float(getattr(args, "ec_mrot_response_strength_init", 0.35)),
+            response_strength_max=float(getattr(args, "ec_mrot_response_strength_max", 1.0)),
+            local_response_gain=float(getattr(args, "ec_mrot_local_response_gain", 2.0)),
+            episode_prior_gain=float(getattr(args, "ec_mrot_episode_prior_gain", 0.10)),
+            margin_temperature=float(getattr(args, "ec_mrot_margin_temperature", 1.0)),
+            stability_temperature=float(getattr(args, "ec_mrot_stability_temperature", 1.0)),
+            residual_gate_floor=float(getattr(args, "ec_mrot_residual_gate_floor", 0.15)),
             eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
             curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
             projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),

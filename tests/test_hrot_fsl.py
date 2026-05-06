@@ -832,7 +832,7 @@ def test_hrot_fsl_variant_j_ecot_does_not_use_learned_mass_paths():
     assert "support_token_mass" not in outputs
 
 
-def test_ec_mrot_default_matches_hrot_j_ecot_outputs():
+def test_ec_mrot_legacy_discrete_quadrature_matches_hrot_j_ecot_outputs():
     torch.manual_seed(49)
     hrot_model = _build_model(
         variant="J_ECOT",
@@ -843,7 +843,7 @@ def test_ec_mrot_default_matches_hrot_j_ecot_outputs():
         ecot_uniform_budget_policy=False,
         ecot_enable_tau_shot=True,
     )
-    ec_mrot_model = _build_ec_mrot_model()
+    ec_mrot_model = _build_ec_mrot_model(response_mode="discrete_quadrature")
     assert set(hrot_model.state_dict()) == set(ec_mrot_model.state_dict())
     ec_mrot_model.load_state_dict(hrot_model.state_dict(), strict=True)
     hrot_model.eval()
@@ -881,6 +881,50 @@ def test_ec_mrot_default_matches_hrot_j_ecot_outputs():
     assert torch.allclose(ec_mrot_outputs["ec_mrot_homotopy_lambda"], hrot_outputs["ecot_lambda"])
 
 
+def test_ec_mrot_default_counterfactual_residual_adds_class_competitive_path():
+    torch.manual_seed(52)
+    model = _build_ec_mrot_model()
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.ec_mrot_response_mode == "counterfactual_residual"
+    assert model.raw_ec_mrot_response_strength is not None
+    assert outputs["ec_mrot_response_strength"].item() > 0.0
+    assert outputs["ec_mrot_class_budget_scores"].shape == (2, 3, len(model.ecot_rho_bank))
+    assert outputs["ec_mrot_class_budget_weights"].shape == outputs["ec_mrot_class_budget_scores"].shape
+    assert torch.allclose(
+        outputs["ec_mrot_class_budget_weights"].sum(dim=-1),
+        torch.ones_like(outputs["logits"]),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert outputs["ec_mrot_counterfactual_residual"].abs().max().item() > 0.0
+    assert torch.all(outputs["ec_mrot_response_gate"] >= model.ec_mrot_residual_gate_floor)
+    assert torch.all(outputs["ec_mrot_response_gate"] <= 1.0)
+
+
+def test_ec_mrot_counterfactual_residual_collapses_to_base_for_single_budget():
+    torch.manual_seed(53)
+    model = _build_ec_mrot_model(mass_response_grid="0.80")
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert tuple(model.ecot_rho_bank) == (0.80,)
+    assert torch.allclose(outputs["ec_mrot_counterfactual_residual"], torch.zeros_like(outputs["logits"]), atol=1e-6)
+    assert torch.allclose(outputs["logits"], outputs["ecot_class_base_score"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(outputs["ec_mrot_effective_budget"], torch.full_like(outputs["logits"], 0.80), atol=1e-6)
+
+
 def test_ec_mrot_optional_regularizers_are_off_by_default_and_payload_is_present():
     torch.manual_seed(50)
     model = _build_ec_mrot_model()
@@ -895,9 +939,10 @@ def test_ec_mrot_optional_regularizers_are_off_by_default_and_payload_is_present
     assert model.variant == "J_ECOT"
     assert not model.uses_learned_mass
     assert not model.uses_hyperbolic_geometry
-    assert model.ec_mrot_response_mode == "discrete_quadrature"
+    assert model.ec_mrot_response_mode == "counterfactual_residual"
     assert model.ec_mrot_budget_kl_reg == 0.0
     assert model.ec_mrot_budget_entropy_reg == 0.0
+    assert outputs["ec_mrot_response_strength"].item() > 0.0
     assert outputs["ec_mrot_budget_kl_loss"].item() == 0.0
     assert outputs["ec_mrot_budget_entropy_loss"].item() == 0.0
     assert outputs["ec_mrot_response_grid_spacing_loss"].item() == 0.0
@@ -2067,7 +2112,7 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
 
 
-def test_ec_mrot_model_factory_builds_default_j_ecot_clone():
+def test_ec_mrot_model_factory_builds_counterfactual_residual_default():
     args = SimpleNamespace(
         model="ec_mrot",
         device="cpu",
@@ -2116,13 +2161,20 @@ def test_ec_mrot_model_factory_builds_default_j_ecot_clone():
         hrot_hyperbolic_backend="native",
         hrot_ot_backend="native",
         hrot_eps=1e-6,
-        ec_mrot_response_mode="discrete_quadrature",
+        ec_mrot_response_mode="counterfactual_residual",
         ec_mrot_learn_response_grid="false",
         ec_mrot_budget_prior="uniform",
         ec_mrot_budget_kl_reg=0.0,
         ec_mrot_budget_entropy_reg=0.0,
         ec_mrot_homotopy_schedule="none",
         ec_mrot_grid_spacing_reg=0.0,
+        ec_mrot_response_strength_init=0.35,
+        ec_mrot_response_strength_max=1.0,
+        ec_mrot_local_response_gain=2.0,
+        ec_mrot_episode_prior_gain=0.10,
+        ec_mrot_margin_temperature=1.0,
+        ec_mrot_stability_temperature=1.0,
+        ec_mrot_residual_gate_floor=0.15,
     )
     model = build_model_from_args(args)
     model.eval()
@@ -2137,8 +2189,10 @@ def test_ec_mrot_model_factory_builds_default_j_ecot_clone():
     assert model.variant == "J_ECOT"
     assert tuple(model.ecot_rho_bank) == (0.45, 0.60, 0.75, 0.80, 0.90)
     assert model.ecot_base_rho == 0.80
+    assert model.ec_mrot_response_mode == "counterfactual_residual"
     assert outputs["logits"].shape == (2, 3)
     assert outputs["ec_mrot_episode_budget_measure"].shape == outputs["ecot_pi_budget"].shape
+    assert outputs["ec_mrot_counterfactual_residual"].shape == outputs["logits"].shape
     assert torch.isfinite(outputs["logits"]).all()
 
 

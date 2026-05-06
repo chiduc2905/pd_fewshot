@@ -48,14 +48,21 @@ VARIANTS: tuple[AblationVariant, ...] = (
     AblationVariant(
         "m3",
         "M3",
-        "Episode-conditioned budget measure replaced by a uniform measure",
+        "Episode controller replaced by a uniform diagnostic measure",
         ("--hrot_ecot_uniform_budget_policy", "true"),
     ),
     AblationVariant(
         "m4",
         "M4",
-        "Base-budget homotopy removed",
-        ("--hrot_ecot_lambda_init", "8.0", "--hrot_ecot_identity_reg", "0.0"),
+        "Counterfactual response residual disabled",
+        (
+            "--ec_mrot_response_strength_init",
+            "0.0005",
+            "--ec_mrot_response_strength_max",
+            "0.001",
+            "--hrot_ecot_identity_reg",
+            "0.0",
+        ),
     ),
     AblationVariant(
         "m5",
@@ -94,6 +101,7 @@ VARIANT_ALIASES = {
     "m3_uniform": "m3",
     "m3_uniform_measure": "m3",
     "m4_no_homotopy": "m4",
+    "m4_no_residual": "m4",
     "m5_fixed": "m5",
     "m5_fixed_support_risk": "m5",
 }
@@ -196,7 +204,7 @@ def get_args() -> tuple[argparse.Namespace, list[str]]:
 def base_ec_mrot_args() -> list[str]:
     return [
         "--ec_mrot_response_mode",
-        "discrete_quadrature",
+        "counterfactual_residual",
         "--hrot_pre_transport_shot_pool",
         "false",
         "--ec_mrot_mass_response_grid",
@@ -221,6 +229,20 @@ def base_ec_mrot_args() -> list[str]:
         "0.0",
         "--ec_mrot_homotopy_schedule",
         "none",
+        "--ec_mrot_response_strength_init",
+        "0.35",
+        "--ec_mrot_response_strength_max",
+        "1.0",
+        "--ec_mrot_local_response_gain",
+        "2.0",
+        "--ec_mrot_episode_prior_gain",
+        "0.10",
+        "--ec_mrot_margin_temperature",
+        "1.0",
+        "--ec_mrot_stability_temperature",
+        "1.0",
+        "--ec_mrot_residual_gate_floor",
+        "0.15",
     ]
 
 
@@ -477,4 +499,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
