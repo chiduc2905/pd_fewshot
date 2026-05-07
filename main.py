@@ -885,6 +885,8 @@ def get_args():
             "JE",
             "J_ECOT",
             "CP_ECOT",
+            "J_NCET",
+            "NCET",
             "J_HLM",
             "K",
             "L",
@@ -983,11 +985,15 @@ def get_args():
     parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
     parser.add_argument("--hrot_ecot_consensus_tau_mode", type=str, default="fixed", choices=["fixed", "sqrt"])
     parser.add_argument("--hrot_ecot_consensus_tau", type=float, default=1.0)
+    parser.add_argument("--hrot_ncet_mix_init", type=float, default=0.25)
+    parser.add_argument("--hrot_ncet_real_penalty_init", type=float, default=0.25)
+    parser.add_argument("--hrot_ncet_null_penalty_init", type=float, default=0.05)
+    parser.add_argument("--hrot_ncet_sink_cost_init", type=float, default=1.0)
     parser.add_argument(
         "--ec_mrot_response_mode",
         type=str,
-        default="counterfactual_residual",
-        choices=["counterfactual_residual", "discrete_quadrature"],
+        default="anchor_free_functional",
+        choices=["anchor_free_functional", "counterfactual_residual", "discrete_quadrature"],
     )
     parser.add_argument("--ec_mrot_learn_response_grid", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--ec_mrot_budget_prior", type=str, default="uniform", choices=["uniform", "base_anchored"])
@@ -997,6 +1003,8 @@ def get_args():
     parser.add_argument("--ec_mrot_grid_spacing_reg", type=float, default=0.0)
     parser.add_argument("--ec_mrot_response_strength_init", type=float, default=0.35)
     parser.add_argument("--ec_mrot_response_strength_max", type=float, default=1.0)
+    parser.add_argument("--ec_mrot_response_temperature", type=float, default=1.0)
+    parser.add_argument("--ec_mrot_competitive_center", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--ec_mrot_local_response_gain", type=float, default=2.0)
     parser.add_argument("--ec_mrot_episode_prior_gain", type=float, default=0.10)
     parser.add_argument("--ec_mrot_margin_temperature", type=float, default=1.0)
@@ -2078,6 +2086,10 @@ def get_model(args):
             f"ecot_tau_shot={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
             f"ecot_consensus_tau_mode={getattr(args, 'hrot_ecot_consensus_tau_mode', 'fixed')}, "
             f"ecot_consensus_tau={getattr(args, 'hrot_ecot_consensus_tau', 1.0)}, "
+            f"ncet_mix_init={getattr(args, 'hrot_ncet_mix_init', 0.25)}, "
+            f"ncet_real_penalty_init={getattr(args, 'hrot_ncet_real_penalty_init', 0.25)}, "
+            f"ncet_null_penalty_init={getattr(args, 'hrot_ncet_null_penalty_init', 0.05)}, "
+            f"ncet_sink_cost_init={getattr(args, 'hrot_ncet_sink_cost_init', 1.0)}, "
             f"transport_cost_threshold={getattr(args, 'hrot_transport_cost_threshold_init', None)}, "
             f"lambda_rho={getattr(args, 'hrot_lambda_rho', 0.01)}, "
             f"lambda_rho_rank={getattr(args, 'hrot_lambda_rho_rank', 0.05)}, "
@@ -2094,19 +2106,19 @@ def get_model(args):
         hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
             getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
         )
-        mass_response_grid = getattr(args, "hrot_ecot_rho_bank", None) or "0.45,0.60,0.75,0.80,0.90"
+        mass_response_grid = getattr(args, "hrot_ecot_rho_bank", None) or "0.40,0.55,0.70,0.85,0.95"
         base_budget = getattr(args, "hrot_ecot_base_rho", None)
         if base_budget is None:
-            base_budget = 0.80
+            base_budget = 0.70
         print(
             "  ec_mrot: backbone spatial tokens -> mass-response UOT quadrature -> "
-            "class-competitive counterfactual residual -> margin/stability gate -> "
+            "anchor-free competitive response functional -> "
             "entropic support-risk aggregation "
             f"(token_dim={hrot_token_dim}, "
             f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
-            f"response_mode={getattr(args, 'ec_mrot_response_mode', 'counterfactual_residual')}, "
+            f"response_mode={getattr(args, 'ec_mrot_response_mode', 'anchor_free_functional')}, "
             f"mass_response_grid={mass_response_grid}, "
-            f"base_budget={base_budget}, "
+            f"legacy_controller_base_budget={base_budget}, "
             f"budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
             f"homotopy_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
             f"identity_reg={getattr(args, 'hrot_ecot_identity_reg', 1e-4)}, "
@@ -2118,6 +2130,8 @@ def get_model(args):
             f"budget_entropy_reg={getattr(args, 'ec_mrot_budget_entropy_reg', 0.0)}, "
             f"homotopy_schedule={getattr(args, 'ec_mrot_homotopy_schedule', 'none')}, "
             f"response_strength_init={getattr(args, 'ec_mrot_response_strength_init', 0.35)}, "
+            f"response_temperature={getattr(args, 'ec_mrot_response_temperature', 1.0)}, "
+            f"competitive_center={getattr(args, 'ec_mrot_competitive_center', 'true')}, "
             f"local_response_gain={getattr(args, 'ec_mrot_local_response_gain', 2.0)}, "
             f"episode_prior_gain={getattr(args, 'ec_mrot_episode_prior_gain', 0.10)})"
         )
@@ -2311,6 +2325,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
         normalized = str(checkpoint_variant).strip().upper().replace("-", "").replace("_", "")
         if normalized == "RL":
             normalized = "T"
+        if normalized in {"W", "NCET", "JNCET", "NUISANCEDECOUPLED", "JNUISANCE"}:
+            normalized = "J_NCET"
         if normalized in {"JEGTW", "JE"}:
             normalized = "JE"
         if normalized in {"JECOT", "ECOT"}:
@@ -2333,6 +2349,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "JE",
             "J_ECOT",
             "CP_ECOT",
+            "J_NCET",
             "K",
             "L",
             "M",
@@ -2363,6 +2380,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
 
     if "w_q" in keys or "raw_tau_token" in keys:
         return "V"
+    if "raw_ncet_mix" in keys or "raw_ncet_real_penalty" in keys:
+        return "J_NCET"
     if "raw_ecot_lambda" in keys or has_param("episode_controller"):
         return "J_ECOT"
     if has_param("hierarchical_transport_mass"):
@@ -2433,6 +2452,14 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
+        for ncet_key in (
+            "hrot_ncet_mix_init",
+            "hrot_ncet_real_penalty_init",
+            "hrot_ncet_null_penalty_init",
+            "hrot_ncet_sink_cost_init",
+        ):
+            if checkpoint_args.get(ncet_key) is not None:
+                overrides[ncet_key] = checkpoint_args[ncet_key]
         if checkpoint_args.get("hrot_eam_mode") is not None:
             overrides["hrot_eam_mode"] = str(checkpoint_args["hrot_eam_mode"]).strip().lower().replace("-", "_")
         elif variant == "H":

@@ -117,6 +117,47 @@ def test_hrot_variant_cli_accepts_cp_ecot(monkeypatch):
     assert args.hrot_ecot_consensus_tau == 1.2
 
 
+def test_hrot_variant_cli_accepts_j_ncet(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "hrot_fsl",
+            "--hrot_variant",
+            "J_NCET",
+            "--hrot_ncet_mix_init",
+            "0.35",
+            "--hrot_ncet_real_penalty_init",
+            "0.4",
+            "--hrot_ncet_null_penalty_init",
+            "0.08",
+            "--hrot_ncet_sink_cost_init",
+            "1.2",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.hrot_variant == "J_NCET"
+    assert args.hrot_ncet_mix_init == 0.35
+    assert args.hrot_ncet_real_penalty_init == 0.4
+    assert args.hrot_ncet_null_penalty_init == 0.08
+    assert args.hrot_ncet_sink_cost_init == 1.2
+
+
+def test_infer_hrot_variant_detects_j_ncet_state():
+    state_dict = {
+        "raw_transport_cost_threshold": torch.tensor(0.0),
+        "raw_ncet_mix": torch.tensor(0.0),
+        "raw_ncet_real_penalty": torch.tensor(0.0),
+        "raw_ncet_null_penalty": torch.tensor(0.0),
+        "raw_noise_sink_cost": torch.tensor(0.0),
+    }
+
+    assert infer_hrot_variant_from_state_dict(state_dict) == "J_NCET"
+
+
 def test_infer_hrot_variant_detects_variant_r_from_noise_calibrated_state():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),

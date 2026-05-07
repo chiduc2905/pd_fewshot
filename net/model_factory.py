@@ -360,13 +360,13 @@ MODEL_REGISTRY = {
     "hrot_fsl": {
         "display_name": "HROT-FSL / Episode-Conditioned Optimal Transport J-FSL",
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
-        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT and CP_ECOT fixed-budget episode controller support",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, CP_ECOT, and J_NCET fixed-budget support",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "ec_mrot": {
         "display_name": "EC-MROT",
         "paper_name": "Episode-Conditioned Mass-Response Optimal Transport",
-        "architecture": "Backbone spatial tokens -> fixed-budget UOT mass-response path -> base-rho anchor -> class-competitive counterfactual response residual -> margin/stability-gated support-risk aggregation",
+        "architecture": "Backbone spatial tokens -> fixed-budget UOT mass-response path -> anchor-free path centering -> class-competitive signed entropic response functional",
         "metric": "Episode-Conditioned Mass-Response Optimal Transport",
     },
     "crj_fsl": {
@@ -2277,6 +2277,10 @@ def build_model_from_args(args):
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),
             ecot_consensus_tau=float(getattr(args, "hrot_ecot_consensus_tau", 1.0)),
+            ncet_mix_init=float(getattr(args, "hrot_ncet_mix_init", 0.25)),
+            ncet_real_penalty_init=float(getattr(args, "hrot_ncet_real_penalty_init", 0.25)),
+            ncet_null_penalty_init=float(getattr(args, "hrot_ncet_null_penalty_init", 0.05)),
+            ncet_sink_cost_init=float(getattr(args, "hrot_ncet_sink_cost_init", 1.0)),
             hlm_min_mass=float(getattr(args, "hrot_hlm_min_mass", 0.1)),
             hlm_init_mass=float(getattr(args, "hrot_hlm_init_mass", 0.8)),
             hlm_budget_mode=str(getattr(args, "hrot_hlm_budget_mode", "cost")),
@@ -2330,9 +2334,9 @@ def build_model_from_args(args):
             "ec_mrot_mass_response_grid",
             "ec_mrot_response_grid",
             "hrot_ecot_rho_bank",
-            default="0.45,0.60,0.75,0.80,0.90",
+            default="0.40,0.55,0.70,0.85,0.95",
         )
-        base_budget = _first_attr(args, "ec_mrot_base_budget", "hrot_ecot_base_rho", default=0.80)
+        base_budget = _first_attr(args, "ec_mrot_base_budget", "hrot_ecot_base_rho", default=0.70)
         budget_tau = _first_attr(args, "ec_mrot_budget_tau", "hrot_ecot_budget_tau", default=1.0)
         return ECMROT(
             in_channels=3,
@@ -2348,7 +2352,7 @@ def build_model_from_args(args):
             resnet12_dropblock_size=5,
             mass_response_grid=mass_response_grid,
             base_budget=float(base_budget),
-            response_mode=str(getattr(args, "ec_mrot_response_mode", "counterfactual_residual")),
+            response_mode=str(getattr(args, "ec_mrot_response_mode", "anchor_free_functional")),
             learn_response_grid=_bool_flag(
                 getattr(args, "ec_mrot_learn_response_grid", "false"),
                 default=False,
@@ -2361,6 +2365,8 @@ def build_model_from_args(args):
             grid_spacing_reg=float(getattr(args, "ec_mrot_grid_spacing_reg", 0.0)),
             response_strength_init=float(getattr(args, "ec_mrot_response_strength_init", 0.35)),
             response_strength_max=float(getattr(args, "ec_mrot_response_strength_max", 1.0)),
+            response_temperature=float(getattr(args, "ec_mrot_response_temperature", 1.0)),
+            competitive_center=_bool_flag(getattr(args, "ec_mrot_competitive_center", "true"), default=True),
             local_response_gain=float(getattr(args, "ec_mrot_local_response_gain", 2.0)),
             episode_prior_gain=float(getattr(args, "ec_mrot_episode_prior_gain", 0.10)),
             margin_temperature=float(getattr(args, "ec_mrot_margin_temperature", 1.0)),

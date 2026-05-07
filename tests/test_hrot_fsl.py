@@ -178,7 +178,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -197,7 +197,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["transported_mass"].shape == (2, 3)
     if variant == "V":
         assert outputs["rho"].shape == (2, 6)
-    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -739,6 +739,81 @@ def test_hrot_fsl_variant_j_flags_remain_fixed_budget_and_threshold_calibrated()
     assert torch.allclose(outputs["logits"], expected_logits, atol=1e-5, rtol=1e-5)
 
 
+@pytest.mark.parametrize("shot_num", [1, 5])
+def test_hrot_fsl_variant_j_ncet_runs_as_fixed_budget_j_refinement(shot_num: int):
+    torch.manual_seed(144 + shot_num)
+    model = _build_model(variant="J_NCET", ncet_mix_init=0.30)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, shot_num, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.variant == "J_NCET"
+    assert model.uses_nuisance_decoupled_transport
+    assert model.uses_unbalanced_transport
+    assert model.uses_shot_decomposed_transport
+    assert model.uses_cost_threshold_score
+    assert not model.uses_learned_mass
+    assert not model.uses_episode_controller
+    assert torch.allclose(outputs["rho"], torch.full_like(outputs["rho"], model.fixed_mass), atol=1e-6, rtol=0.0)
+    assert outputs["rho"].shape == (2, 3, shot_num)
+    assert outputs["transport_plan"].shape[-2] == outputs["query_euclidean_tokens"].shape[-2] + 1
+    assert outputs["transport_plan"].shape[-1] == outputs["support_euclidean_tokens"].shape[-2] + 1
+    assert outputs["cost_matrix"].shape == outputs["transport_plan"].shape
+    assert outputs["ncet_query_nuisance"].shape == (2, 3, shot_num, outputs["query_euclidean_tokens"].shape[-2])
+    assert outputs["ncet_support_nuisance"].shape == (
+        2,
+        3,
+        shot_num,
+        outputs["support_euclidean_tokens"].shape[-2],
+    )
+    assert torch.all(outputs["ncet_query_nuisance"] >= 0.0)
+    assert torch.all(outputs["ncet_query_nuisance"] <= 1.0)
+    assert torch.all(outputs["ncet_support_nuisance"] >= 0.0)
+    assert torch.all(outputs["ncet_support_nuisance"] <= 1.0)
+    assert torch.all(outputs["ncet_gate"] >= 0.0)
+    assert torch.all(outputs["ncet_gate"] <= outputs["ncet_mix"] + 1e-6)
+    expected_shot_logits = outputs["ncet_base_shot_logits"] + outputs["ncet_gate"] * (
+        outputs["ncet_refined_shot_logits"] - outputs["ncet_base_shot_logits"]
+    )
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+    if shot_num == 1:
+        assert torch.allclose(outputs["logits"], outputs["shot_logits"].squeeze(-1), atol=1e-5, rtol=1e-5)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["transport_plan"]).all()
+
+
+def test_hrot_fsl_variant_j_ncet_backpropagates_nuisance_parameters():
+    torch.manual_seed(150)
+    model = _build_model(variant="J_NCET", ncet_mix_init=0.30)
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([1, 0], dtype=torch.long)
+
+    outputs = model(query, support, query_targets=targets)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    assert model.raw_ncet_mix is not None
+    assert model.raw_ncet_real_penalty is not None
+    assert model.raw_ncet_null_penalty is not None
+    assert model.raw_noise_sink_cost is not None
+    for parameter in (
+        model.raw_ncet_mix,
+        model.raw_ncet_real_penalty,
+        model.raw_ncet_null_penalty,
+        model.raw_noise_sink_cost,
+    ):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+
+
 def test_hrot_fsl_variant_j_ecot_shapes_and_policy_outputs():
     torch.manual_seed(41)
     model = _build_model(variant="J_ECOT")
@@ -881,7 +956,7 @@ def test_ec_mrot_legacy_discrete_quadrature_matches_hrot_j_ecot_outputs():
     assert torch.allclose(ec_mrot_outputs["ec_mrot_homotopy_lambda"], hrot_outputs["ecot_lambda"])
 
 
-def test_ec_mrot_default_counterfactual_residual_adds_class_competitive_path():
+def test_ec_mrot_default_anchor_free_functional_adds_competitive_response():
     torch.manual_seed(52)
     model = _build_ec_mrot_model()
     model.eval()
@@ -892,25 +967,30 @@ def test_ec_mrot_default_counterfactual_residual_adds_class_competitive_path():
     with torch.no_grad():
         outputs = model(query, support, return_aux=True)
 
-    assert model.ec_mrot_response_mode == "counterfactual_residual"
+    assert model.ec_mrot_response_mode == "anchor_free_functional"
     assert model.raw_ec_mrot_response_strength is not None
     assert outputs["ec_mrot_response_strength"].item() > 0.0
     assert outputs["ec_mrot_class_budget_scores"].shape == (2, 3, len(model.ecot_rho_bank))
-    assert outputs["ec_mrot_class_budget_weights"].shape == outputs["ec_mrot_class_budget_scores"].shape
+    assert outputs["ec_mrot_positive_response_weights"].shape == outputs["ec_mrot_class_budget_scores"].shape
     assert torch.allclose(
-        outputs["ec_mrot_class_budget_weights"].sum(dim=-1),
+        outputs["ec_mrot_positive_response_weights"].sum(dim=-1),
         torch.ones_like(outputs["logits"]),
         atol=1e-6,
         rtol=0.0,
     )
-    assert outputs["ec_mrot_counterfactual_residual"].abs().max().item() > 0.0
-    assert torch.all(outputs["ec_mrot_response_gate"] >= model.ec_mrot_residual_gate_floor)
-    assert torch.all(outputs["ec_mrot_response_gate"] <= 1.0)
+    assert torch.allclose(
+        outputs["ec_mrot_negative_response_weights"].sum(dim=-1),
+        torch.ones_like(outputs["logits"]),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert outputs["ec_mrot_response_functional"].abs().max().item() > 0.0
+    assert outputs["ec_mrot_competitive_response"].shape == outputs["ec_mrot_class_budget_scores"].shape
 
 
-def test_ec_mrot_counterfactual_residual_collapses_to_base_for_single_budget():
+def test_ec_mrot_anchor_free_functional_collapses_to_fixed_budget_for_single_budget():
     torch.manual_seed(53)
-    model = _build_ec_mrot_model(mass_response_grid="0.80")
+    model = _build_ec_mrot_model(mass_response_grid="0.80", base_budget=0.80)
     model.eval()
 
     query = torch.randn(1, 2, 3, 64, 64)
@@ -920,7 +1000,8 @@ def test_ec_mrot_counterfactual_residual_collapses_to_base_for_single_budget():
         outputs = model(query, support, return_aux=True)
 
     assert tuple(model.ecot_rho_bank) == (0.80,)
-    assert torch.allclose(outputs["ec_mrot_counterfactual_residual"], torch.zeros_like(outputs["logits"]), atol=1e-6)
+    assert torch.allclose(outputs["ec_mrot_response_functional"], torch.zeros_like(outputs["logits"]), atol=1e-6)
+    assert torch.allclose(outputs["logits"], outputs["ec_mrot_reference_score"], atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["logits"], outputs["ecot_class_base_score"], atol=1e-5, rtol=1e-5)
     assert torch.allclose(outputs["ec_mrot_effective_budget"], torch.full_like(outputs["logits"], 0.80), atol=1e-6)
 
@@ -939,7 +1020,7 @@ def test_ec_mrot_optional_regularizers_are_off_by_default_and_payload_is_present
     assert model.variant == "J_ECOT"
     assert not model.uses_learned_mass
     assert not model.uses_hyperbolic_geometry
-    assert model.ec_mrot_response_mode == "counterfactual_residual"
+    assert model.ec_mrot_response_mode == "anchor_free_functional"
     assert model.ec_mrot_budget_kl_reg == 0.0
     assert model.ec_mrot_budget_entropy_reg == 0.0
     assert outputs["ec_mrot_response_strength"].item() > 0.0
@@ -2042,7 +2123,7 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     assert model.ground_cost == "cosine"
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "CP_ECOT", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",
@@ -2076,7 +2157,7 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         hrot_normalize_euclidean_tokens="true",
         hrot_normalize_rho="false",
         hrot_eval_use_float64="true",
-        hrot_hyperbolic_backend="geoopt",
+        hrot_hyperbolic_backend="native",
         hrot_ot_backend="native",
         hrot_eps=1e-6,
     )
@@ -2099,6 +2180,11 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     if factory_variant == "S":
         assert outputs["shot_pool_weights"].shape == (2, 3, 2)
         assert outputs["query_token_mass"].shape[:3] == (2, 3, 2)
+    if factory_variant == "J_NCET":
+        assert outputs["rho"].shape == (2, 3, 2)
+        assert outputs["ncet_gate"].shape == (2, 3, 2)
+        assert outputs["transport_plan"].shape[-2] == outputs["query_euclidean_tokens"].shape[-2] + 1
+        assert outputs["transport_plan"].shape[-1] == outputs["support_euclidean_tokens"].shape[-2] + 1
     if factory_variant == "T":
         assert outputs["shot_cover_weights"].shape == (2, 3, 2)
         assert outputs["shot_explanation_distance"].shape == (2, 3, 2)
@@ -2112,7 +2198,7 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
         assert outputs["structure_cost"].shape == outputs["cost_matrix"].shape
 
 
-def test_ec_mrot_model_factory_builds_counterfactual_residual_default():
+def test_ec_mrot_model_factory_builds_anchor_free_functional_default():
     args = SimpleNamespace(
         model="ec_mrot",
         device="cpu",
@@ -2161,7 +2247,7 @@ def test_ec_mrot_model_factory_builds_counterfactual_residual_default():
         hrot_hyperbolic_backend="native",
         hrot_ot_backend="native",
         hrot_eps=1e-6,
-        ec_mrot_response_mode="counterfactual_residual",
+        ec_mrot_response_mode="anchor_free_functional",
         ec_mrot_learn_response_grid="false",
         ec_mrot_budget_prior="uniform",
         ec_mrot_budget_kl_reg=0.0,
@@ -2170,6 +2256,8 @@ def test_ec_mrot_model_factory_builds_counterfactual_residual_default():
         ec_mrot_grid_spacing_reg=0.0,
         ec_mrot_response_strength_init=0.35,
         ec_mrot_response_strength_max=1.0,
+        ec_mrot_response_temperature=1.0,
+        ec_mrot_competitive_center="true",
         ec_mrot_local_response_gain=2.0,
         ec_mrot_episode_prior_gain=0.10,
         ec_mrot_margin_temperature=1.0,
@@ -2187,12 +2275,12 @@ def test_ec_mrot_model_factory_builds_counterfactual_residual_default():
 
     assert isinstance(model, ECMROT)
     assert model.variant == "J_ECOT"
-    assert tuple(model.ecot_rho_bank) == (0.45, 0.60, 0.75, 0.80, 0.90)
-    assert model.ecot_base_rho == 0.80
-    assert model.ec_mrot_response_mode == "counterfactual_residual"
+    assert tuple(model.ecot_rho_bank) == (0.40, 0.55, 0.70, 0.85, 0.95)
+    assert model.ecot_base_rho == 0.70
+    assert model.ec_mrot_response_mode == "anchor_free_functional"
     assert outputs["logits"].shape == (2, 3)
     assert outputs["ec_mrot_episode_budget_measure"].shape == outputs["ecot_pi_budget"].shape
-    assert outputs["ec_mrot_counterfactual_residual"].shape == outputs["logits"].shape
+    assert outputs["ec_mrot_response_functional"].shape == outputs["logits"].shape
     assert torch.isfinite(outputs["logits"]).all()
 
 

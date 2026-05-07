@@ -63,6 +63,8 @@ def _inverse_softplus(value: float) -> float:
 
 def _normalize_hrot_variant_name(variant: str) -> str:
     normalized = str(variant).strip().upper().replace("-", "").replace("_", "")
+    if normalized in {"W", "NCET", "JNCET", "NUISANCEDECOUPLED", "JNUISANCE"}:
+        return "J_NCET"
     if normalized in {"RL", "RLITE"}:
         return "T"
     if normalized in {"JEGTW", "JE"}:
@@ -213,7 +215,7 @@ class EpisodeBudgetController(nn.Module):
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants A-V, JE, J_ECOT, and CP_ECOT."""
+    """Vectorized HROT few-shot model with ablation variants, J_ECOT, CP_ECOT, and J_NCET."""
 
     def __init__(
         self,
@@ -277,6 +279,10 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
         ecot_consensus_tau: float = 1.0,
+        ncet_mix_init: float = 0.25,
+        ncet_real_penalty_init: float = 0.25,
+        ncet_null_penalty_init: float = 0.05,
+        ncet_sink_cost_init: float = 1.0,
         min_mass: float = 0.1,
         mass_bonus_init: float = 1.0,
         transport_cost_threshold_init: float | None = None,
@@ -307,7 +313,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -387,6 +393,14 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_policy_entropy_reg must be non-negative")
         if ecot_consensus_tau <= 0.0:
             raise ValueError("ecot_consensus_tau must be positive")
+        if not 0.0 <= ncet_mix_init <= 1.0:
+            raise ValueError("ncet_mix_init must be in [0, 1]")
+        if ncet_real_penalty_init < 0.0:
+            raise ValueError("ncet_real_penalty_init must be non-negative")
+        if ncet_null_penalty_init < 0.0:
+            raise ValueError("ncet_null_penalty_init must be non-negative")
+        if ncet_sink_cost_init <= 0.0:
+            raise ValueError("ncet_sink_cost_init must be positive")
         if lambda_rho_rank < 0.0:
             raise ValueError("lambda_rho_rank must be non-negative")
         if rho_rank_margin < 0.0:
@@ -410,19 +424,20 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_episode_controller = self.uses_ecot
         self.uses_budget_bank = self.uses_ecot
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
         self.uses_geodesic_shot_pooling = variant == "S"
+        self.uses_nuisance_decoupled_transport = variant == "J_NCET"
         self.uses_noise_calibrated_transport = variant in {"Q", "R", "T", "U"}
         self.uses_structure_consistent_transport = variant in {"R", "T", "U"}
         self.uses_structural_cover_objective = variant in {"T", "U"}
@@ -447,6 +462,8 @@ class HROTFSL(BaseConv64FewShotModel):
             self.ot_backend = resolve_ot_backend(ot_backend_name)
             self.partial_backend = "native"
             self.partial_exact = False
+        if self.uses_nuisance_decoupled_transport and self.uses_partial_transport:
+            raise ValueError("NCET/W uses KL-relaxed UOT and does not support partial OT backends")
         self.projection_scale = float(projection_scale)
         self.score_scale = float(score_scale)
         self.tau_q = float(tau_q)
@@ -495,6 +512,10 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_consensus_tau = float(ecot_consensus_tau)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"
         self.ecot_paper_name = "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning"
+        self.ncet_mix_init = float(ncet_mix_init)
+        self.ncet_real_penalty_init = float(ncet_real_penalty_init)
+        self.ncet_null_penalty_init = float(ncet_null_penalty_init)
+        self.ncet_sink_cost_init = float(ncet_sink_cost_init)
         self.min_mass = float(min_mass)
         self.lambda_rho = float(lambda_rho)
         self.rho_target = float(rho_target)
@@ -662,6 +683,22 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_structure_cost_weight = None
             self.q_shot_pool_scorer = None
             self.q_threshold_scorer = None
+        if self.uses_nuisance_decoupled_transport:
+            ncet_mix = min(max(self.ncet_mix_init, 1e-4), 1.0 - 1e-4)
+            self.raw_ncet_mix = nn.Parameter(torch.tensor(math.log(ncet_mix / (1.0 - ncet_mix)), dtype=torch.float32))
+            self.raw_ncet_real_penalty = nn.Parameter(
+                torch.tensor(_inverse_softplus(max(self.ncet_real_penalty_init, self.eps)), dtype=torch.float32)
+            )
+            self.raw_ncet_null_penalty = nn.Parameter(
+                torch.tensor(_inverse_softplus(max(self.ncet_null_penalty_init, self.eps)), dtype=torch.float32)
+            )
+            self.raw_noise_sink_cost = nn.Parameter(
+                torch.tensor(_inverse_softplus(max(self.ncet_sink_cost_init, self.eps)), dtype=torch.float32)
+            )
+        else:
+            self.raw_ncet_mix = None
+            self.raw_ncet_real_penalty = None
+            self.raw_ncet_null_penalty = None
         if self.uses_geodesic_shot_pooling:
             self.raw_shot_pool_temperature = nn.Parameter(torch.tensor(_inverse_softplus(1.0), dtype=torch.float32))
             self.raw_shot_pool_mix = nn.Parameter(torch.tensor(-1.0, dtype=torch.float32))
@@ -805,6 +842,24 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_noise_sink_cost is None:
             return self.curvature.new_tensor(1.0)
         return F.softplus(self.raw_noise_sink_cost).clamp_min(self.eps)
+
+    @property
+    def ncet_mix(self) -> torch.Tensor:
+        if self.raw_ncet_mix is None:
+            return self.curvature.new_tensor(0.0)
+        return torch.sigmoid(self.raw_ncet_mix)
+
+    @property
+    def ncet_real_penalty(self) -> torch.Tensor:
+        if self.raw_ncet_real_penalty is None:
+            return self.curvature.new_tensor(0.0)
+        return F.softplus(self.raw_ncet_real_penalty)
+
+    @property
+    def ncet_null_penalty(self) -> torch.Tensor:
+        if self.raw_ncet_null_penalty is None:
+            return self.curvature.new_tensor(0.0)
+        return F.softplus(self.raw_ncet_null_penalty)
 
     @property
     def shot_pool_temperature(self) -> torch.Tensor:
@@ -1570,6 +1625,136 @@ class HROTFSL(BaseConv64FewShotModel):
         query_mass_with_sink = torch.cat([query_mass, sink_mass.unsqueeze(-1)], dim=-1)
         support_mass_with_sink = torch.cat([support_mass, sink_mass.unsqueeze(-1)], dim=-1)
         return cost_with_sink, query_mass_with_sink, support_mass_with_sink
+
+    def _compute_ncet_nuisance_scores(
+        self,
+        flat_cost: torch.Tensor,
+        probe_plan: torch.Tensor,
+        support_tokens_euc: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Estimate behavior-defined nuisance scores without relying on k-shot repeats."""
+        with torch.no_grad():
+            if flat_cost.dim() != 4:
+                raise ValueError(f"NCET flat_cost must be 4D, got {tuple(flat_cost.shape)}")
+            if probe_plan.shape != flat_cost.shape:
+                raise ValueError(
+                    "NCET probe_plan must match flat_cost shape, "
+                    f"got {tuple(probe_plan.shape)} vs {tuple(flat_cost.shape)}"
+                )
+            num_query, num_pairs, query_len, support_len = flat_cost.shape
+            if num_pairs != way_num * shot_num:
+                raise ValueError(f"NCET expected Way*Shot={way_num * shot_num}, got {num_pairs}")
+
+            cost_det = flat_cost.detach()
+            plan_det = probe_plan.detach().clamp_min(0.0)
+
+            row_min = cost_det.amin(dim=-1)
+            if way_num > 1:
+                class_row_min = row_min.reshape(num_query, way_num, shot_num, query_len).amin(dim=2)
+                class_mean = class_row_min.mean(dim=1, keepdim=True)
+                class_std = class_row_min.std(dim=1, keepdim=True, unbiased=False).clamp_min(self.eps)
+                class_logits = -((class_row_min - class_mean) / class_std)
+                class_prob = torch.softmax(class_logits, dim=1)
+                query_ambiguity = 1.0 - class_prob
+                query_ambiguity = query_ambiguity[:, :, None, :].expand(-1, -1, shot_num, -1)
+                query_ambiguity = query_ambiguity.reshape(num_query, num_pairs, query_len)
+            else:
+                query_ambiguity = torch.zeros_like(row_min)
+
+            support_common = cost_det.new_zeros(way_num, shot_num, support_len)
+            if way_num > 1:
+                support_flat = support_tokens_euc.detach().reshape(way_num * shot_num, support_len, -1)
+                token_flat = support_flat.reshape(way_num * shot_num * support_len, -1)
+                token_dist = torch.cdist(token_flat, token_flat, p=2).pow(2)
+                class_ids = torch.arange(way_num, device=flat_cost.device).repeat_interleave(shot_num * support_len)
+                same_class = class_ids[:, None] == class_ids[None, :]
+                token_dist = token_dist.masked_fill(same_class, float("inf"))
+                min_other = token_dist.amin(dim=-1)
+                mean_other = min_other.mean()
+                std_other = min_other.std(unbiased=False).clamp_min(self.eps)
+                support_common = torch.sigmoid(-((min_other - mean_other) / std_other))
+                support_common = support_common.reshape(way_num, shot_num, support_len)
+            support_common = support_common.reshape(1, num_pairs, support_len).expand(num_query, -1, -1)
+
+            row_mass = plan_det.sum(dim=-1).clamp_min(self.eps)
+            row_prob = plan_det / row_mass.unsqueeze(-1)
+            row_entropy = -(row_prob * row_prob.clamp_min(self.eps).log()).sum(dim=-1)
+            row_entropy = row_entropy / math.log(float(max(2, support_len)))
+
+            col_mass = plan_det.sum(dim=-2).clamp_min(self.eps)
+            col_prob = plan_det / col_mass.unsqueeze(-2)
+            col_entropy = -(col_prob * col_prob.clamp_min(self.eps).log()).sum(dim=-2)
+            col_entropy = col_entropy / math.log(float(max(2, query_len)))
+
+            row_cost = (plan_det * cost_det).sum(dim=-1) / row_mass
+            col_cost = (plan_det * cost_det).sum(dim=-2) / col_mass
+            row_cost_z = (row_cost - row_cost.mean(dim=-1, keepdim=True)) / row_cost.std(
+                dim=-1,
+                keepdim=True,
+                unbiased=False,
+            ).clamp_min(self.eps)
+            col_cost_z = (col_cost - col_cost.mean(dim=-1, keepdim=True)) / col_cost.std(
+                dim=-1,
+                keepdim=True,
+                unbiased=False,
+            ).clamp_min(self.eps)
+            query_high_cost = torch.sigmoid(row_cost_z)
+            support_high_cost = torch.sigmoid(col_cost_z)
+
+            query_nuisance = 0.50 * query_ambiguity + 0.30 * row_entropy + 0.20 * query_high_cost
+            support_nuisance = 0.50 * support_common + 0.30 * col_entropy + 0.20 * support_high_cost
+            query_nuisance = torch.nan_to_num(query_nuisance, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            support_nuisance = torch.nan_to_num(support_nuisance, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            confidence = ((query_nuisance - 0.5).abs().mean(dim=-1) + (support_nuisance - 0.5).abs().mean(dim=-1))
+            confidence = confidence.clamp(0.0, 1.0)
+
+        return query_nuisance, support_nuisance, confidence
+
+    def _append_ncet_nuisance_sink(
+        self,
+        flat_cost: torch.Tensor,
+        query_mass: torch.Tensor,
+        support_mass: torch.Tensor,
+        flat_rho: torch.Tensor,
+        query_nuisance: torch.Tensor,
+        support_nuisance: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if query_nuisance.shape != query_mass.shape:
+            raise ValueError(
+                "query_nuisance must match query_mass shape, "
+                f"got {tuple(query_nuisance.shape)} vs {tuple(query_mass.shape)}"
+            )
+        if support_nuisance.shape != support_mass.shape:
+            raise ValueError(
+                "support_nuisance must match support_mass shape, "
+                f"got {tuple(support_nuisance.shape)} vs {tuple(support_mass.shape)}"
+            )
+
+        real_penalty = self.ncet_real_penalty.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        adjusted_real_cost = flat_cost + 0.5 * real_penalty * (
+            query_nuisance.unsqueeze(-1).to(dtype=flat_cost.dtype)
+            + support_nuisance.unsqueeze(-2).to(dtype=flat_cost.dtype)
+        )
+
+        sink_cost = self.noise_sink_cost.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        cost_with_sink = sink_cost.expand(
+            flat_cost.shape[0],
+            flat_cost.shape[1],
+            flat_cost.shape[2] + 1,
+            flat_cost.shape[3] + 1,
+        ).clone()
+        cost_with_sink[..., :-1, :-1] = adjusted_real_cost
+        cost_with_sink[..., :-1, -1] = sink_cost * (0.1 + 0.9 * (1.0 - query_nuisance.to(dtype=flat_cost.dtype)))
+        cost_with_sink[..., -1, :-1] = sink_cost * (0.1 + 0.9 * (1.0 - support_nuisance.to(dtype=flat_cost.dtype)))
+        cost_with_sink[..., -1, -1] = 0.0
+
+        sink_mass = (1.0 - flat_rho).clamp_min(self.eps).to(device=flat_cost.device, dtype=flat_cost.dtype)
+        query_mass_with_sink = torch.cat([query_mass, sink_mass.unsqueeze(-1)], dim=-1)
+        support_mass_with_sink = torch.cat([support_mass, sink_mass.unsqueeze(-1)], dim=-1)
+        return cost_with_sink, query_mass_with_sink, support_mass_with_sink, adjusted_real_cost
 
     def _pool_shot_scores(
         self,
@@ -2801,7 +2986,126 @@ class HROTFSL(BaseConv64FewShotModel):
                     }
                 else:
                     transport_match_kwargs = {}
-                    if self.uses_egtw_mass:
+                    if self.uses_nuisance_decoupled_transport:
+                        shot_rho = query_euclidean.new_full((query.shape[0], way_num, shot_num), self.fixed_mass)
+                        flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
+                        base_plan, base_flat_cost, base_flat_mass = self._transport_match(flat_cost, flat_rho)
+                        query_nuisance, support_nuisance, ncet_confidence = self._compute_ncet_nuisance_scores(
+                            flat_cost,
+                            base_plan,
+                            support_euclidean,
+                            way_num=way_num,
+                            shot_num=shot_num,
+                        )
+                        base_query_mass = flat_cost.new_full(
+                            (query.shape[0], way_num * shot_num, flat_cost.shape[-2]),
+                            1.0 / float(flat_cost.shape[-2]),
+                        )
+                        base_support_mass = flat_cost.new_full(
+                            (query.shape[0], way_num * shot_num, flat_cost.shape[-1]),
+                            1.0 / float(flat_cost.shape[-1]),
+                        )
+                        query_mass = base_query_mass * flat_rho.unsqueeze(-1)
+                        support_mass = base_support_mass * flat_rho.unsqueeze(-1)
+                        cost_with_sink, query_mass_with_sink, support_mass_with_sink, adjusted_real_cost = (
+                            self._append_ncet_nuisance_sink(
+                                flat_cost,
+                                query_mass,
+                                support_mass,
+                                flat_rho,
+                                query_nuisance,
+                                support_nuisance,
+                            )
+                        )
+                        flat_plan_with_sink, _, _ = self._transport_match(
+                            cost_with_sink,
+                            flat_rho,
+                            a=query_mass_with_sink,
+                            b=support_mass_with_sink,
+                        )
+                        flat_plan = flat_plan_with_sink[..., :-1, :-1]
+                        ncet_flat_cost = compute_transport_cost(flat_plan, adjusted_real_cost)
+                        ncet_flat_mass = compute_transported_mass(flat_plan)
+                        query_sink_mass = flat_plan_with_sink[..., :-1, -1].sum(dim=-1)
+                        support_sink_mass = flat_plan_with_sink[..., -1, :-1].sum(dim=-1)
+                        null_mass = query_sink_mass + support_sink_mass
+
+                        threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+                        base_flat_logits = self.score_scale * (threshold * base_flat_mass - base_flat_cost)
+                        ncet_flat_logits = self.score_scale * (threshold * ncet_flat_mass - ncet_flat_cost)
+                        ncet_flat_logits = ncet_flat_logits - self.ncet_null_penalty.to(
+                            device=flat_cost.device,
+                            dtype=flat_cost.dtype,
+                        ) * null_mass
+                        gate = self.ncet_mix.to(device=flat_cost.device, dtype=flat_cost.dtype) * ncet_confidence
+                        mixed_flat_logits = base_flat_logits + gate * (ncet_flat_logits - base_flat_logits)
+                        mixed_flat_cost = base_flat_cost + gate * (ncet_flat_cost - base_flat_cost)
+                        mixed_flat_mass = base_flat_mass + gate * (ncet_flat_mass - base_flat_mass)
+
+                        shot_logits = mixed_flat_logits.reshape(query.shape[0], way_num, shot_num)
+                        shot_transport_cost = mixed_flat_cost.reshape(query.shape[0], way_num, shot_num)
+                        shot_transport_mass = mixed_flat_mass.reshape(query.shape[0], way_num, shot_num)
+                        logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
+                            shot_logits,
+                            shot_transport_cost,
+                            shot_transport_mass,
+                        )
+                        rho = shot_rho
+                        cost = cost_with_sink.reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            cost_with_sink.shape[-2],
+                            cost_with_sink.shape[-1],
+                        )
+                        plan = flat_plan_with_sink.reshape(
+                            query.shape[0],
+                            way_num,
+                            shot_num,
+                            flat_plan_with_sink.shape[-2],
+                            flat_plan_with_sink.shape[-1],
+                        )
+                        transport_probe_payload = {
+                            "shot_logits": shot_logits,
+                            "shot_pool_weights": shot_pool_weights,
+                            "ncet_base_shot_logits": base_flat_logits.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_refined_shot_logits": ncet_flat_logits.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_gate": gate.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_confidence": ncet_confidence.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_query_nuisance": query_nuisance.reshape(
+                                query.shape[0],
+                                way_num,
+                                shot_num,
+                                query_nuisance.shape[-1],
+                            ),
+                            "ncet_support_nuisance": support_nuisance.reshape(
+                                query.shape[0],
+                                way_num,
+                                shot_num,
+                                support_nuisance.shape[-1],
+                            ),
+                            "ncet_base_transport_cost": base_flat_cost.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_base_transported_mass": base_flat_mass.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_real_transport_cost": ncet_flat_cost.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_real_transported_mass": ncet_flat_mass.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_null_mass": null_mass.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_query_sink_mass": query_sink_mass.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_support_sink_mass": support_sink_mass.reshape(query.shape[0], way_num, shot_num),
+                            "ncet_real_penalty": self.ncet_real_penalty.detach().to(
+                                device=logits.device,
+                                dtype=logits.dtype,
+                            ),
+                            "ncet_null_penalty": self.ncet_null_penalty.detach().to(
+                                device=logits.device,
+                                dtype=logits.dtype,
+                            ),
+                            "ncet_mix": self.ncet_mix.detach().to(device=logits.device, dtype=logits.dtype),
+                            "noise_sink_cost": self.noise_sink_cost.detach().to(
+                                device=logits.device,
+                                dtype=logits.dtype,
+                            ),
+                        }
+                    elif self.uses_egtw_mass:
                         egtw_query_mass, egtw_support_mass, egtw_diagnostics = self._compute_egtw_token_marginals(
                             query_euclidean,
                             support_euclidean,
@@ -2881,41 +3185,42 @@ class HROTFSL(BaseConv64FewShotModel):
                         flat_rho = shot_rho.reshape(query.shape[0], way_num * shot_num)
                     else:
                         flat_rho = self._build_pairwise_rho(query_hyperbolic, flat_support_hyperbolic)
-                    flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match(
-                        flat_cost,
-                        flat_rho,
-                        **transport_match_kwargs,
-                    )
-
-                    shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
-                    shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
-                    if shot_rho is None:
-                        shot_rho = flat_rho.reshape(query.shape[0], way_num, shot_num)
-                    shot_logits = -self.score_scale * shot_transport_cost
-                    if self.uses_unbalanced_transport:
-                        shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
-
-                    if self.variant in {"J", "JE"}:
-                        logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
-                            shot_logits,
-                            shot_transport_cost,
-                            shot_transport_mass,
+                    if not self.uses_nuisance_decoupled_transport:
+                        flat_plan, flat_transport_cost, flat_transport_mass = self._transport_match(
+                            flat_cost,
+                            flat_rho,
+                            **transport_match_kwargs,
                         )
-                        j_transport_payload = {
-                            "shot_logits": shot_logits,
-                            "shot_pool_weights": shot_pool_weights,
-                        }
-                        if transport_probe_payload is None:
-                            transport_probe_payload = j_transport_payload
+
+                        shot_transport_cost = flat_transport_cost.reshape(query.shape[0], way_num, shot_num)
+                        shot_transport_mass = flat_transport_mass.reshape(query.shape[0], way_num, shot_num)
+                        if shot_rho is None:
+                            shot_rho = flat_rho.reshape(query.shape[0], way_num, shot_num)
+                        shot_logits = -self.score_scale * shot_transport_cost
+                        if self.uses_unbalanced_transport:
+                            shot_logits = shot_logits + self._mass_reward_weight(shot_logits) * shot_transport_mass
+
+                        if self.variant in {"J", "JE"}:
+                            logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
+                                shot_logits,
+                                shot_transport_cost,
+                                shot_transport_mass,
+                            )
+                            j_transport_payload = {
+                                "shot_logits": shot_logits,
+                                "shot_pool_weights": shot_pool_weights,
+                            }
+                            if transport_probe_payload is None:
+                                transport_probe_payload = j_transport_payload
+                            else:
+                                transport_probe_payload.update(j_transport_payload)
                         else:
-                            transport_probe_payload.update(j_transport_payload)
-                    else:
-                        logits = shot_logits.mean(dim=-1)
-                        transport_cost = shot_transport_cost.mean(dim=-1)
-                        transport_mass = shot_transport_mass.mean(dim=-1)
-                    rho = shot_rho
-                    cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
-                    plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
+                            logits = shot_logits.mean(dim=-1)
+                            transport_cost = shot_transport_cost.mean(dim=-1)
+                            transport_mass = shot_transport_mass.mean(dim=-1)
+                        rho = shot_rho
+                        cost = flat_cost.reshape(query.shape[0], way_num, shot_num, flat_cost.shape[-2], flat_cost.shape[-1])
+                        plan = flat_plan.reshape(query.shape[0], way_num, shot_num, flat_plan.shape[-2], flat_plan.shape[-1])
         else:
             cost = self._class_ground_cost(
                 query_euclidean,
@@ -3156,6 +3461,19 @@ class HROTFSL(BaseConv64FewShotModel):
             "shot_cover_weights",
             "shot_explanation_distance",
             "shot_coverage_ratio",
+            "ncet_base_shot_logits",
+            "ncet_refined_shot_logits",
+            "ncet_gate",
+            "ncet_confidence",
+            "ncet_query_nuisance",
+            "ncet_support_nuisance",
+            "ncet_base_transport_cost",
+            "ncet_base_transported_mass",
+            "ncet_real_transport_cost",
+            "ncet_real_transported_mass",
+            "ncet_null_mass",
+            "ncet_query_sink_mass",
+            "ncet_support_sink_mass",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -3178,6 +3496,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "egtw_support_similarity_weight",
             "egtw_uniform_mix",
             "hlm_config_token_tau",
+            "ncet_real_penalty",
+            "ncet_null_penalty",
+            "ncet_mix",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

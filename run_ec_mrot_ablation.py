@@ -18,7 +18,7 @@ import run_all_experiments as run_all
 
 
 DEFAULT_SEEDS = (42, 43, 44)
-DEFAULT_MASS_RESPONSE_GRID = "0.45,0.60,0.75,0.80,0.90"
+DEFAULT_MASS_RESPONSE_GRID = "0.40,0.55,0.70,0.85,0.95"
 RESULTS_DIR = Path("results")
 CORE_VARIANTS = ("full", "m1", "m2", "m3", "m4", "m5")
 
@@ -43,18 +43,18 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "m2",
         "M2",
         "Mass-response path collapsed to a single base budget rho=0.80",
-        ("--ec_mrot_mass_response_grid", "0.80"),
+        ("--ec_mrot_mass_response_grid", "0.80", "--hrot_ecot_base_rho", "0.80"),
     ),
     AblationVariant(
         "m3",
         "M3",
-        "Episode controller replaced by a uniform diagnostic measure",
-        ("--hrot_ecot_uniform_budget_policy", "true"),
+        "Class-competitive response centering removed",
+        ("--ec_mrot_competitive_center", "false"),
     ),
     AblationVariant(
         "m4",
         "M4",
-        "Counterfactual response residual disabled",
+        "Anchor-free response functional disabled",
         (
             "--ec_mrot_response_strength_init",
             "0.0005",
@@ -100,6 +100,8 @@ VARIANT_ALIASES = {
     "m2_single_budget": "m2",
     "m3_uniform": "m3",
     "m3_uniform_measure": "m3",
+    "m3_no_center": "m3",
+    "m3_no_competitive_center": "m3",
     "m4_no_homotopy": "m4",
     "m4_no_residual": "m4",
     "m5_fixed": "m5",
@@ -204,13 +206,11 @@ def get_args() -> tuple[argparse.Namespace, list[str]]:
 def base_ec_mrot_args() -> list[str]:
     return [
         "--ec_mrot_response_mode",
-        "counterfactual_residual",
+        "anchor_free_functional",
         "--hrot_pre_transport_shot_pool",
         "false",
         "--ec_mrot_mass_response_grid",
         DEFAULT_MASS_RESPONSE_GRID,
-        "--hrot_ecot_base_rho",
-        "0.80",
         "--hrot_ecot_lambda_init",
         "-8.0",
         "--hrot_ecot_identity_reg",
@@ -233,6 +233,10 @@ def base_ec_mrot_args() -> list[str]:
         "0.35",
         "--ec_mrot_response_strength_max",
         "1.0",
+        "--ec_mrot_response_temperature",
+        "1.0",
+        "--ec_mrot_competitive_center",
+        "true",
         "--ec_mrot_local_response_gain",
         "2.0",
         "--ec_mrot_episode_prior_gain",
