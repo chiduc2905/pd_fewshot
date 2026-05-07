@@ -374,6 +374,8 @@ def main() -> int:
                             spif_global_only="false",
                             spif_local_only="false",
                             test_protocol=effective_test_protocol,
+                            noise_test_root=None,
+                            noise_test_splits="auto",
                             passthrough_args=passthrough,
                             variant_args=variant_args,
                             experiment_tag=tag,
