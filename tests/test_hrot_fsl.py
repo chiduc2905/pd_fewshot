@@ -178,7 +178,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -197,7 +197,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["transported_mass"].shape == (2, 3)
     if variant == "V":
         assert outputs["rho"].shape == (2, 6)
-    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -881,6 +881,17 @@ def test_hrot_fsl_variant_j_ecot_budget_bank_includes_base_rho():
     assert any(abs(rho - 0.8) <= 1e-6 for rho in model.ecot_rho_bank)
     assert abs(model.ecot_rho_bank[model.ecot_base_idx] - 0.8) <= 1e-6
     assert tuple(model.ecot_rho_bank) == tuple(sorted(model.ecot_rho_bank))
+
+
+def test_hrot_fsl_variant_j_ecot_m2_defaults_to_single_base_budget():
+    model = _build_model(variant="J_ECOT_M2")
+
+    assert model.variant == "J_ECOT_M2"
+    assert model.uses_ecot
+    assert model.uses_shot_decomposed_transport
+    assert tuple(model.ecot_rho_bank) == (0.80,)
+    assert model.ecot_base_rho == 0.80
+    assert model.ecot_base_idx == 0
 
 
 def test_hrot_fsl_variant_j_ecot_does_not_use_learned_mass_paths():
@@ -2123,7 +2134,7 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     assert model.ground_cost == "cosine"
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",

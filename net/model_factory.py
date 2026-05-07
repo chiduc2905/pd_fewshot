@@ -360,7 +360,7 @@ MODEL_REGISTRY = {
     "hrot_fsl": {
         "display_name": "HROT-FSL / Episode-Conditioned Optimal Transport J-FSL",
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
-        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, CP_ECOT, and J_NCET fixed-budget support",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2, CP_ECOT, and J_NCET fixed-budget support",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "ec_mrot": {

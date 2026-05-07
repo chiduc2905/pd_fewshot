@@ -884,6 +884,7 @@ def get_args():
             "J_EGTW",
             "JE",
             "J_ECOT",
+            "J_ECOT_M2",
             "CP_ECOT",
             "J_NCET",
             "NCET",
@@ -2051,7 +2052,13 @@ def get_model(args):
         hrot_variant = getattr(args, "hrot_variant", "E")
         hrot_ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
         if hrot_ecot_rho_bank is None:
-            hrot_ecot_rho_bank = "0.50,0.80,0.95" if str(hrot_variant).upper() == "CP_ECOT" else "0.45,0.60,0.75,0.80,0.90"
+            normalized_hrot_variant = str(hrot_variant).strip().upper().replace("-", "").replace("_", "")
+            if normalized_hrot_variant == "CPECOT":
+                hrot_ecot_rho_bank = "0.50,0.80,0.95"
+            elif normalized_hrot_variant in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT"}:
+                hrot_ecot_rho_bank = "0.80"
+            else:
+                hrot_ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
         print(
             "  hrot_fsl: backbone spatial tokens -> optional Euclidean projector -> "
             "Poincare-ball geometry -> balanced/unbalanced relational transport "
@@ -2329,6 +2336,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             normalized = "J_NCET"
         if normalized in {"JEGTW", "JE"}:
             normalized = "JE"
+        if normalized in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTSINGLE", "JECOTSINGLEBUDGET"}:
+            normalized = "J_ECOT_M2"
         if normalized in {"JECOT", "ECOT"}:
             normalized = "J_ECOT"
         if normalized in {"CPECOT"}:
@@ -2348,6 +2357,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "J",
             "JE",
             "J_ECOT",
+            "J_ECOT_M2",
             "CP_ECOT",
             "J_NCET",
             "K",

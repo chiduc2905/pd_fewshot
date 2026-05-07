@@ -69,6 +69,8 @@ def _normalize_hrot_variant_name(variant: str) -> str:
         return "T"
     if normalized in {"JEGTW", "JE"}:
         return "JE"
+    if normalized in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTSINGLE", "JECOTSINGLEBUDGET"}:
+        return "J_ECOT_M2"
     if normalized in {"JECOT", "ECOT"}:
         return "J_ECOT"
     if normalized in {"CPECOT"}:
@@ -313,7 +315,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -371,8 +373,13 @@ class HROTFSL(BaseConv64FewShotModel):
         if hlm_shot_entropy_floor < 0.0:
             raise ValueError("hlm_shot_entropy_floor must be non-negative")
         if ecot_rho_bank is None:
-            ecot_rho_bank = "0.50,0.80,0.95" if variant == "CP_ECOT" else "0.45,0.60,0.75,0.80,0.90"
-        ecot_base_rho = 0.80 if variant == "CP_ECOT" and ecot_base_rho is None else (
+            if variant == "CP_ECOT":
+                ecot_rho_bank = "0.50,0.80,0.95"
+            elif variant == "J_ECOT_M2":
+                ecot_rho_bank = "0.80"
+            else:
+                ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
+        ecot_base_rho = 0.80 if variant in {"CP_ECOT", "J_ECOT_M2"} and ecot_base_rho is None else (
             fixed_mass if ecot_base_rho is None else float(ecot_base_rho)
         )
         ecot_rho_bank_values, ecot_base_idx = _parse_ecot_rho_bank(ecot_rho_bank, ecot_base_rho)
@@ -417,22 +424,22 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_hrot_v = variant == "V"
         self.uses_egtw_mass = variant == "JE"
         self.uses_cp_ecot = variant == "CP_ECOT"
-        self.uses_ecot = variant in {"J_ECOT", "CP_ECOT"}
+        self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "CP_ECOT"}
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
         self.uses_episode_controller = self.uses_ecot
         self.uses_budget_bank = self.uses_ecot
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
