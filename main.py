@@ -943,6 +943,20 @@ def get_args():
         choices=["true", "false"],
     )
     parser.add_argument(
+        "--hrot_tsw_enable",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Enable Token Saliency Reweighting on the HROT cost matrix",
+    )
+    parser.add_argument(
+        "--hrot_tsw_share_gate",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Share the TSW gate between query and support tokens",
+    )
+    parser.add_argument(
         "--hrot_ecot_rho_bank",
         "--ecot_rho_bank",
         "--ec_mrot_mass_response_grid",
@@ -2165,6 +2179,8 @@ def get_model(args):
             f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
             f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
             f"pre_transport_shot_pool={getattr(args, 'hrot_pre_transport_shot_pool', 'false')}, "
+            f"tsw_enable={getattr(args, 'hrot_tsw_enable', 'false')}, "
+            f"tsw_share_gate={getattr(args, 'hrot_tsw_share_gate', 'true')}, "
             f"ecot_rho_bank={hrot_ecot_rho_bank}, "
             f"ecot_base_rho={getattr(args, 'hrot_ecot_base_rho', None)}, "
             f"ecot_budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "

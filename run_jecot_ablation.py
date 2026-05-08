@@ -45,6 +45,32 @@ VARIANTS: tuple[AblationVariant, ...] = (
         ("--hrot_ecot_rho_bank", "0.80"),
     ),
     AblationVariant(
+        "abl_m2_tsw",
+        "M2+TSW",
+        "M2 + Token Saliency Reweighting (shared gate)",
+        (
+            "--hrot_ecot_rho_bank",
+            "0.80",
+            "--hrot_tsw_enable",
+            "true",
+            "--hrot_tsw_share_gate",
+            "true",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_tsw_split",
+        "M2+TSW",
+        "M2 + Token Saliency Reweighting (split gate)",
+        (
+            "--hrot_ecot_rho_bank",
+            "0.80",
+            "--hrot_tsw_enable",
+            "true",
+            "--hrot_tsw_share_gate",
+            "false",
+        ),
+    ),
+    AblationVariant(
         "m2_baseline",
         "M2",
         "J-ECOT-M2 single base-rho baseline",

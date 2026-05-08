@@ -405,6 +405,8 @@ class HROTFSL(BaseConv64FewShotModel):
         egtw_learn_tau: bool = False,
         egtw_learn_lambda: bool = False,
         pre_transport_shot_pool: bool = False,
+        hrot_tsw_enable: bool = False,
+        hrot_tsw_share_gate: bool = True,
         hlm_min_mass: float = 0.1,
         hlm_init_mass: float = 0.8,
         hlm_budget_mode: str = "cost",
@@ -731,6 +733,8 @@ class HROTFSL(BaseConv64FewShotModel):
         self.egtw_learn_tau = bool(egtw_learn_tau)
         self.egtw_learn_lambda = bool(egtw_learn_lambda)
         self.pre_transport_shot_pool = bool(pre_transport_shot_pool)
+        self.hrot_tsw_enable = bool(hrot_tsw_enable)
+        self.hrot_tsw_share_gate = bool(hrot_tsw_share_gate)
         self.hlm_min_mass = float(hlm_min_mass)
         self.hlm_init_mass = float(hlm_init_mass)
         self.hlm_budget_mode = hlm_budget_mode
@@ -802,6 +806,25 @@ class HROTFSL(BaseConv64FewShotModel):
                 nn.Linear(hidden_dim, token_dim, bias=False),
             )
         )
+        if self.hrot_tsw_enable:
+            if self.hrot_tsw_share_gate:
+                self.tsw_gate = nn.Linear(self.token_dim, 1, bias=True)
+                nn.init.zeros_(self.tsw_gate.weight)
+                nn.init.zeros_(self.tsw_gate.bias)
+                self.tsw_gate_q = None
+                self.tsw_gate_s = None
+            else:
+                self.tsw_gate = None
+                self.tsw_gate_q = nn.Linear(self.token_dim, 1, bias=True)
+                self.tsw_gate_s = nn.Linear(self.token_dim, 1, bias=True)
+                nn.init.zeros_(self.tsw_gate_q.weight)
+                nn.init.zeros_(self.tsw_gate_q.bias)
+                nn.init.zeros_(self.tsw_gate_s.weight)
+                nn.init.zeros_(self.tsw_gate_s.bias)
+        else:
+            self.tsw_gate = None
+            self.tsw_gate_q = None
+            self.tsw_gate_s = None
         if self.hyperbolic_backend == "geoopt":
             self.manifold = get_ball(float(curvature_init), backend="geoopt", learnable=True)
             self.raw_curvature = None
@@ -1318,6 +1341,90 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.ground_cost == "cosine":
             return self._cosine_cost(query_tokens, class_tokens)
         return self._euclidean_cost(query_tokens, class_tokens)
+
+    def _apply_tsw(
+        self,
+        query_tokens: torch.Tensor,
+        class_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.hrot_tsw_enable:
+            raise RuntimeError("TSW is disabled")
+        if query_tokens.dim() != 3 or class_tokens.dim() != 3:
+            raise ValueError(
+                "TSW expects query/class tokens shaped (N, Tokens, Dim), "
+                f"got {tuple(query_tokens.shape)} and {tuple(class_tokens.shape)}"
+            )
+        if query_tokens.shape[-1] != self.token_dim or class_tokens.shape[-1] != self.token_dim:
+            raise ValueError(
+                "TSW token dim mismatch, "
+                f"got {query_tokens.shape[-1]} and {class_tokens.shape[-1]} vs {self.token_dim}"
+            )
+
+        if self.hrot_tsw_share_gate:
+            if self.tsw_gate is None:
+                raise RuntimeError("Shared TSW gate is not initialized")
+            w_q = torch.sigmoid(self.tsw_gate(query_tokens))
+            w_s = torch.sigmoid(self.tsw_gate(class_tokens))
+        else:
+            if self.tsw_gate_q is None or self.tsw_gate_s is None:
+                raise RuntimeError("Split TSW gates are not initialized")
+            w_q = torch.sigmoid(self.tsw_gate_q(query_tokens))
+            w_s = torch.sigmoid(self.tsw_gate_s(class_tokens))
+
+        w_outer = w_q.unsqueeze(1) * w_s.transpose(-1, -2).unsqueeze(0)
+        return w_outer, w_q, w_s
+
+    def _apply_tsw_to_cost(
+        self,
+        cost: torch.Tensor,
+        query_tokens: torch.Tensor,
+        class_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
+        if not self.hrot_tsw_enable:
+            return cost, None
+
+        w_outer, w_q, w_s = self._apply_tsw(query_tokens, class_tokens)
+        if w_outer.shape != cost.shape:
+            raise ValueError(f"TSW modifier shape {tuple(w_outer.shape)} does not match cost {tuple(cost.shape)}")
+        w_outer = w_outer.to(device=cost.device, dtype=cost.dtype)
+        return cost * w_outer, {
+            "tsw_gate_q": w_q,
+            "tsw_gate_s": w_s,
+            "tsw_cost_modifier": w_outer,
+        }
+
+    def _format_tsw_payload(
+        self,
+        tsw_payload: dict[str, torch.Tensor] | None,
+        *,
+        query_count: int | None = None,
+        way_num: int | None = None,
+        shot_num: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if tsw_payload is None:
+            return {}
+
+        gate_q = tsw_payload["tsw_gate_q"]
+        gate_s = tsw_payload["tsw_gate_s"]
+        cost_modifier = tsw_payload["tsw_cost_modifier"]
+        if way_num is not None and shot_num is not None:
+            q_count = cost_modifier.shape[0] if query_count is None else int(query_count)
+            cost_modifier = cost_modifier.reshape(
+                q_count,
+                int(way_num),
+                int(shot_num),
+                cost_modifier.shape[-2],
+                cost_modifier.shape[-1],
+            )
+            gate_s = gate_s.reshape(int(way_num), int(shot_num), gate_s.shape[-2], gate_s.shape[-1])
+
+        return {
+            "tsw_gate_q": gate_q,
+            "tsw_gate_s": gate_s,
+            "tsw_cost_modifier": cost_modifier,
+            "tsw_mean_gate_q": gate_q.mean(),
+            "tsw_mean_gate_s": gate_s.mean(),
+        }
 
     def _class_ground_cost(
         self,
@@ -3008,6 +3115,7 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError(f"Query/support token grids must match, got {query_hw} vs {support_hw}")
 
         flat_cost = self._ground_cost(query_euc, support_euc)
+        flat_cost, tsw_payload = self._apply_tsw_to_cost(flat_cost, query_euc, support_euc)
 
         support_hyp_by_shot = support_hyp.reshape(
             way_num,
@@ -3102,6 +3210,7 @@ class HROTFSL(BaseConv64FewShotModel):
                     "support_hyperbolic_tokens": support_hyp,
                 }
             )
+            outputs.update(self._format_tsw_payload(tsw_payload))
         return outputs
 
     def _forward_care_uot(
@@ -3151,6 +3260,7 @@ class HROTFSL(BaseConv64FewShotModel):
             flat_cost = self._fisher_weighted_cost(query_euclidean, flat_support_euclidean, fisher_weight)
         else:
             flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
+        flat_cost, tsw_payload = self._apply_tsw_to_cost(flat_cost, query_euclidean, flat_support_euclidean)
 
         query_weight = None
         query_marginal = None
@@ -3266,6 +3376,14 @@ class HROTFSL(BaseConv64FewShotModel):
                     "support_hyperbolic_tokens": support_hyperbolic,
                 }
             )
+            outputs.update(
+                self._format_tsw_payload(
+                    tsw_payload,
+                    query_count=query.shape[0],
+                    way_num=way_num,
+                    shot_num=shot_num,
+                )
+            )
         return outputs
 
     def _forward_episode(
@@ -3316,6 +3434,7 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_rho = None
         shot_geodesic_distance = None
         transport_probe_payload = None
+        tsw_payload = None
         if self.uses_shot_decomposed_transport:
             matching_shot_num = shot_num
             if self.uses_ecot and self.pre_transport_shot_pool:
@@ -3337,6 +3456,11 @@ class HROTFSL(BaseConv64FewShotModel):
                 if self.q_eam is None:
                     raise RuntimeError("HROT-Q requires a dedicated q_eam head")
                 flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
+                flat_cost, tsw_payload = self._apply_tsw_to_cost(
+                    flat_cost,
+                    query_euclidean,
+                    flat_support_euclidean,
+                )
                 q_geodesic_features, geodesic_features = self._build_q_geodesic_eam_features(
                     query_hyperbolic,
                     support_hyperbolic,
@@ -3612,6 +3736,11 @@ class HROTFSL(BaseConv64FewShotModel):
                     )
             elif self.uses_hyperbolic_token_attention:
                 flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
+                flat_cost, tsw_payload = self._apply_tsw_to_cost(
+                    flat_cost,
+                    query_euclidean,
+                    flat_support_euclidean,
+                )
                 geodesic_features = self._build_geodesic_eam_features(query_hyperbolic, support_hyperbolic)
                 shot_geodesic_distance = geodesic_features[..., 0].to(dtype=query_hyperbolic.dtype)
                 shot_rho = self.eam.forward_features(geodesic_features)
@@ -3682,6 +3811,11 @@ class HROTFSL(BaseConv64FewShotModel):
                     )
             else:
                 flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
+                flat_cost, tsw_payload = self._apply_tsw_to_cost(
+                    flat_cost,
+                    query_euclidean,
+                    flat_support_euclidean,
+                )
                 if self.uses_ecot:
                     nncs_support_weight = None
                     nncs_payload = None
@@ -3978,6 +4112,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 query_hyperbolic,
                 class_hyperbolic,
             )
+            cost, tsw_payload = self._apply_tsw_to_cost(cost, query_euclidean, class_euclidean)
 
             rho = self._build_pairwise_rho(query_hyperbolic, class_hyperbolic)
             plan, transport_cost, transport_mass = self._transport_match(cost, rho)
@@ -4082,6 +4217,17 @@ class HROTFSL(BaseConv64FewShotModel):
                     "support_hyperbolic_tokens": payload_support_hyperbolic,
                 }
             )
+            if self.uses_shot_decomposed_transport:
+                outputs.update(
+                    self._format_tsw_payload(
+                        tsw_payload,
+                        query_count=query.shape[0],
+                        way_num=way_num,
+                        shot_num=matching_shot_num,
+                    )
+                )
+            else:
+                outputs.update(self._format_tsw_payload(tsw_payload))
         return outputs
 
     @staticmethod
@@ -4276,9 +4422,13 @@ class HROTFSL(BaseConv64FewShotModel):
             "ncet_null_mass",
             "ncet_query_sink_mass",
             "ncet_support_sink_mass",
+            "tsw_gate_q",
+            "tsw_cost_modifier",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
+        if "tsw_gate_s" in batch_outputs[0]:
+            stacked["tsw_gate_s"] = torch.stack([item["tsw_gate_s"] for item in batch_outputs], dim=0)
         for key in (
             "token_temperature",
             "token_reliability_mix",
@@ -4303,6 +4453,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "ncet_real_penalty",
             "ncet_null_penalty",
             "ncet_mix",
+            "tsw_mean_gate_q",
+            "tsw_mean_gate_s",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

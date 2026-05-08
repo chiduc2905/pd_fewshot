@@ -216,6 +216,52 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
         assert torch.all(outputs["rho"] <= 1.0)
 
 
+def test_hrot_tsw_is_conditional_and_exposes_m2_aux():
+    torch.manual_seed(35)
+    off_model = _build_model()
+    assert not any("tsw_gate" in name for name, _ in off_model.named_parameters())
+
+    shared_model = _build_model(hrot_tsw_enable=True, hrot_tsw_share_gate=True)
+    shared_params = dict(shared_model.named_parameters())
+    assert "tsw_gate.weight" in shared_params
+    assert "tsw_gate.bias" in shared_params
+    assert not any(name.startswith("tsw_gate_q") or name.startswith("tsw_gate_s") for name in shared_params)
+
+    query_tokens = F.normalize(torch.randn(2, 5, shared_model.token_dim), p=2, dim=-1)
+    support_tokens = F.normalize(torch.randn(6, 5, shared_model.token_dim), p=2, dim=-1)
+    cost = shared_model._ground_cost(query_tokens, support_tokens)
+    gated_cost, tsw_payload = shared_model._apply_tsw_to_cost(cost, query_tokens, support_tokens)
+
+    assert tsw_payload is not None
+    assert torch.allclose(tsw_payload["tsw_gate_q"], torch.full_like(tsw_payload["tsw_gate_q"], 0.5))
+    assert torch.allclose(tsw_payload["tsw_gate_s"], torch.full_like(tsw_payload["tsw_gate_s"], 0.5))
+    assert torch.allclose(tsw_payload["tsw_cost_modifier"], torch.full_like(cost, 0.25))
+    assert torch.allclose(gated_cost, cost * 0.25)
+
+    split_model = _build_model(hrot_tsw_enable=True, hrot_tsw_share_gate=False)
+    split_params = dict(split_model.named_parameters())
+    assert "tsw_gate_q.weight" in split_params
+    assert "tsw_gate_s.weight" in split_params
+    assert "tsw_gate.weight" not in split_params
+
+    m2_model = _build_model(variant="J_ECOT_M2", hrot_tsw_enable=True, hrot_tsw_share_gate=True)
+    m2_model.eval()
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 2, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = m2_model(query, support, return_aux=True)
+
+    assert outputs["tsw_cost_modifier"].shape == outputs["cost_matrix"].shape
+    assert outputs["tsw_gate_q"].shape[0] == outputs["logits"].shape[0]
+    assert outputs["tsw_gate_s"].shape[:3] == (1, 2, 1)
+    assert torch.all(outputs["tsw_gate_q"] > 0.0)
+    assert torch.all(outputs["tsw_gate_q"] < 1.0)
+    assert torch.all(outputs["tsw_gate_s"] > 0.0)
+    assert torch.all(outputs["tsw_gate_s"] < 1.0)
+    assert torch.all(outputs["cost_matrix"] >= 0.0)
+
+
 def test_hrot_fsl_variant_t_uses_structural_cover_objective():
     torch.manual_seed(33)
     model = _build_model(variant="T")

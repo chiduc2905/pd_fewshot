@@ -2253,6 +2253,8 @@ def build_model_from_args(args):
                 getattr(args, "hrot_pre_transport_shot_pool", "false"),
                 default=False,
             ),
+            hrot_tsw_enable=_bool_flag(getattr(args, "hrot_tsw_enable", "false"), default=False),
+            hrot_tsw_share_gate=_bool_flag(getattr(args, "hrot_tsw_share_gate", "true"), default=True),
             ecot_rho_bank=getattr(args, "hrot_ecot_rho_bank", None),
             ecot_base_rho=getattr(args, "hrot_ecot_base_rho", None),
             ecot_budget_tau=float(getattr(args, "hrot_ecot_budget_tau", 1.0)),
