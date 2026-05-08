@@ -450,6 +450,9 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_crs_entropy_reg: float = 0.0,
         ecot_crs_side: str = "support",
         ecot_crs_ssm_type: str = "auto",
+        ecot_enable_noise_sink: bool = False,
+        ecot_noise_sink_cost_init: float = 1.0,
+        ecot_noise_sink_score_penalty: float = 0.0,
         ncet_mix_init: float = 0.25,
         ncet_real_penalty_init: float = 0.25,
         ncet_null_penalty_init: float = 0.05,
@@ -599,6 +602,10 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_crs_ssm_type = str(ecot_crs_ssm_type).strip().lower()
         if ecot_crs_ssm_type not in {"auto", "simple", "mamba"}:
             raise ValueError(f"Unsupported CRS SSM type: {ecot_crs_ssm_type}")
+        if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
+            raise ValueError("ecot_noise_sink_cost_init must be positive")
+        if float(ecot_noise_sink_score_penalty) < 0.0:
+            raise ValueError("ecot_noise_sink_score_penalty must be non-negative")
         nncs_enabled_by_default = variant == "J_ECOT_NNCS"
         ecot_enable_nncs_marginal = (
             nncs_enabled_by_default
@@ -646,6 +653,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT"}
         self.uses_ecot_nncs_marginal = uses_nncs_marginal
         self.uses_ecot_crs_marginal = bool(ecot_enable_crs_marginal)
+        self.uses_ecot_noise_sink = self.uses_ecot and bool(ecot_enable_noise_sink)
         if self.uses_ecot_crs_marginal and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CRS marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if self.uses_ecot_crs_marginal and self.uses_ecot_nncs_marginal:
@@ -766,6 +774,8 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_crs_entropy_reg = float(ecot_crs_entropy_reg)
         self.ecot_crs_side = ecot_crs_side
         self.ecot_crs_ssm_type = ecot_crs_ssm_type
+        self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
+        self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"
         self.ecot_paper_name = "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning"
         self.ncet_mix_init = float(ncet_mix_init)
@@ -965,6 +975,10 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_structure_cost_weight = None
             self.q_shot_pool_scorer = None
             self.q_threshold_scorer = None
+        if self.uses_ecot_noise_sink and self.raw_noise_sink_cost is None:
+            self.raw_noise_sink_cost = nn.Parameter(
+                torch.tensor(_inverse_softplus(self.ecot_noise_sink_cost_init), dtype=torch.float32)
+            )
         if self.uses_nuisance_decoupled_transport:
             ncet_mix = min(max(self.ncet_mix_init, 1e-4), 1.0 - 1e-4)
             self.raw_ncet_mix = nn.Parameter(torch.tensor(math.log(ncet_mix / (1.0 - ncet_mix)), dtype=torch.float32))
@@ -2398,18 +2412,85 @@ class HROTFSL(BaseConv64FewShotModel):
                 a_bank = a_bank * rho_bank.view(1, 1, budget_count, 1)
                 transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
 
-        plan_bank, cost_out, mass_out = self._transport_match(
-            cost_bank,
-            rho_bank_flat,
-            **transport_kwargs,
-        )
+        noise_query_mass = None
+        noise_support_mass = None
+        noise_self_mass = None
+        if self.uses_ecot_noise_sink:
+            if "a" in transport_kwargs:
+                real_a = transport_kwargs["a"]
+            else:
+                real_a = flat_cost.new_full(
+                    (num_query, num_pairs, budget_count, query_len),
+                    1.0 / float(query_len),
+                )
+                real_a = real_a * rho_bank.view(1, 1, budget_count, 1)
+                real_a = real_a.reshape(num_query, num_pairs * budget_count, query_len)
+
+            if "b" in transport_kwargs:
+                real_b = transport_kwargs["b"]
+            else:
+                real_b = flat_cost.new_full(
+                    (num_query, num_pairs, budget_count, support_len),
+                    1.0 / float(support_len),
+                )
+                real_b = real_b * rho_bank.view(1, 1, budget_count, 1)
+                real_b = real_b.reshape(num_query, num_pairs * budget_count, support_len)
+
+            cost_with_sink, query_mass_with_sink, support_mass_with_sink = self._append_noise_sink(
+                cost_bank,
+                real_a,
+                real_b,
+                rho_bank_flat,
+            )
+            plan_with_sink, _, _ = self._transport_match(
+                cost_with_sink,
+                rho_bank_flat,
+                a=query_mass_with_sink,
+                b=support_mass_with_sink,
+            )
+            plan_bank = plan_with_sink[..., :-1, :-1]
+            cost_out = compute_transport_cost(plan_bank, cost_bank)
+            mass_out = compute_transported_mass(plan_bank)
+            noise_query_mass = plan_with_sink[..., :-1, -1].sum(dim=-1)
+            noise_support_mass = plan_with_sink[..., -1, :-1].sum(dim=-1)
+            noise_self_mass = plan_with_sink[..., -1, -1]
+        else:
+            plan_bank, cost_out, mass_out = self._transport_match(
+                cost_bank,
+                rho_bank_flat,
+                **transport_kwargs,
+            )
         plan_bank = plan_bank.reshape(num_query, way_num, shot_num, budget_count, query_len, support_len)
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
+        noise_query_mass_bank = (
+            None
+            if noise_query_mass is None
+            else noise_query_mass.reshape(num_query, way_num, shot_num, budget_count)
+        )
+        noise_support_mass_bank = (
+            None
+            if noise_support_mass is None
+            else noise_support_mass.reshape(num_query, way_num, shot_num, budget_count)
+        )
+        noise_self_mass_bank = (
+            None
+            if noise_self_mass is None
+            else noise_self_mass.reshape(num_query, way_num, shot_num, budget_count)
+        )
+        sink_penalty_bank = None
+        if noise_query_mass_bank is not None and self.ecot_noise_sink_score_penalty > 0.0:
+            sink_penalty_bank = 0.5 * (noise_query_mass_bank + noise_support_mass_bank)
 
         threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
+            score_terms = active_threshold * shot_mass_bank - shot_cost_bank
+            if sink_penalty_bank is not None:
+                score_terms = score_terms - flat_cost.new_tensor(self.ecot_noise_sink_score_penalty) * sink_penalty_bank
+            return self.score_scale * score_terms
+
         diagnostics = self._compute_ecot_diagnostics(
-            self.score_scale * (threshold * shot_mass_bank - shot_cost_bank),
+            ecot_budget_score(threshold),
             shot_cost_bank,
             shot_mass_bank,
         )
@@ -2429,7 +2510,7 @@ class HROTFSL(BaseConv64FewShotModel):
         # low-variance fixed-budget inductive bias of J-FSL by evaluating a
         # deterministic bank of fixed UOT budgets and learning only an
         # episode-level policy over these stable experts.
-        budget_scores = self.score_scale * (threshold * shot_mass_bank - shot_cost_bank)
+        budget_scores = ecot_budget_score(threshold)
         base_idx = self._ecot_base_idx_value()
         base_rho = self._ecot_base_rho_tensor(flat_cost)
         base_score = budget_scores[..., base_idx]
@@ -2438,6 +2519,11 @@ class HROTFSL(BaseConv64FewShotModel):
         lambda_ecot = self.ecot_lambda.to(device=flat_cost.device, dtype=flat_cost.dtype)
         shot_cost_diag = (pi_view * shot_cost_bank).sum(dim=-1)
         shot_mass_diag = (pi_view * shot_mass_bank).sum(dim=-1)
+        noise_query_mass_diag = None if noise_query_mass_bank is None else (pi_view * noise_query_mass_bank).sum(dim=-1)
+        noise_support_mass_diag = (
+            None if noise_support_mass_bank is None else (pi_view * noise_support_mass_bank).sum(dim=-1)
+        )
+        noise_self_mass_diag = None if noise_self_mass_bank is None else (pi_view * noise_self_mass_bank).sum(dim=-1)
 
         cp_payload: dict[str, torch.Tensor] = {}
         tau_shot = None
@@ -2521,6 +2607,19 @@ class HROTFSL(BaseConv64FewShotModel):
         }
         payload.update(crs_payload)
         payload.update(cp_payload)
+        if noise_query_mass_bank is not None:
+            payload.update(
+                {
+                    "ecot_noise_sink_query_mass_bank": noise_query_mass_bank,
+                    "ecot_noise_sink_support_mass_bank": noise_support_mass_bank,
+                    "ecot_noise_sink_self_mass_bank": noise_self_mass_bank,
+                    "ecot_noise_sink_query_mass": noise_query_mass_diag,
+                    "ecot_noise_sink_support_mass": noise_support_mass_diag,
+                    "ecot_noise_sink_self_mass": noise_self_mass_diag,
+                    "ecot_noise_sink_cost": self.noise_sink_cost.to(device=flat_cost.device, dtype=flat_cost.dtype),
+                    "ecot_noise_sink_score_penalty": flat_cost.new_tensor(self.ecot_noise_sink_score_penalty),
+                }
+            )
         if tau_shot is not None:
             payload["ecot_tau_shot"] = tau_shot
         if raw_delta_threshold is not None:
@@ -4023,6 +4122,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_class_mix_score",
             "ecot_shot_transport_cost_bank",
             "ecot_shot_transported_mass_bank",
+            "ecot_noise_sink_query_mass_bank",
+            "ecot_noise_sink_support_mass_bank",
+            "ecot_noise_sink_self_mass_bank",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -4152,6 +4254,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "noise_sink_query_mass",
             "noise_sink_support_mass",
             "noise_sink_self_mass",
+            "ecot_noise_sink_query_mass",
+            "ecot_noise_sink_support_mass",
+            "ecot_noise_sink_self_mass",
             "base_cost_matrix",
             "structure_cost",
             "structure_probe_mass",
@@ -4181,6 +4286,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "hyperbolic_token_prior_mix",
             "eam_cross_attention_temperature",
             "noise_sink_cost",
+            "ecot_noise_sink_cost",
+            "ecot_noise_sink_score_penalty",
             "shot_pool_temperature",
             "shot_pool_mix",
             "q_enhancement_mix",

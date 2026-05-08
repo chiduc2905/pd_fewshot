@@ -2302,6 +2302,12 @@ def build_model_from_args(args):
             ecot_crs_entropy_reg=float(getattr(args, "hrot_ecot_crs_entropy_reg", 0.0)),
             ecot_crs_side=str(getattr(args, "hrot_ecot_crs_side", "support")),
             ecot_crs_ssm_type=str(getattr(args, "hrot_ecot_crs_ssm_type", "auto")),
+            ecot_enable_noise_sink=_bool_flag(
+                getattr(args, "hrot_ecot_enable_noise_sink", "false"),
+                default=False,
+            ),
+            ecot_noise_sink_cost_init=float(getattr(args, "hrot_ecot_noise_sink_cost_init", 1.0)),
+            ecot_noise_sink_score_penalty=float(getattr(args, "hrot_ecot_noise_sink_score_penalty", 0.0)),
             ncet_mix_init=float(getattr(args, "hrot_ncet_mix_init", 0.25)),
             ncet_real_penalty_init=float(getattr(args, "hrot_ncet_real_penalty_init", 0.25)),
             ncet_null_penalty_init=float(getattr(args, "hrot_ncet_null_penalty_init", 0.05)),

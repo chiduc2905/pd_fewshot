@@ -123,6 +123,23 @@ VARIANTS: tuple[AblationVariant, ...] = (
         ),
     ),
     AblationVariant(
+        "m2_noise_sink",
+        "NS-M2",
+        "M2 with explicit ECOT dustbin/noise-sink transport",
+        (
+            "--hrot_variant",
+            "J_ECOT",
+            "--hrot_ecot_rho_bank",
+            "0.80",
+            "--hrot_ecot_base_rho",
+            "0.80",
+            "--hrot_ecot_enable_noise_sink",
+            "true",
+            "--hrot_ecot_noise_sink_cost_init",
+            "1.0",
+        ),
+    ),
+    AblationVariant(
         "care_full",
         "CARE",
         "CARE-UOT with FWEC, QESM, and MDR",
@@ -220,6 +237,12 @@ def default_n_train_text() -> str:
     return ",".join(format_samples(samples) for samples in run_all.SAMPLES_LIST)
 
 
+def default_noise_test_root() -> str | None:
+    if hasattr(run_all, "default_noise_test_root"):
+        return run_all.default_noise_test_root()
+    return None
+
+
 def parse_train_values(text: str) -> list[int | None]:
     values: list[int | None] = []
     for raw_item in text.split(","):
@@ -247,7 +270,9 @@ def get_args() -> tuple[argparse.Namespace, list[str]]:
         default="/workspace/pd_fewshot/scalogram_27_1_hrot_robust",
     )
     parser.add_argument("--dataset_name", type=str, default="knee_aug_split")
-    parser.add_argument("--test_protocol", type=str, default="auto", choices=["auto", "clean", "robust"])
+    parser.add_argument("--test_protocol", type=str, default="auto", choices=["auto", "clean", "robust", "noise"])
+    parser.add_argument("--noise_test_root", type=str, default=default_noise_test_root())
+    parser.add_argument("--noise_test_splits", type=str, default="auto")
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--pin_memory", type=str, default="true", choices=["true", "false"])
@@ -299,8 +324,15 @@ def base_jecot_args() -> list[str]:
     ]
 
 
-def result_path(dataset_name: str, samples: int | None, shot: int, tag: str, protocol: str) -> Path:
-    protocol_suffix = run_all.result_protocol_suffix(protocol)
+def result_path(
+    dataset_name: str,
+    samples: int | None,
+    shot: int,
+    tag: str,
+    protocol: str,
+    test_split_name: str | None = None,
+) -> Path:
+    protocol_suffix = run_all.result_protocol_suffix(protocol, test_split_name)
     filename = f"results_{dataset_name}_hrot_fsl_{format_samples_file(samples)}_{shot}shot_{tag}{protocol_suffix}.txt"
     return RESULTS_DIR / filename
 
@@ -325,6 +357,7 @@ def append_run_log(path: Path, row: dict[str, object]) -> None:
         "n_train",
         "shot",
         "seed",
+        "test_split",
         "acc_mean",
         "acc_std",
         "acc_95ci",
@@ -435,9 +468,25 @@ def main() -> int:
         raise ValueError(f"Unknown variants: {unknown}. Valid variants: {sorted(VARIANT_BY_NAME)}")
     variants = [VARIANT_BY_NAME[name] for name in variant_names]
 
-    effective_test_protocol = run_all.resolve_test_protocol(args.test_protocol, args.dataset_path)
-    if effective_test_protocol == "robust" and not run_all.dataset_has_hrot_robust_layout(args.dataset_path):
+    if args.test_protocol == "robust":
+        effective_test_protocol = "robust"
+    else:
+        effective_test_protocol = run_all.resolve_test_protocol(
+            args.test_protocol,
+            args.noise_test_root,
+            args.noise_test_splits,
+        )
+    if (
+        effective_test_protocol == "robust"
+        and hasattr(run_all, "dataset_has_hrot_robust_layout")
+        and not run_all.dataset_has_hrot_robust_layout(args.dataset_path)
+    ):
         raise ValueError("--test_protocol robust requires train/val/test_clean and all HROT robust test pools.")
+    noise_split_names = (
+        run_all.discover_noise_test_splits(args.noise_test_root, args.noise_test_splits)
+        if effective_test_protocol == "noise"
+        else []
+    )
 
     total = len(variants) * len(samples_list) * len(shots) * len(seeds)
     print("=" * 72)
@@ -457,6 +506,9 @@ def main() -> int:
     print(f"Variants    : {', '.join(variant.name for variant in variants)}")
     print(f"Backbone    : {args.fewshot_backbone}")
     print(f"Test Proto  : {args.test_protocol} -> {effective_test_protocol}")
+    if effective_test_protocol == "noise":
+        print(f"Noise Root  : {args.noise_test_root}")
+        print(f"Noise Splits: {', '.join(noise_split_names)}")
     print(f"Total       : {total} run(s)")
     if passthrough:
         print(f"Forwarded   : {' '.join(passthrough)}")
@@ -497,8 +549,8 @@ def main() -> int:
                             spif_global_only="false",
                             spif_local_only="false",
                             test_protocol=effective_test_protocol,
-                            noise_test_root=None,
-                            noise_test_splits="auto",
+                            noise_test_root=args.noise_test_root,
+                            noise_test_splits=args.noise_test_splits,
                             passthrough_args=passthrough,
                             variant_args=variant_args,
                             experiment_tag=tag,
@@ -512,30 +564,41 @@ def main() -> int:
                                 return 1
                             continue
 
-                        out_path = result_path(args.dataset_name, samples, shot, tag, effective_test_protocol)
-                        try:
-                            acc_mean, acc_std, acc_95ci = parse_accuracy(out_path)
-                        except Exception as exc:
-                            failures.append(f"{label} ({exc})")
-                            if not args.continue_on_error:
-                                raise
-                            continue
+                        parse_targets = (
+                            [(split_name, result_path(args.dataset_name, samples, shot, tag, effective_test_protocol, split_name))
+                             for split_name in noise_split_names]
+                            if effective_test_protocol == "noise"
+                            else [("", result_path(args.dataset_name, samples, shot, tag, effective_test_protocol))]
+                        )
+                        for test_split, out_path in parse_targets:
+                            try:
+                                acc_mean, acc_std, acc_95ci = parse_accuracy(out_path)
+                            except Exception as exc:
+                                failures.append(f"{label} {test_split or ''} ({exc})".strip())
+                                if not args.continue_on_error:
+                                    raise
+                                continue
 
-                        row = {
-                            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
-                            "variant": variant.name,
-                            "module": variant.module,
-                            "n_train": sample_label,
-                            "shot": shot,
-                            "seed": seed,
-                            "acc_mean": f"{acc_mean:.6f}",
-                            "acc_std": f"{acc_std:.6f}",
-                            "acc_95ci": f"{acc_95ci:.6f}",
-                            "result_file": str(out_path),
-                        }
-                        rows.append(row)
-                        append_run_log(Path(args.run_log), row)
-                        print(f"Parsed accuracy: mean={acc_mean:.4f}, std={acc_std:.4f}, 95ci={acc_95ci:.4f}")
+                            row = {
+                                "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                "variant": variant.name,
+                                "module": variant.module,
+                                "n_train": sample_label,
+                                "shot": shot,
+                                "seed": seed,
+                                "test_split": test_split,
+                                "acc_mean": f"{acc_mean:.6f}",
+                                "acc_std": f"{acc_std:.6f}",
+                                "acc_95ci": f"{acc_95ci:.6f}",
+                                "result_file": str(out_path),
+                            }
+                            rows.append(row)
+                            append_run_log(Path(args.run_log), row)
+                            split_text = f", split={test_split}" if test_split else ""
+                            print(
+                                f"Parsed accuracy{split_text}: "
+                                f"mean={acc_mean:.4f}, std={acc_std:.4f}, 95ci={acc_95ci:.4f}"
+                            )
     finally:
         if args.dry_run:
             run_all.subprocess.run = original_run

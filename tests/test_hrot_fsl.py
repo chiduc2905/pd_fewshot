@@ -1035,6 +1035,68 @@ def test_hrot_fsl_crs_disabled_matches_original_m2():
     )
 
 
+def test_hrot_fsl_ecot_noise_sink_runs_on_single_budget_m2_path():
+    torch.manual_seed(76)
+    model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        ecot_enable_noise_sink=True,
+        ecot_noise_sink_cost_init=0.7,
+        sinkhorn_iterations=8,
+    )
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    expected_shot_logits = model.score_scale * (
+        model.transport_cost_threshold.detach().to(dtype=outputs["shot_transported_mass"].dtype)
+        * outputs["shot_transported_mass"]
+        - outputs["shot_transport_cost"]
+    )
+
+    assert model.uses_ecot_noise_sink
+    assert model.raw_noise_sink_cost is not None
+    assert outputs["transport_plan"].shape == outputs["cost_matrix"].shape
+    assert outputs["ecot_noise_sink_query_mass"].shape == (2, 3, 2)
+    assert outputs["ecot_noise_sink_support_mass"].shape == (2, 3, 2)
+    assert outputs["ecot_noise_sink_self_mass"].shape == (2, 3, 2)
+    assert outputs["ecot_noise_sink_query_mass_bank"].shape == (2, 3, 2, 1)
+    assert torch.all(outputs["ecot_noise_sink_query_mass"] >= 0.0)
+    assert torch.all(outputs["ecot_noise_sink_support_mass"] >= 0.0)
+    assert outputs["ecot_noise_sink_cost"].item() > 0.0
+    assert torch.allclose(outputs["shot_logits"], expected_shot_logits, atol=1e-5, rtol=1e-5)
+
+
+def test_hrot_fsl_ecot_noise_sink_backpropagates_sink_cost():
+    torch.manual_seed(77)
+    model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        ecot_enable_noise_sink=True,
+        ecot_noise_sink_cost_init=0.7,
+        sinkhorn_iterations=8,
+    )
+    model.train()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    outputs = model(query, support)
+    model.zero_grad(set_to_none=True)
+    outputs["logits"].sum().backward()
+
+    assert model.raw_noise_sink_cost is not None
+    assert model.raw_noise_sink_cost.grad is not None
+    assert torch.isfinite(model.raw_noise_sink_cost.grad).all()
+    assert model.raw_noise_sink_cost.grad.abs().sum().item() > 1e-10
+
+
 @pytest.mark.parametrize("shot_num", [1, 5])
 def test_hrot_fsl_crs_m2_runs_k1_k5_and_returns_aux(shot_num: int):
     torch.manual_seed(75 + shot_num)
@@ -2549,6 +2611,26 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     model = build_model_from_args(args)
 
     assert model.ground_cost == "cosine"
+
+
+def test_hrot_fsl_model_factory_accepts_ecot_noise_sink():
+    args = SimpleNamespace(
+        model="hrot_fsl",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_variant="J_ECOT",
+        hrot_ecot_rho_bank="0.80",
+        hrot_ecot_base_rho=0.80,
+        hrot_ecot_enable_noise_sink="true",
+        hrot_ecot_noise_sink_cost_init=0.7,
+        hrot_sinkhorn_iterations=8,
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.uses_ecot_noise_sink
+    assert model.raw_noise_sink_cost is not None
 
 
 @pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])

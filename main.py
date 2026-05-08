@@ -1041,6 +1041,14 @@ def get_args():
         default="auto",
         choices=["auto", "simple", "mamba"],
     )
+    parser.add_argument(
+        "--hrot_ecot_enable_noise_sink",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--hrot_ecot_noise_sink_cost_init", type=float, default=1.0)
+    parser.add_argument("--hrot_ecot_noise_sink_score_penalty", type=float, default=0.0)
     parser.add_argument("--care_enable_fwec", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--care_enable_qesm", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--care_enable_mdr", type=str, default="true", choices=["true", "false"])
@@ -2176,6 +2184,8 @@ def get_model(args):
             f"ecot_crs_cross_ref={getattr(args, 'hrot_ecot_crs_use_cross_ref', 'true')}, "
             f"ecot_crs_ssm={getattr(args, 'hrot_ecot_crs_use_ssm', 'true')}, "
             f"ecot_crs_side={getattr(args, 'hrot_ecot_crs_side', 'support')}, "
+            f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
+            f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
             f"care_fwec={getattr(args, 'care_enable_fwec', 'true')}, "
             f"care_qesm={getattr(args, 'care_enable_qesm', 'true')}, "
             f"care_mdr={getattr(args, 'care_enable_mdr', 'true')}, "
@@ -2567,6 +2577,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_crs_entropy_reg",
             "hrot_ecot_crs_side",
             "hrot_ecot_crs_ssm_type",
+            "hrot_ecot_enable_noise_sink",
+            "hrot_ecot_noise_sink_cost_init",
+            "hrot_ecot_noise_sink_score_penalty",
             "care_enable_fwec",
             "care_enable_qesm",
             "care_enable_mdr",
