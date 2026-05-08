@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from net.ec_mrot import ECMROT
-from net.hrot_fsl import HROTFSL
+from net.hrot_fsl import HROTFSL, _compute_cross_shot_support_marginals
 from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbolic_distance_matrix, safe_project_to_ball
 from net.model_factory import build_model_from_args
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass
@@ -178,7 +178,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -197,7 +197,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["transported_mass"].shape == (2, 3)
     if variant == "V":
         assert outputs["rho"].shape == (2, 6)
-    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -892,6 +892,106 @@ def test_hrot_fsl_variant_j_ecot_m2_defaults_to_single_base_budget():
     assert tuple(model.ecot_rho_bank) == (0.80,)
     assert model.ecot_base_rho == 0.80
     assert model.ecot_base_idx == 0
+
+
+def test_cross_shot_support_marginals_fallback_to_uniform_for_one_shot():
+    torch.manual_seed(54)
+    tokens = torch.randn(2, 3, 1, 4, 5)
+
+    b, consistency, sigma = _compute_cross_shot_support_marginals(
+        tokens,
+        rho=0.8,
+        beta=5.0,
+        eta=0.05,
+    )
+
+    expected_b = torch.full_like(b, 0.8 / 4.0)
+    expected_sigma = torch.full_like(sigma, 1.0 / 4.0)
+    assert b.shape == (2, 3, 1, 4)
+    assert torch.allclose(b, expected_b, atol=0.0, rtol=0.0)
+    assert torch.allclose(sigma, expected_sigma, atol=0.0, rtol=0.0)
+    assert torch.allclose(consistency, torch.zeros_like(consistency), atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("shot_num", [1, 5])
+def test_hrot_fsl_variant_j_ecot_nncs_forward_and_marginals(shot_num: int):
+    torch.manual_seed(55 + shot_num)
+    model = _build_model(
+        variant="J_ECOT_NNCS",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        sinkhorn_iterations=8,
+    )
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, shot_num, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    nncs_b = outputs["nncs_support_marginal"]
+    assert model.variant == "J_ECOT_NNCS"
+    assert model.uses_ecot
+    assert model.uses_ecot_nncs_marginal
+    assert outputs["logits"].shape == (2, 3)
+    assert nncs_b.shape[:3] == (1, 3, shot_num)
+    assert torch.allclose(
+        nncs_b.sum(dim=-1),
+        torch.full_like(nncs_b.sum(dim=-1), model.ecot_base_rho),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    if shot_num == 1:
+        expected = torch.full_like(nncs_b, model.ecot_base_rho / float(nncs_b.shape[-1]))
+        assert torch.allclose(nncs_b, expected, atol=1e-6, rtol=0.0)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["transport_cost"]).all()
+    assert torch.isfinite(outputs["transported_mass"]).all()
+    assert torch.isfinite(outputs["ecot_shot_transport_cost_bank"]).all()
+    assert torch.isfinite(outputs["ecot_shot_transported_mass_bank"]).all()
+    assert torch.isfinite(nncs_b).all()
+    assert torch.isfinite(outputs["nncs_consistency"]).all()
+    assert torch.isfinite(outputs["nncs_sigma"]).all()
+
+
+def test_hrot_fsl_variant_j_ecot_ignores_nncs_flag_and_stays_uniform_route():
+    torch.manual_seed(60)
+    base_model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        sinkhorn_iterations=8,
+    )
+    flagged_model = _build_model(
+        variant="J_ECOT",
+        ecot_enable_nncs_marginal=True,
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        sinkhorn_iterations=8,
+    )
+    flagged_model.load_state_dict(base_model.state_dict(), strict=True)
+    base_model.eval()
+    flagged_model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 5, 3, 64, 64)
+
+    with torch.no_grad():
+        base_outputs = base_model(query, support, return_aux=True)
+        flagged_outputs = flagged_model(query, support, return_aux=True)
+
+    assert not base_model.uses_ecot_nncs_marginal
+    assert not flagged_model.uses_ecot_nncs_marginal
+    assert "nncs_support_marginal" not in base_outputs
+    assert "nncs_support_marginal" not in flagged_outputs
+    assert torch.allclose(flagged_outputs["logits"], base_outputs["logits"], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        flagged_outputs["transport_plan"],
+        base_outputs["transport_plan"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
 
 
 def test_hrot_fsl_variant_j_ecot_does_not_use_learned_mass_paths():
@@ -2134,7 +2234,7 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     assert model.ground_cost == "cosine"
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",
@@ -2184,6 +2284,9 @@ def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     assert outputs["logits"].shape == (2, 3)
     assert outputs["support_hyperbolic_tokens"].shape[-1] == 24
     assert torch.isfinite(outputs["logits"]).all()
+    if factory_variant == "J_ECOT_NNCS":
+        assert outputs["nncs_support_marginal"].shape[:3] == (1, 3, 2)
+        assert torch.isfinite(outputs["nncs_support_marginal"]).all()
     if factory_variant == "Q":
         assert outputs["shot_pool_weights"].shape == (2, 3, 2)
     if factory_variant == "R":

@@ -885,6 +885,7 @@ def get_args():
             "JE",
             "J_ECOT",
             "J_ECOT_M2",
+            "J_ECOT_NNCS",
             "CP_ECOT",
             "J_NCET",
             "NCET",
@@ -986,6 +987,22 @@ def get_args():
     parser.add_argument("--hrot_ecot_policy_entropy_reg", type=float, default=1e-3)
     parser.add_argument("--hrot_ecot_consensus_tau_mode", type=str, default="fixed", choices=["fixed", "sqrt"])
     parser.add_argument("--hrot_ecot_consensus_tau", type=float, default=1.0)
+    parser.add_argument(
+        "--hrot_ecot_enable_nncs_marginal",
+        type=str,
+        default=None,
+        choices=["true", "false"],
+    )
+    parser.add_argument("--hrot_ecot_nncs_beta", type=float, default=5.0)
+    parser.add_argument("--hrot_ecot_nncs_eta", type=float, default=0.05)
+    parser.add_argument("--hrot_ecot_nncs_detach", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--hrot_ecot_nncs_distance",
+        type=str,
+        default="auto",
+        choices=["auto", "euclidean", "cosine"],
+    )
+    parser.add_argument("--hrot_ecot_nncs_min_sigma", type=float, default=1e-6)
     parser.add_argument("--hrot_ncet_mix_init", type=float, default=0.25)
     parser.add_argument("--hrot_ncet_real_penalty_init", type=float, default=0.25)
     parser.add_argument("--hrot_ncet_null_penalty_init", type=float, default=0.05)
@@ -2055,7 +2072,7 @@ def get_model(args):
             normalized_hrot_variant = str(hrot_variant).strip().upper().replace("-", "").replace("_", "")
             if normalized_hrot_variant == "CPECOT":
                 hrot_ecot_rho_bank = "0.50,0.80,0.95"
-            elif normalized_hrot_variant in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT"}:
+            elif normalized_hrot_variant in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTNNCS", "ECOTNNCS"}:
                 hrot_ecot_rho_bank = "0.80"
             else:
                 hrot_ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
@@ -2093,6 +2110,12 @@ def get_model(args):
             f"ecot_tau_shot={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
             f"ecot_consensus_tau_mode={getattr(args, 'hrot_ecot_consensus_tau_mode', 'fixed')}, "
             f"ecot_consensus_tau={getattr(args, 'hrot_ecot_consensus_tau', 1.0)}, "
+            f"ecot_nncs_enable={getattr(args, 'hrot_ecot_enable_nncs_marginal', None)}, "
+            f"ecot_nncs_beta={getattr(args, 'hrot_ecot_nncs_beta', 5.0)}, "
+            f"ecot_nncs_eta={getattr(args, 'hrot_ecot_nncs_eta', 0.05)}, "
+            f"ecot_nncs_detach={getattr(args, 'hrot_ecot_nncs_detach', 'true')}, "
+            f"ecot_nncs_distance={getattr(args, 'hrot_ecot_nncs_distance', 'auto')}, "
+            f"ecot_nncs_min_sigma={getattr(args, 'hrot_ecot_nncs_min_sigma', 1e-6)}, "
             f"ncet_mix_init={getattr(args, 'hrot_ncet_mix_init', 0.25)}, "
             f"ncet_real_penalty_init={getattr(args, 'hrot_ncet_real_penalty_init', 0.25)}, "
             f"ncet_null_penalty_init={getattr(args, 'hrot_ncet_null_penalty_init', 0.05)}, "
@@ -2336,6 +2359,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             normalized = "J_NCET"
         if normalized in {"JEGTW", "JE"}:
             normalized = "JE"
+        if normalized in {"JECOTNNCS", "ECOTNNCS", "NNCSJECOT"}:
+            normalized = "J_ECOT_NNCS"
         if normalized in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTSINGLE", "JECOTSINGLEBUDGET"}:
             normalized = "J_ECOT_M2"
         if normalized in {"JECOT", "ECOT"}:
@@ -2358,6 +2383,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "JE",
             "J_ECOT",
             "J_ECOT_M2",
+            "J_ECOT_NNCS",
             "CP_ECOT",
             "J_NCET",
             "K",
@@ -2459,6 +2485,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_policy_entropy_reg",
             "hrot_ecot_consensus_tau_mode",
             "hrot_ecot_consensus_tau",
+            "hrot_ecot_enable_nncs_marginal",
+            "hrot_ecot_nncs_beta",
+            "hrot_ecot_nncs_eta",
+            "hrot_ecot_nncs_detach",
+            "hrot_ecot_nncs_distance",
+            "hrot_ecot_nncs_min_sigma",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]

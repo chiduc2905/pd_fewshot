@@ -69,6 +69,8 @@ def _normalize_hrot_variant_name(variant: str) -> str:
         return "T"
     if normalized in {"JEGTW", "JE"}:
         return "JE"
+    if normalized in {"JECOTNNCS", "ECOTNNCS", "NNCSJECOT"}:
+        return "J_ECOT_NNCS"
     if normalized in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTSINGLE", "JECOTSINGLEBUDGET"}:
         return "J_ECOT_M2"
     if normalized in {"JECOT", "ECOT"}:
@@ -129,6 +131,87 @@ def _normalize_hrot_ground_cost(ground_cost: str) -> str:
     if normalized not in HROT_GROUND_COSTS:
         raise ValueError(f"Unsupported HROT ground cost: {ground_cost}")
     return normalized
+
+
+def _compute_cross_shot_support_marginals(
+    support_tokens: torch.Tensor,
+    rho: float,
+    beta: float,
+    eta: float,
+    detach: bool = True,
+    distance: str = "auto",
+    eps: float = 1e-8,
+    min_sigma: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Estimate deterministic cross-shot support token masses from same-class repeats.
+
+    Args:
+        support_tokens: Support tokens with shape ``[B, Way, Shot, L, D]``.
+        rho: Fixed UOT mass budget.
+        beta: Positive sharpness for ``exp(-beta * consistency)``.
+        eta: Uniform floor mixed into each per-shot token distribution.
+        detach: If true, nearest-neighbor consistency is computed from detached tokens.
+        distance: ``"cosine"`` for cosine distance, otherwise squared Euclidean.
+        eps: Numerical epsilon for normalization.
+        min_sigma: Optional lower clamp for sigma before normalization.
+
+    Returns:
+        ``(b, consistency, sigma_norm)`` with shape ``[B, Way, Shot, L]``.
+    """
+    if support_tokens.dim() != 5:
+        raise ValueError(
+            "support_tokens must have shape [B, Way, Shot, L, D], "
+            f"got {tuple(support_tokens.shape)}"
+        )
+    if not 0.0 < float(rho) <= 1.0:
+        raise ValueError("rho must be in (0, 1]")
+    if float(beta) <= 0.0:
+        raise ValueError("beta must be positive")
+    if not 0.0 <= float(eta) <= 1.0:
+        raise ValueError("eta must be in [0, 1]")
+    if float(eps) <= 0.0:
+        raise ValueError("eps must be positive")
+    if float(min_sigma) < 0.0:
+        raise ValueError("min_sigma must be non-negative")
+
+    batch_size, way_num, shot_num, token_num, _ = support_tokens.shape
+    if token_num <= 0:
+        raise ValueError("support_tokens must contain at least one token")
+
+    uniform = support_tokens.new_full(
+        (batch_size, way_num, shot_num, token_num),
+        1.0 / float(token_num),
+    )
+    if shot_num == 1:
+        consistency = torch.zeros_like(uniform)
+        b = uniform * float(rho)
+        return b, consistency, uniform
+
+    tokens = support_tokens.detach() if detach else support_tokens
+    distance_name = _normalize_hrot_ground_cost(distance)
+    if distance_name == "cosine":
+        tokens_for_distance = F.normalize(tokens, p=2, dim=-1, eps=float(eps))
+        left = tokens_for_distance[:, :, :, None, :, None, :]
+        right = tokens_for_distance[:, :, None, :, None, :, :]
+        pair_distance = (1.0 - (left * right).sum(dim=-1)).clamp_min(0.0)
+    else:
+        left = tokens[:, :, :, None, :, None, :]
+        right = tokens[:, :, None, :, None, :, :]
+        pair_distance = (left - right).pow(2).sum(dim=-1).clamp_min(0.0)
+
+    nearest = pair_distance.amin(dim=-1)
+    shot_mask = ~torch.eye(shot_num, device=support_tokens.device, dtype=torch.bool)
+    nearest = nearest.masked_fill(~shot_mask.view(1, 1, shot_num, shot_num, 1), 0.0)
+    consistency = nearest.sum(dim=3) / float(shot_num - 1)
+
+    sigma = torch.exp(-float(beta) * consistency)
+    if min_sigma > 0.0:
+        sigma = sigma.clamp_min(float(min_sigma))
+    sigma_norm = sigma / sigma.sum(dim=-1, keepdim=True).clamp_min(float(eps))
+    mixed = (1.0 - float(eta)) * sigma_norm + float(eta) * uniform
+    b = mixed * float(rho)
+    return b, consistency.to(dtype=support_tokens.dtype), sigma_norm.to(dtype=support_tokens.dtype)
 
 
 class EpisodeBudgetController(nn.Module):
@@ -217,7 +300,7 @@ class EpisodeBudgetController(nn.Module):
 
 
 class HROTFSL(BaseConv64FewShotModel):
-    """Vectorized HROT few-shot model with ablation variants, J_ECOT, CP_ECOT, and J_NCET."""
+    """Vectorized HROT few-shot model with ablation variants, ECOT routes, and J_NCET."""
 
     def __init__(
         self,
@@ -281,6 +364,12 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
         ecot_consensus_tau: float = 1.0,
+        ecot_enable_nncs_marginal: bool | None = None,
+        ecot_nncs_beta: float = 5.0,
+        ecot_nncs_eta: float = 0.05,
+        ecot_nncs_detach: bool = True,
+        ecot_nncs_distance: str = "auto",
+        ecot_nncs_min_sigma: float = 1e-6,
         ncet_mix_init: float = 0.25,
         ncet_real_penalty_init: float = 0.25,
         ncet_null_penalty_init: float = 0.05,
@@ -315,7 +404,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -375,11 +464,11 @@ class HROTFSL(BaseConv64FewShotModel):
         if ecot_rho_bank is None:
             if variant == "CP_ECOT":
                 ecot_rho_bank = "0.50,0.80,0.95"
-            elif variant == "J_ECOT_M2":
+            elif variant in {"J_ECOT_M2", "J_ECOT_NNCS"}:
                 ecot_rho_bank = "0.80"
             else:
                 ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
-        ecot_base_rho = 0.80 if variant in {"CP_ECOT", "J_ECOT_M2"} and ecot_base_rho is None else (
+        ecot_base_rho = 0.80 if variant in {"CP_ECOT", "J_ECOT_M2", "J_ECOT_NNCS"} and ecot_base_rho is None else (
             fixed_mass if ecot_base_rho is None else float(ecot_base_rho)
         )
         ecot_rho_bank_values, ecot_base_idx = _parse_ecot_rho_bank(ecot_rho_bank, ecot_base_rho)
@@ -400,6 +489,22 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_policy_entropy_reg must be non-negative")
         if ecot_consensus_tau <= 0.0:
             raise ValueError("ecot_consensus_tau must be positive")
+        if ecot_nncs_beta <= 0.0:
+            raise ValueError("ecot_nncs_beta must be positive")
+        if not 0.0 <= ecot_nncs_eta <= 1.0:
+            raise ValueError("ecot_nncs_eta must be in [0, 1]")
+        ecot_nncs_distance = _normalize_hrot_ground_cost(ecot_nncs_distance)
+        if ecot_nncs_min_sigma <= 0.0:
+            raise ValueError("ecot_nncs_min_sigma must be positive")
+        nncs_enabled_by_default = variant == "J_ECOT_NNCS"
+        ecot_enable_nncs_marginal = (
+            nncs_enabled_by_default
+            if ecot_enable_nncs_marginal is None
+            else bool(ecot_enable_nncs_marginal)
+        )
+        uses_nncs_marginal = variant == "J_ECOT_NNCS" and bool(ecot_enable_nncs_marginal)
+        if uses_nncs_marginal and bool(pre_transport_shot_pool):
+            raise ValueError("J_ECOT_NNCS requires hrot_pre_transport_shot_pool=false")
         if not 0.0 <= ncet_mix_init <= 1.0:
             raise ValueError("ncet_mix_init must be in [0, 1]")
         if ncet_real_penalty_init < 0.0:
@@ -424,22 +529,23 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_hrot_v = variant == "V"
         self.uses_egtw_mass = variant == "JE"
         self.uses_cp_ecot = variant == "CP_ECOT"
-        self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "CP_ECOT"}
+        self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT"}
+        self.uses_ecot_nncs_marginal = uses_nncs_marginal
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
         self.uses_episode_controller = self.uses_ecot
         self.uses_budget_bank = self.uses_ecot
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
@@ -517,6 +623,12 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
         self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
         self.ecot_consensus_tau = float(ecot_consensus_tau)
+        self.ecot_enable_nncs_marginal = bool(ecot_enable_nncs_marginal)
+        self.ecot_nncs_beta = float(ecot_nncs_beta)
+        self.ecot_nncs_eta = float(ecot_nncs_eta)
+        self.ecot_nncs_detach = bool(ecot_nncs_detach)
+        self.ecot_nncs_distance = ecot_nncs_distance
+        self.ecot_nncs_min_sigma = float(ecot_nncs_min_sigma)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"
         self.ecot_paper_name = "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning"
         self.ncet_mix_init = float(ncet_mix_init)
@@ -1926,12 +2038,51 @@ class HROTFSL(BaseConv64FewShotModel):
         class_budget_mass = (weights * shot_mass_bank).sum(dim=-2)
         return class_budget_scores, class_budget_cost, class_budget_mass, weights, tau_k
 
+    def _compute_nncs_support_payload(
+        self,
+        support_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if support_tokens.dim() != 4:
+            raise ValueError(
+                "NNCS support marginals expect support tokens shaped "
+                f"(Way, Shot, Tokens, Dim), got {tuple(support_tokens.shape)}"
+            )
+        distance = self.ground_cost if self.ecot_nncs_distance == "auto" else self.ecot_nncs_distance
+        b, consistency, sigma_norm = _compute_cross_shot_support_marginals(
+            support_tokens.unsqueeze(0),
+            rho=self.ecot_base_rho,
+            beta=self.ecot_nncs_beta,
+            eta=self.ecot_nncs_eta,
+            detach=self.ecot_nncs_detach,
+            distance=distance,
+            eps=self.eps,
+            min_sigma=self.ecot_nncs_min_sigma,
+        )
+        support_weight = (b / float(self.ecot_base_rho)).squeeze(0)
+        prob = b / b.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        entropy = -(prob * prob.clamp_min(self.eps).log()).sum(dim=-1)
+        entropy = entropy / math.log(float(max(2, b.shape[-1])))
+        payload = {
+            "nncs_support_marginal": b,
+            "nncs_consistency": consistency,
+            "nncs_sigma": sigma_norm,
+            "nncs_beta": support_tokens.new_tensor(self.ecot_nncs_beta),
+            "nncs_eta": support_tokens.new_tensor(self.ecot_nncs_eta),
+            "mean_nncs_entropy": entropy.mean(),
+            "mean_nncs_max_mass": b.max(dim=-1).values.mean(),
+            "mean_nncs_min_mass": b.min(dim=-1).values.mean(),
+            "mean_nncs_consistency": consistency.mean(),
+            "std_nncs_consistency": consistency.std(unbiased=False),
+        }
+        return support_weight.to(dtype=support_tokens.dtype), payload
+
     def _forward_ecot_budget_bank(
         self,
         flat_cost: torch.Tensor,
         *,
         way_num: int,
         shot_num: int,
+        support_weight: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
             raise RuntimeError("ECOT variants require an episode_controller")
@@ -1951,7 +2102,32 @@ class HROTFSL(BaseConv64FewShotModel):
         rho_bank_flat = rho_bank.view(1, 1, budget_count).expand(num_query, num_pairs, budget_count)
         rho_bank_flat = rho_bank_flat.reshape(num_query, num_pairs * budget_count)
 
-        plan_bank, cost_out, mass_out = self._transport_match(cost_bank, rho_bank_flat)
+        transport_kwargs: dict[str, torch.Tensor] = {}
+        if support_weight is not None:
+            if tuple(support_weight.shape) != (way_num, shot_num, support_len):
+                raise ValueError(
+                    "support_weight must have shape (Way, Shot, SupportTokens), "
+                    f"got {tuple(support_weight.shape)}"
+                )
+            support_weight = support_weight.to(device=flat_cost.device, dtype=flat_cost.dtype)
+            support_weight = support_weight / support_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            support_weight = support_weight.reshape(1, num_pairs, 1, support_len)
+            b_bank = support_weight * rho_bank.view(1, 1, budget_count, 1)
+            b_bank = b_bank.expand(num_query, -1, -1, -1)
+            transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
+
+            a_bank = flat_cost.new_full(
+                (num_query, num_pairs, budget_count, query_len),
+                1.0 / float(query_len),
+            )
+            a_bank = a_bank * rho_bank.view(1, 1, budget_count, 1)
+            transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+
+        plan_bank, cost_out, mass_out = self._transport_match(
+            cost_bank,
+            rho_bank_flat,
+            **transport_kwargs,
+        )
         plan_bank = plan_bank.reshape(num_query, way_num, shot_num, budget_count, query_len, support_len)
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
@@ -2956,11 +3132,18 @@ class HROTFSL(BaseConv64FewShotModel):
             else:
                 flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
                 if self.uses_ecot:
+                    nncs_support_weight = None
+                    nncs_payload = None
+                    if self.uses_ecot_nncs_marginal:
+                        nncs_support_weight, nncs_payload = self._compute_nncs_support_payload(support_euclidean)
                     ecot_payload = self._forward_ecot_budget_bank(
                         flat_cost,
                         way_num=way_num,
                         shot_num=matching_shot_num,
+                        support_weight=nncs_support_weight,
                     )
+                    if nncs_payload is not None:
+                        ecot_payload.update(nncs_payload)
                     logits = ecot_payload["logits"]
                     transport_cost = ecot_payload["transport_cost"]
                     transport_mass = ecot_payload["transported_mass"]
@@ -3406,6 +3589,24 @@ class HROTFSL(BaseConv64FewShotModel):
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
         if "ecot_base_idx" in batch_outputs[0]:
             stacked["ecot_base_idx"] = batch_outputs[0]["ecot_base_idx"]
+        for key in (
+            "nncs_support_marginal",
+            "nncs_consistency",
+            "nncs_sigma",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
+        for key in (
+            "nncs_beta",
+            "nncs_eta",
+            "mean_nncs_entropy",
+            "mean_nncs_max_mass",
+            "mean_nncs_min_mass",
+            "mean_nncs_consistency",
+            "std_nncs_consistency",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
         if "transport_probe_cost" in batch_outputs[0]:
             stacked["transport_probe_cost"] = torch.cat(
                 [item["transport_probe_cost"] for item in batch_outputs],

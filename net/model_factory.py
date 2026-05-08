@@ -360,7 +360,7 @@ MODEL_REGISTRY = {
     "hrot_fsl": {
         "display_name": "HROT-FSL / Episode-Conditioned Optimal Transport J-FSL",
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
-        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2, CP_ECOT, and J_NCET fixed-budget support",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2, J_ECOT_NNCS, CP_ECOT, and J_NCET fixed-budget support",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "ec_mrot": {
@@ -2277,6 +2277,16 @@ def build_model_from_args(args):
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),
             ecot_consensus_tau=float(getattr(args, "hrot_ecot_consensus_tau", 1.0)),
+            ecot_enable_nncs_marginal=(
+                None
+                if getattr(args, "hrot_ecot_enable_nncs_marginal", None) is None
+                else _bool_flag(getattr(args, "hrot_ecot_enable_nncs_marginal"), default=False)
+            ),
+            ecot_nncs_beta=float(getattr(args, "hrot_ecot_nncs_beta", 5.0)),
+            ecot_nncs_eta=float(getattr(args, "hrot_ecot_nncs_eta", 0.05)),
+            ecot_nncs_detach=_bool_flag(getattr(args, "hrot_ecot_nncs_detach", "true"), default=True),
+            ecot_nncs_distance=str(getattr(args, "hrot_ecot_nncs_distance", "auto")),
+            ecot_nncs_min_sigma=float(getattr(args, "hrot_ecot_nncs_min_sigma", 1e-6)),
             ncet_mix_init=float(getattr(args, "hrot_ncet_mix_init", 0.25)),
             ncet_real_penalty_init=float(getattr(args, "hrot_ncet_real_penalty_init", 0.25)),
             ncet_null_penalty_init=float(getattr(args, "hrot_ncet_null_penalty_init", 0.05)),
