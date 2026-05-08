@@ -13,6 +13,7 @@ from net.ec_mrot import ECMROT
 from net.hrot_fsl import HROTFSL, _compute_cross_shot_support_marginals, compute_fisher_weights, compute_mdr_loss
 from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbolic_distance_matrix, safe_project_to_ball
 from net.model_factory import build_model_from_args
+from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass
 from net.modules.partial_ot import partial_transport_plan_residuals
 from net.modules.unbalanced_ot import (
@@ -892,6 +893,193 @@ def test_hrot_fsl_variant_j_ecot_m2_defaults_to_single_base_budget():
     assert tuple(model.ecot_rho_bank) == (0.80,)
     assert model.ecot_base_rho == 0.80
     assert model.ecot_base_idx == 0
+
+
+def test_crs_marginal_shapes_positive_budget_and_diagnostics():
+    torch.manual_seed(70)
+    module = CrossReferencedSelectiveMarginal(
+        embed_dim=8,
+        use_cross_ref=True,
+        use_ssm=False,
+        eta_init=0.30,
+        lambda_cr_init=0.50,
+        tau_ssm_init=0.70,
+    )
+    support_tokens = torch.randn(2, 4, 2, 5, 8)
+    query_tokens = torch.randn(2, 3, 7, 8)
+
+    b, aux = module(support_tokens, query_tokens, rho=0.8, spatial_hw=None)
+
+    assert b.shape == (2, 3, 4, 2, 5)
+    assert aux["crs_pi"].shape == b.shape
+    assert aux["crs_support_marginal"].shape == b.shape
+    assert torch.all(b > 0.0)
+    assert torch.allclose(b.sum(dim=-1), torch.full_like(b.sum(dim=-1), 0.8), atol=1e-5, rtol=1e-5)
+    for key in (
+        "crs_p_cross_ref",
+        "crs_p_ssm",
+        "crs_eta",
+        "crs_lambda_cr",
+        "crs_tau_ssm",
+        "crs_entropy",
+        "crs_peak_ratio",
+        "crs_uniform_kl",
+    ):
+        assert key in aux
+        assert torch.isfinite(aux[key]).all()
+
+
+def test_crs_marginal_eta_zero_returns_uniform_exactly():
+    torch.manual_seed(71)
+    module = CrossReferencedSelectiveMarginal(
+        embed_dim=6,
+        use_cross_ref=True,
+        use_ssm=True,
+        eta_init=0.30,
+        ssm_type="simple",
+    )
+    module.raw_eta.data.fill_(-float("inf"))
+    support_tokens = torch.randn(1, 2, 1, 4, 6)
+    query_tokens = torch.randn(1, 3, 4, 6)
+
+    b, aux = module(support_tokens, query_tokens, rho=0.8, spatial_hw=(2, 2))
+
+    expected = torch.full_like(b, 0.8 / 4.0)
+    assert torch.allclose(b, expected, atol=0.0, rtol=0.0)
+    assert torch.allclose(aux["crs_pi"], torch.full_like(aux["crs_pi"], 0.25), atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("use_cross_ref", "use_ssm"),
+    [
+        (True, False),
+        (False, True),
+    ],
+)
+def test_crs_marginal_single_branch_modes_run(use_cross_ref: bool, use_ssm: bool):
+    torch.manual_seed(72 + int(use_ssm))
+    module = CrossReferencedSelectiveMarginal(
+        embed_dim=10,
+        use_cross_ref=use_cross_ref,
+        use_ssm=use_ssm,
+        ssm_type="simple",
+    )
+    support_tokens = torch.randn(1, 3, 2, 9, 10)
+    query_tokens = torch.randn(1, 2, 9, 10)
+
+    b, aux = module(support_tokens, query_tokens, rho=torch.full((1, 2, 3, 2), 0.8), spatial_hw=(3, 3))
+
+    assert b.shape == (1, 2, 3, 2, 9)
+    assert torch.all(b > 0.0)
+    assert torch.allclose(b.sum(dim=-1), torch.full_like(b.sum(dim=-1), 0.8), atol=1e-5, rtol=1e-5)
+    assert torch.isfinite(aux["crs_p_cross_ref"]).all()
+    assert torch.isfinite(aux["crs_p_ssm"]).all()
+
+
+def test_crs_marginal_side_both_shapes_query_marginal():
+    torch.manual_seed(73)
+    module = CrossReferencedSelectiveMarginal(
+        embed_dim=8,
+        use_cross_ref=True,
+        use_ssm=False,
+        side="both",
+    )
+    support_tokens = torch.randn(1, 2, 2, 5, 8)
+    query_tokens = torch.randn(1, 3, 4, 8)
+
+    _b, aux = module(support_tokens, query_tokens, rho=0.8)
+
+    assert aux["crs_query_marginal"].shape == (1, 3, 2, 2, 4)
+    assert torch.all(aux["crs_query_marginal"] > 0.0)
+    assert torch.allclose(
+        aux["crs_query_marginal"].sum(dim=-1),
+        torch.full_like(aux["crs_query_marginal"].sum(dim=-1), 0.8),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+def test_hrot_fsl_crs_disabled_matches_original_m2():
+    torch.manual_seed(74)
+    m2_model = _build_model(
+        variant="J_ECOT_M2",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        sinkhorn_iterations=8,
+    )
+    disabled_model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        ecot_enable_crs_marginal=False,
+        sinkhorn_iterations=8,
+    )
+    disabled_model.load_state_dict(m2_model.state_dict(), strict=True)
+    m2_model.eval()
+    disabled_model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        m2_outputs = m2_model(query, support, return_aux=True)
+        disabled_outputs = disabled_model(query, support, return_aux=True)
+
+    assert "crs_support_marginal" not in disabled_outputs
+    assert torch.allclose(disabled_outputs["logits"], m2_outputs["logits"], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        disabled_outputs["transport_plan"],
+        m2_outputs["transport_plan"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("shot_num", [1, 5])
+def test_hrot_fsl_crs_m2_runs_k1_k5_and_returns_aux(shot_num: int):
+    torch.manual_seed(75 + shot_num)
+    model = _build_model(
+        variant="J_ECOT",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        ecot_enable_crs_marginal=True,
+        ecot_crs_use_cross_ref=True,
+        ecot_crs_use_ssm=True,
+        ecot_crs_ssm_type="simple",
+        sinkhorn_iterations=6,
+    )
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, shot_num, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    support_len = outputs["support_euclidean_tokens"].shape[-2]
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["shot_logits"].shape == (2, 3, shot_num)
+    assert outputs["crs_support_marginal"].shape == (1, 2, 3, shot_num, support_len)
+    assert torch.all(outputs["crs_support_marginal"] > 0.0)
+    assert torch.allclose(
+        outputs["crs_support_marginal"].sum(dim=-1),
+        torch.full_like(outputs["crs_support_marginal"].sum(dim=-1), model.ecot_base_rho),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    for key in (
+        "crs_pi",
+        "crs_p_cross_ref",
+        "crs_p_ssm",
+        "crs_entropy",
+        "crs_peak_ratio",
+        "crs_uniform_kl",
+        "crs_eta",
+        "crs_lambda_cr",
+        "crs_tau_ssm",
+    ):
+        assert key in outputs
+        assert torch.isfinite(outputs[key]).all()
 
 
 def test_compute_fisher_weights_shape_clamp_and_degenerate_way():

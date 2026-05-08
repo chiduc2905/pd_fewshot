@@ -360,7 +360,7 @@ MODEL_REGISTRY = {
     "hrot_fsl": {
         "display_name": "HROT-FSL / Episode-Conditioned Optimal Transport J-FSL",
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
-        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2, J_ECOT_CARE, J_ECOT_NNCS, CP_ECOT, and J_NCET fixed-budget support",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2/CRS-M2, J_ECOT_CARE, J_ECOT_NNCS, CP_ECOT, and J_NCET fixed-budget support",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "ec_mrot": {
@@ -2287,6 +2287,21 @@ def build_model_from_args(args):
             ecot_nncs_detach=_bool_flag(getattr(args, "hrot_ecot_nncs_detach", "true"), default=True),
             ecot_nncs_distance=str(getattr(args, "hrot_ecot_nncs_distance", "auto")),
             ecot_nncs_min_sigma=float(getattr(args, "hrot_ecot_nncs_min_sigma", 1e-6)),
+            ecot_enable_crs_marginal=_bool_flag(
+                getattr(args, "hrot_ecot_enable_crs_marginal", "false"),
+                default=False,
+            ),
+            ecot_crs_use_cross_ref=_bool_flag(
+                getattr(args, "hrot_ecot_crs_use_cross_ref", "true"),
+                default=True,
+            ),
+            ecot_crs_use_ssm=_bool_flag(getattr(args, "hrot_ecot_crs_use_ssm", "true"), default=True),
+            ecot_crs_eta_init=float(getattr(args, "hrot_ecot_crs_eta_init", 0.30)),
+            ecot_crs_lambda_cr_init=float(getattr(args, "hrot_ecot_crs_lambda_cr_init", 0.50)),
+            ecot_crs_tau_ssm_init=float(getattr(args, "hrot_ecot_crs_tau_ssm_init", 0.70)),
+            ecot_crs_entropy_reg=float(getattr(args, "hrot_ecot_crs_entropy_reg", 0.0)),
+            ecot_crs_side=str(getattr(args, "hrot_ecot_crs_side", "support")),
+            ecot_crs_ssm_type=str(getattr(args, "hrot_ecot_crs_ssm_type", "auto")),
             ncet_mix_init=float(getattr(args, "hrot_ncet_mix_init", 0.25)),
             ncet_real_penalty_init=float(getattr(args, "hrot_ncet_real_penalty_init", 0.25)),
             ncet_null_penalty_init=float(getattr(args, "hrot_ncet_null_penalty_init", 0.05)),

@@ -1,5 +1,6 @@
 """Helper modules for pulse_fewshot consensus-slot models."""
 
+from .crs_marginal import CrossReferencedSelectiveMarginal, SimpleBidirectionalScan
 from .hierarchical_consensus_slot_mamba import AttentiveTokenPool, IntraImageConsensusMambaEncoder
 from .hierarchical_reliability_consensus import (
     DualConsensusReliabilityHead,
@@ -10,7 +11,9 @@ from .hierarchical_set_v2 import ConsensusClassAggregator, SetConditionedShotRef
 
 __all__ = [
     "AttentiveTokenPool",
+    "CrossReferencedSelectiveMarginal",
     "IntraImageConsensusMambaEncoder",
+    "SimpleBidirectionalScan",
     "DualConsensusReliabilityHead",
     "ReliabilityCoupledTokenSWHead",
     "ShotConditionedTokenAdapter",

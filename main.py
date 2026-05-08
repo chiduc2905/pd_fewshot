@@ -1007,6 +1007,40 @@ def get_args():
         choices=["auto", "euclidean", "cosine"],
     )
     parser.add_argument("--hrot_ecot_nncs_min_sigma", type=float, default=1e-6)
+    parser.add_argument(
+        "--hrot_ecot_enable_crs_marginal",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument(
+        "--hrot_ecot_crs_use_cross_ref",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
+    parser.add_argument(
+        "--hrot_ecot_crs_use_ssm",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--hrot_ecot_crs_eta_init", type=float, default=0.30)
+    parser.add_argument("--hrot_ecot_crs_lambda_cr_init", type=float, default=0.50)
+    parser.add_argument("--hrot_ecot_crs_tau_ssm_init", type=float, default=0.70)
+    parser.add_argument("--hrot_ecot_crs_entropy_reg", type=float, default=0.0)
+    parser.add_argument(
+        "--hrot_ecot_crs_side",
+        type=str,
+        default="support",
+        choices=["support", "both"],
+    )
+    parser.add_argument(
+        "--hrot_ecot_crs_ssm_type",
+        type=str,
+        default="auto",
+        choices=["auto", "simple", "mamba"],
+    )
     parser.add_argument("--care_enable_fwec", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--care_enable_qesm", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--care_enable_mdr", type=str, default="true", choices=["true", "false"])
@@ -2138,6 +2172,10 @@ def get_model(args):
             f"ecot_nncs_detach={getattr(args, 'hrot_ecot_nncs_detach', 'true')}, "
             f"ecot_nncs_distance={getattr(args, 'hrot_ecot_nncs_distance', 'auto')}, "
             f"ecot_nncs_min_sigma={getattr(args, 'hrot_ecot_nncs_min_sigma', 1e-6)}, "
+            f"ecot_crs_enable={getattr(args, 'hrot_ecot_enable_crs_marginal', 'false')}, "
+            f"ecot_crs_cross_ref={getattr(args, 'hrot_ecot_crs_use_cross_ref', 'true')}, "
+            f"ecot_crs_ssm={getattr(args, 'hrot_ecot_crs_use_ssm', 'true')}, "
+            f"ecot_crs_side={getattr(args, 'hrot_ecot_crs_side', 'support')}, "
             f"care_fwec={getattr(args, 'care_enable_fwec', 'true')}, "
             f"care_qesm={getattr(args, 'care_enable_qesm', 'true')}, "
             f"care_mdr={getattr(args, 'care_enable_mdr', 'true')}, "
@@ -2520,6 +2558,15 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_nncs_detach",
             "hrot_ecot_nncs_distance",
             "hrot_ecot_nncs_min_sigma",
+            "hrot_ecot_enable_crs_marginal",
+            "hrot_ecot_crs_use_cross_ref",
+            "hrot_ecot_crs_use_ssm",
+            "hrot_ecot_crs_eta_init",
+            "hrot_ecot_crs_lambda_cr_init",
+            "hrot_ecot_crs_tau_ssm_init",
+            "hrot_ecot_crs_entropy_reg",
+            "hrot_ecot_crs_side",
+            "hrot_ecot_crs_ssm_type",
             "care_enable_fwec",
             "care_enable_qesm",
             "care_enable_mdr",
@@ -2532,6 +2579,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
+        if (
+            "hrot_ecot_enable_crs_marginal" not in overrides
+            and any(key.startswith("crs_marginal.") for key in state_dict)
+        ):
+            overrides["hrot_ecot_enable_crs_marginal"] = "true"
         for ncet_key in (
             "hrot_ncet_mix_init",
             "hrot_ncet_real_penalty_init",

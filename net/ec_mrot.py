@@ -354,7 +354,15 @@ class ECMROT(HROTFSL):
         *,
         way_num: int,
         shot_num: int,
+        support_weight: torch.Tensor | None = None,
+        query_weight: torch.Tensor | None = None,
+        support_tokens: torch.Tensor | None = None,
+        query_tokens: torch.Tensor | None = None,
+        spatial_hw: tuple[int, int] | None = None,
     ) -> dict[str, torch.Tensor]:
+        del support_tokens, query_tokens, spatial_hw
+        if support_weight is not None or query_weight is not None:
+            raise ValueError("EC-MROT response modes do not accept external token marginal weights")
         if self.episode_controller is None:
             raise RuntimeError("EC-MROT requires an episode_controller")
         if flat_cost.dim() != 4:
@@ -401,6 +409,8 @@ class ECMROT(HROTFSL):
         # Each grid node is a deterministic fixed-budget expert.
         budget_scores = self.score_scale * (threshold * shot_mass_bank - shot_cost_bank)
         homotopy_lambda = self.ecot_lambda.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        base_idx = self._ecot_base_idx_value()
+        base_rho = self._ecot_base_rho_tensor(flat_cost)
         policy_entropy = -(
             budget_weights.clamp_min(self.eps) * budget_weights.clamp_min(self.eps).log()
         ).sum()
@@ -410,7 +420,7 @@ class ECMROT(HROTFSL):
         support_risk_temperature = None
 
         if self.ec_mrot_response_mode == "discrete_quadrature":
-            base_budget_score = budget_scores[..., self.ecot_base_idx]
+            base_budget_score = budget_scores[..., base_idx]
             budget_view = budget_weights.view(1, 1, 1, budget_count)
             mass_response_score = (budget_view * budget_scores).sum(dim=-1)
             shot_cost_diag = (budget_view * shot_cost_bank).sum(dim=-1)
@@ -431,7 +441,7 @@ class ECMROT(HROTFSL):
             )
             identity_loss = (shot_logits - base_budget_score).pow(2).mean()
             plan_diag = (budget_view.unsqueeze(-1).unsqueeze(-1) * plan_bank).sum(dim=3)
-            shot_rho = flat_cost.new_full((num_query, way_num, shot_num), self.ecot_base_rho)
+            shot_rho = base_rho.expand(num_query, way_num, shot_num).clone()
             response_strength = homotopy_lambda
         elif self.ec_mrot_response_mode == "anchor_free_functional":
             (
@@ -446,8 +456,8 @@ class ECMROT(HROTFSL):
                 shot_mass_bank,
                 controller_outputs.get("raw_tau_shot"),
             )
-            base_budget_score = budget_scores[..., self.ecot_base_idx]
-            base_class_score = class_budget_scores[..., self.ecot_base_idx]
+            base_budget_score = budget_scores[..., base_idx]
+            base_class_score = class_budget_scores[..., base_idx]
 
             reference_budget_weights = torch.full_like(budget_weights, 1.0 / float(budget_count))
             reference_budget_view = reference_budget_weights.view(1, 1, 1, budget_count)
@@ -528,8 +538,8 @@ class ECMROT(HROTFSL):
                 shot_mass_bank,
                 controller_outputs.get("raw_tau_shot"),
             )
-            base_budget_score = budget_scores[..., self.ecot_base_idx]
-            base_class_score = class_budget_scores[..., self.ecot_base_idx]
+            base_budget_score = budget_scores[..., base_idx]
+            base_class_score = class_budget_scores[..., base_idx]
 
             response_delta = class_budget_scores - base_class_score.unsqueeze(-1)
             centered_response_delta = response_delta - response_delta.mean(dim=1, keepdim=True)
@@ -646,7 +656,7 @@ class ECMROT(HROTFSL):
             "ecot_pi_budget": budget_weights,
             "ecot_budget_logits": budget_logits,
             "ecot_lambda": homotopy_lambda,
-            "ecot_base_idx": flat_cost.new_tensor(self.ecot_base_idx, dtype=torch.long),
+            "ecot_base_idx": flat_cost.new_tensor(base_idx, dtype=torch.long),
             "ecot_rho_bank": response_grid,
             "ecot_base_score": base_budget_score,
             "ecot_score": mass_response_score,
