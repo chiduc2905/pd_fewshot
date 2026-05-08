@@ -112,6 +112,29 @@ def test_hrot_variant_cli_accepts_j_ecot_m2(monkeypatch):
     assert args.hrot_ecot_base_rho is None
 
 
+def test_hrot_variant_cli_accepts_j_ecot_care(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "hrot_fsl",
+            "--hrot_variant",
+            "J_ECOT_CARE",
+            "--care_enable_fwec",
+            "false",
+            "--care_mdr_lambda",
+            "0.2",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.hrot_variant == "J_ECOT_CARE"
+    assert args.care_enable_fwec == "false"
+    assert args.care_mdr_lambda == 0.2
+
+
 def test_hrot_variant_cli_accepts_cp_ecot(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",

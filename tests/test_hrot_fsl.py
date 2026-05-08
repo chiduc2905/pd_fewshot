@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from net.ec_mrot import ECMROT
-from net.hrot_fsl import HROTFSL, _compute_cross_shot_support_marginals
+from net.hrot_fsl import HROTFSL, _compute_cross_shot_support_marginals, compute_fisher_weights, compute_mdr_loss
 from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbolic_distance_matrix, safe_project_to_ball
 from net.model_factory import build_model_from_args
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass
@@ -178,7 +178,7 @@ def test_native_and_pot_sinkhorn_backends_agree_on_small_problems():
     assert torch.allclose(unbalanced_native, unbalanced_pot, atol=2e-3, rtol=2e-2)
 
 
-@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("variant", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     torch.manual_seed(3)
     model = _build_model(variant=variant)
@@ -197,7 +197,7 @@ def test_hrot_fsl_forward_shapes_and_variants(variant: str):
     assert outputs["transported_mass"].shape == (2, 3)
     if variant == "V":
         assert outputs["rho"].shape == (2, 6)
-    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
+    elif variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"}:
         assert outputs["rho"].shape == (2, 3, 2)
     else:
         assert outputs["rho"].shape == (2, 3)
@@ -892,6 +892,135 @@ def test_hrot_fsl_variant_j_ecot_m2_defaults_to_single_base_budget():
     assert tuple(model.ecot_rho_bank) == (0.80,)
     assert model.ecot_base_rho == 0.80
     assert model.ecot_base_idx == 0
+
+
+def test_compute_fisher_weights_shape_clamp_and_degenerate_way():
+    torch.manual_seed(61)
+    tokens = torch.randn(3, 2, 4, 5, requires_grad=True)
+
+    weights = compute_fisher_weights(tokens, eps=1e-6, clamp=(0.1, 10.0))
+
+    assert weights.shape == (5,)
+    assert not weights.requires_grad
+    assert torch.all(weights >= 0.1)
+    assert torch.all(weights <= 10.0)
+
+    one_way_weights = compute_fisher_weights(tokens[:1], eps=1e-6, clamp=(0.1, 10.0))
+    assert torch.allclose(one_way_weights, torch.ones_like(one_way_weights))
+
+
+def test_compute_mdr_loss_matches_manual_margin():
+    shot_masses = torch.tensor(
+        [
+            [[0.50, 0.60], [0.30, 0.20], [0.40, 0.40]],
+            [[0.10, 0.20], [0.55, 0.45], [0.30, 0.40]],
+        ],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 2])
+
+    loss = compute_mdr_loss(shot_masses, labels, margin=0.05)
+
+    class_mass = shot_masses.mean(dim=-1)
+    expected_0 = torch.relu(torch.tensor(0.05) - (class_mass[0, 0] - class_mass[0, 2])).pow(2)
+    expected_1 = torch.relu(torch.tensor(0.05) - (class_mass[1, 2] - class_mass[1, 1])).pow(2)
+    expected = torch.stack([expected_0, expected_1]).mean()
+    assert torch.allclose(loss, expected)
+
+
+def test_hrot_fsl_variant_j_ecot_care_shapes_and_marginals():
+    torch.manual_seed(62)
+    model = _build_model(variant="J_ECOT_CARE", sinkhorn_iterations=8)
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.variant == "J_ECOT_CARE"
+    assert model.uses_care_uot
+    assert model.uses_ecot
+    assert tuple(model.ecot_rho_bank) == (0.80,)
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["shot_logits"].shape == (2, 3, 2)
+    assert outputs["care_fwec_weight"].shape == (model.token_dim,)
+    assert outputs["care_query_marginal"].shape == outputs["query_euclidean_tokens"].shape[:2]
+    assert torch.allclose(
+        outputs["care_query_marginal"].sum(dim=-1),
+        torch.full((2,), model.ecot_base_rho, dtype=outputs["care_query_marginal"].dtype),
+        atol=1e-6,
+        rtol=1e-5,
+    )
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["transport_plan"]).all()
+
+
+def test_hrot_fsl_variant_j_ecot_care_disabled_matches_m2():
+    torch.manual_seed(63)
+    m2_model = _build_model(
+        variant="J_ECOT_M2",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        sinkhorn_iterations=8,
+    )
+    care_model = _build_model(
+        variant="J_ECOT_CARE",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        care_enable_fwec=False,
+        care_enable_qesm=False,
+        care_enable_mdr=False,
+        sinkhorn_iterations=8,
+    )
+    care_model.load_state_dict(m2_model.state_dict(), strict=True)
+    m2_model.eval()
+    care_model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        m2_outputs = m2_model(query, support, return_aux=True)
+        care_outputs = care_model(query, support, return_aux=True)
+
+    for key in ("logits", "shot_logits", "transport_cost", "transported_mass", "cost_matrix"):
+        assert torch.allclose(care_outputs[key], m2_outputs[key], atol=1e-6, rtol=1e-6), key
+
+
+def test_hrot_fsl_variant_j_ecot_care_adds_mdr_only_during_training():
+    torch.manual_seed(64)
+    model = _build_model(
+        variant="J_ECOT_CARE",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        care_enable_fwec=False,
+        care_enable_qesm=False,
+        care_enable_mdr=True,
+        care_mdr_lambda=0.2,
+        sinkhorn_iterations=8,
+    )
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    targets = torch.tensor([0, 1])
+
+    model.train()
+    train_outputs = model(query, support, query_targets=targets, return_aux=True)
+    expected_mdr = compute_mdr_loss(
+        train_outputs["shot_transported_mass"],
+        targets,
+        margin=model.care_mdr_margin,
+    )
+    expected_aux = train_outputs["ecot_aux_loss"] + model.care_mdr_lambda * expected_mdr
+    assert torch.allclose(train_outputs["care_mdr_loss"], expected_mdr, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(train_outputs["aux_loss"], expected_aux, atol=1e-6, rtol=1e-6)
+
+    model.eval()
+    with torch.no_grad():
+        eval_outputs = model(query, support, query_targets=targets, return_aux=True)
+    assert eval_outputs["care_mdr_loss"].item() == 0.0
+    assert torch.allclose(eval_outputs["aux_loss"], eval_outputs["ecot_aux_loss"], atol=1e-6, rtol=1e-6)
 
 
 def test_cross_shot_support_marginals_fallback_to_uniform_for_one_shot():
@@ -2234,7 +2363,7 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     assert model.ground_cost == "cosine"
 
 
-@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
+@pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])
 def test_hrot_fsl_model_factory_builds_and_runs(factory_variant: str):
     args = SimpleNamespace(
         model="hrot_fsl",

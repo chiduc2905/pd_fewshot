@@ -73,6 +73,8 @@ def _normalize_hrot_variant_name(variant: str) -> str:
         return "J_ECOT_NNCS"
     if normalized in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTSINGLE", "JECOTSINGLEBUDGET"}:
         return "J_ECOT_M2"
+    if normalized in {"JECOTCARE", "CAREUOT", "CARE", "JCAREUOT"}:
+        return "J_ECOT_CARE"
     if normalized in {"JECOT", "ECOT"}:
         return "J_ECOT"
     if normalized in {"CPECOT"}:
@@ -212,6 +214,74 @@ def _compute_cross_shot_support_marginals(
     mixed = (1.0 - float(eta)) * sigma_norm + float(eta) * uniform
     b = mixed * float(rho)
     return b, consistency.to(dtype=support_tokens.dtype), sigma_norm.to(dtype=support_tokens.dtype)
+
+
+def compute_fisher_weights(
+    support_tokens: torch.Tensor,
+    *,
+    eps: float = 1e-6,
+    clamp: tuple[float, float] = (0.1, 10.0),
+) -> torch.Tensor:
+    """Compute detached per-episode Fisher feature weights for CARE-UOT."""
+    if support_tokens.dim() != 4:
+        raise ValueError(
+            "support_tokens must have shape (Way, Shot, Tokens, Dim), "
+            f"got {tuple(support_tokens.shape)}"
+        )
+    if float(eps) <= 0.0:
+        raise ValueError("eps must be positive")
+    clamp_min, clamp_max = float(clamp[0]), float(clamp[1])
+    if clamp_min <= 0.0 or clamp_max < clamp_min:
+        raise ValueError("clamp must satisfy 0 < min <= max")
+
+    way_num, _, _, embed_dim = support_tokens.shape
+    if way_num == 1:
+        return support_tokens.new_ones(embed_dim)
+
+    mu_c = support_tokens.mean(dim=(1, 2))
+    mu = mu_c.mean(dim=0)
+    within = (support_tokens - mu_c[:, None, None, :]).pow(2).mean(dim=(0, 1, 2))
+    between = (mu_c - mu).pow(2).mean(dim=0)
+    weights = (between + float(eps)) / (within + float(eps))
+    weights = weights * (float(embed_dim) / weights.sum().clamp_min(float(eps)))
+    return weights.clamp(min=clamp_min, max=clamp_max).detach()
+
+
+def compute_mdr_loss(
+    shot_masses: torch.Tensor,
+    query_labels: torch.Tensor,
+    *,
+    margin: float = 0.05,
+) -> torch.Tensor:
+    """Mass discriminability regularizer for CARE-UOT."""
+    if shot_masses.dim() == 4:
+        batch_size, num_query, way_num, shot_num = shot_masses.shape
+        shot_masses = shot_masses.reshape(batch_size * num_query, way_num, shot_num)
+    elif shot_masses.dim() == 3:
+        way_num = shot_masses.shape[1]
+    else:
+        raise ValueError(
+            "shot_masses must have shape (Nq, Way, Shot) or (Batch, Nq, Way, Shot), "
+            f"got {tuple(shot_masses.shape)}"
+        )
+    if float(margin) < 0.0:
+        raise ValueError("margin must be non-negative")
+    labels = query_labels.reshape(-1).to(device=shot_masses.device, dtype=torch.long)
+    if labels.shape[0] != shot_masses.shape[0]:
+        raise ValueError(
+            "query_labels must have one label per query, "
+            f"got {labels.shape[0]} labels for {shot_masses.shape[0]} queries"
+        )
+    if way_num <= 1:
+        return shot_masses.new_zeros(())
+    if torch.any(labels < 0) or torch.any(labels >= way_num):
+        raise ValueError("query_labels contain class indices outside [0, Way)")
+
+    class_mass = shot_masses.mean(dim=-1)
+    true_mass = class_mass.gather(dim=1, index=labels[:, None]).squeeze(1)
+    true_mask = F.one_hot(labels, num_classes=way_num).bool()
+    wrong_mass = class_mass.masked_fill(true_mask, -torch.inf).max(dim=1).values
+    return (float(margin) - (true_mass - wrong_mass)).clamp_min(0.0).pow(2).mean()
 
 
 class EpisodeBudgetController(nn.Module):
@@ -393,6 +463,15 @@ class HROTFSL(BaseConv64FewShotModel):
         eval_use_float64: bool = True,
         hyperbolic_backend: str = "auto",
         ot_backend: str = "native",
+        care_enable_fwec: bool = True,
+        care_enable_qesm: bool = True,
+        care_enable_mdr: bool = True,
+        care_fwec_eps: float = 1e-6,
+        care_fwec_w_clamp_min: float = 0.1,
+        care_fwec_w_clamp_max: float = 10.0,
+        care_qesm_tau_e: float = 1.0,
+        care_mdr_margin: float = 0.05,
+        care_mdr_lambda: float = 0.1,
         eps: float = 1e-6,
     ) -> None:
         super().__init__(
@@ -404,7 +483,7 @@ class HROTFSL(BaseConv64FewShotModel):
             resnet12_dropblock_size=resnet12_dropblock_size,
         )
         variant = _normalize_hrot_variant_name(variant)
-        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
+        if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
         if self.use_raw_backbone_tokens:
@@ -464,11 +543,11 @@ class HROTFSL(BaseConv64FewShotModel):
         if ecot_rho_bank is None:
             if variant == "CP_ECOT":
                 ecot_rho_bank = "0.50,0.80,0.95"
-            elif variant in {"J_ECOT_M2", "J_ECOT_NNCS"}:
+            elif variant in {"J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE"}:
                 ecot_rho_bank = "0.80"
             else:
                 ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
-        ecot_base_rho = 0.80 if variant in {"CP_ECOT", "J_ECOT_M2", "J_ECOT_NNCS"} and ecot_base_rho is None else (
+        ecot_base_rho = 0.80 if variant in {"CP_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE"} and ecot_base_rho is None else (
             fixed_mass if ecot_base_rho is None else float(ecot_base_rho)
         )
         ecot_rho_bank_values, ecot_base_idx = _parse_ecot_rho_bank(ecot_rho_bank, ecot_base_rho)
@@ -524,12 +603,23 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError(f"Unsupported HROT EAM mode: {eam_mode}")
         if not 0.0 <= compact_eam_prior_mix <= 1.0:
             raise ValueError("compact_eam_prior_mix must be in [0, 1]")
+        if care_fwec_eps <= 0.0:
+            raise ValueError("care_fwec_eps must be positive")
+        if care_fwec_w_clamp_min <= 0.0 or care_fwec_w_clamp_max < care_fwec_w_clamp_min:
+            raise ValueError("CARE FWEC clamp bounds must satisfy 0 < min <= max")
+        if care_qesm_tau_e <= 0.0:
+            raise ValueError("care_qesm_tau_e must be positive")
+        if care_mdr_margin < 0.0:
+            raise ValueError("care_mdr_margin must be non-negative")
+        if care_mdr_lambda < 0.0:
+            raise ValueError("care_mdr_lambda must be non-negative")
 
         self.variant = variant
         self.uses_hrot_v = variant == "V"
         self.uses_egtw_mass = variant == "JE"
         self.uses_cp_ecot = variant == "CP_ECOT"
-        self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT"}
+        self.uses_care_uot = variant == "J_ECOT_CARE"
+        self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT"}
         self.uses_ecot_nncs_marginal = uses_nncs_marginal
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
@@ -537,15 +627,15 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_episode_controller = self.uses_ecot
         self.uses_budget_bank = self.uses_ecot
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
-        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
-        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
         self.uses_euclidean_geometric_eam = variant == "I"
         self.uses_reduced_geodesic_eam = variant == "L"
         self.uses_hybrid_ablation_eam = variant == "M"
         self.uses_transport_aware_eam = variant == "O"
-        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
+        self.uses_cost_threshold_score = variant in {"H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "L", "M", "N", "O", "P", "Q", "R", "S"}
         self.uses_hybrid_mass_reward = variant == "M"
         self.uses_rho_rank_loss = variant == "N"
         self.uses_hyperbolic_token_attention = variant in {"P", "S"}
@@ -563,6 +653,15 @@ class HROTFSL(BaseConv64FewShotModel):
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
+        self.care_enable_fwec = bool(care_enable_fwec)
+        self.care_enable_qesm = bool(care_enable_qesm)
+        self.care_enable_mdr = bool(care_enable_mdr)
+        self.care_fwec_eps = float(care_fwec_eps)
+        self.care_fwec_w_clamp_min = float(care_fwec_w_clamp_min)
+        self.care_fwec_w_clamp_max = float(care_fwec_w_clamp_max)
+        self.care_qesm_tau_e = float(care_qesm_tau_e)
+        self.care_mdr_margin = float(care_mdr_margin)
+        self.care_mdr_lambda = float(care_mdr_lambda)
         self.hyperbolic_backend = resolve_hyperbolic_backend(hyperbolic_backend)
         ot_backend_name = str(ot_backend).lower()
         self.uses_partial_transport = ot_backend_name in HROT_PARTIAL_OT_BACKENDS
@@ -1077,10 +1176,45 @@ class HROTFSL(BaseConv64FewShotModel):
         hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
         return euclidean_tokens, hyperbolic_tokens, spatial_hw
 
+    def _encode_images_with_prenorm(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, int]]:
+        feature_map = self.encode(images)
+        spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+        prenorm_tokens = feature_map_to_tokens(feature_map)
+        projected = self.token_projector(prenorm_tokens)
+        euclidean_tokens = (
+            F.normalize(projected, p=2, dim=-1, eps=self.eps)
+            if self.normalize_euclidean_tokens
+            else projected
+        )
+        ball = self._build_ball(projected)
+        hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
+        return euclidean_tokens, hyperbolic_tokens, prenorm_tokens, spatial_hw
+
     def _euclidean_cost(self, query_tokens: torch.Tensor, class_tokens: torch.Tensor) -> torch.Tensor:
         query_norm = query_tokens.pow(2).sum(dim=-1)
         class_norm = class_tokens.pow(2).sum(dim=-1)
         dot = torch.einsum("qtd,wkd->qwtk", query_tokens, class_tokens)
+        cost = query_norm[:, None, :, None] + class_norm[None, :, None, :] - 2.0 * dot
+        return cost.clamp_min(0.0)
+
+    def _fisher_weighted_cost(
+        self,
+        query_tokens: torch.Tensor,
+        class_tokens: torch.Tensor,
+        fisher_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        fisher_weight = fisher_weight.to(device=query_tokens.device, dtype=query_tokens.dtype)
+        if fisher_weight.dim() != 1 or fisher_weight.shape[0] != query_tokens.shape[-1]:
+            raise ValueError(
+                "fisher_weight must have shape (TokenDim,), "
+                f"got {tuple(fisher_weight.shape)} for token dim {query_tokens.shape[-1]}"
+            )
+        query_norm = (query_tokens.pow(2) * fisher_weight).sum(dim=-1)
+        class_norm = (class_tokens.pow(2) * fisher_weight).sum(dim=-1)
+        dot = torch.einsum("qtd,wkd,d->qwtk", query_tokens, class_tokens, fisher_weight)
         cost = query_norm[:, None, :, None] + class_norm[None, :, None, :] - 2.0 * dot
         return cost.clamp_min(0.0)
 
@@ -2083,6 +2217,7 @@ class HROTFSL(BaseConv64FewShotModel):
         way_num: int,
         shot_num: int,
         support_weight: torch.Tensor | None = None,
+        query_weight: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
             raise RuntimeError("ECOT variants require an episode_controller")
@@ -2103,6 +2238,18 @@ class HROTFSL(BaseConv64FewShotModel):
         rho_bank_flat = rho_bank_flat.reshape(num_query, num_pairs * budget_count)
 
         transport_kwargs: dict[str, torch.Tensor] = {}
+        if query_weight is not None:
+            if tuple(query_weight.shape) != (num_query, query_len):
+                raise ValueError(
+                    "query_weight must have shape (NumQuery, QueryTokens), "
+                    f"got {tuple(query_weight.shape)}"
+                )
+            query_weight = query_weight.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp_min(0.0)
+            query_prob = query_weight / query_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            a_bank = query_prob.reshape(num_query, 1, 1, query_len) * rho_bank.view(1, 1, budget_count, 1)
+            a_bank = a_bank.expand(-1, num_pairs, -1, -1)
+            transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+
         if support_weight is not None:
             if tuple(support_weight.shape) != (way_num, shot_num, support_len):
                 raise ValueError(
@@ -2116,12 +2263,13 @@ class HROTFSL(BaseConv64FewShotModel):
             b_bank = b_bank.expand(num_query, -1, -1, -1)
             transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
 
-            a_bank = flat_cost.new_full(
-                (num_query, num_pairs, budget_count, query_len),
-                1.0 / float(query_len),
-            )
-            a_bank = a_bank * rho_bank.view(1, 1, budget_count, 1)
-            transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+            if query_weight is None:
+                a_bank = flat_cost.new_full(
+                    (num_query, num_pairs, budget_count, query_len),
+                    1.0 / float(query_len),
+                )
+                a_bank = a_bank * rho_bank.view(1, 1, budget_count, 1)
+                transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
 
         plan_bank, cost_out, mass_out = self._transport_match(
             cost_bank,
@@ -2726,16 +2874,189 @@ class HROTFSL(BaseConv64FewShotModel):
             )
         return outputs
 
+    def _forward_care_uot(
+        self,
+        query: torch.Tensor,
+        support: torch.Tensor,
+        *,
+        query_targets: torch.Tensor | None = None,
+        needs_payload: bool = False,
+        return_aux: bool = False,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        way_num, shot_num = support.shape[:2]
+        num_pairs = way_num * shot_num
+        query_euclidean, query_hyperbolic, query_prenorm, query_hw = self._encode_images_with_prenorm(query)
+        support_euclidean, support_hyperbolic, support_prenorm, support_hw = self._encode_images_with_prenorm(
+            support.reshape(num_pairs, *support.shape[-3:])
+        )
+        del support_prenorm
+        if query_hw != support_hw:
+            raise ValueError(f"Query/support token grids must match, got {query_hw} vs {support_hw}")
+
+        support_euclidean = support_euclidean.reshape(
+            way_num,
+            shot_num,
+            support_euclidean.shape[-2],
+            support_euclidean.shape[-1],
+        )
+        support_hyperbolic = support_hyperbolic.reshape(
+            way_num,
+            shot_num,
+            support_hyperbolic.shape[-2],
+            support_hyperbolic.shape[-1],
+        )
+        flat_support_euclidean = support_euclidean.reshape(
+            num_pairs,
+            support_euclidean.shape[-2],
+            support_euclidean.shape[-1],
+        )
+
+        fisher_weight = None
+        if self.care_enable_fwec:
+            fisher_weight = compute_fisher_weights(
+                support_euclidean,
+                eps=self.care_fwec_eps,
+                clamp=(self.care_fwec_w_clamp_min, self.care_fwec_w_clamp_max),
+            ).to(device=query_euclidean.device, dtype=query_euclidean.dtype)
+            flat_cost = self._fisher_weighted_cost(query_euclidean, flat_support_euclidean, fisher_weight)
+        else:
+            flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
+
+        query_weight = None
+        query_marginal = None
+        query_energy = None
+        if self.care_enable_qesm:
+            query_energy = query_prenorm.norm(dim=-1)
+            query_prob = torch.softmax(query_energy / float(self.care_qesm_tau_e), dim=-1).detach()
+            query_weight = query_prob * float(query_prob.shape[-1])
+            query_marginal = query_prob * float(self.ecot_base_rho)
+
+        ecot_payload = self._forward_ecot_budget_bank(
+            flat_cost,
+            way_num=way_num,
+            shot_num=shot_num,
+            query_weight=query_weight,
+        )
+        logits = ecot_payload["logits"]
+        transport_cost = ecot_payload["transport_cost"]
+        transport_mass = ecot_payload["transported_mass"]
+        rho = ecot_payload["rho"]
+        shot_rho = ecot_payload["shot_rho"]
+        shot_transport_cost = ecot_payload["shot_transport_cost"]
+        shot_transport_mass = ecot_payload["shot_transported_mass"]
+        plan = ecot_payload["transport_plan"]
+        cost = flat_cost.reshape(
+            query.shape[0],
+            way_num,
+            shot_num,
+            flat_cost.shape[-2],
+            flat_cost.shape[-1],
+        )
+        transport_probe_payload = {
+            key: value
+            for key, value in ecot_payload.items()
+            if key
+            not in {
+                "logits",
+                "transport_cost",
+                "transported_mass",
+                "rho",
+                "shot_rho",
+                "shot_transport_cost",
+                "shot_transported_mass",
+                "transport_plan",
+            }
+        }
+
+        care_mdr_loss = logits.new_zeros(())
+        if self.training and self.care_enable_mdr and query_targets is not None:
+            care_mdr_loss = compute_mdr_loss(
+                shot_transport_mass,
+                query_targets,
+                margin=self.care_mdr_margin,
+            )
+
+        zero = logits.new_zeros(())
+        rho_regularization = zero
+        rho_rank_loss = zero
+        hlm_rho_regularization = zero
+        hlm_eff_loss = zero
+        hlm_shot_cov_loss = zero
+        curvature_regularization = zero
+        aux_loss = transport_probe_payload.get("ecot_aux_loss", zero)
+        aux_loss = aux_loss + float(self.care_mdr_lambda) * care_mdr_loss
+
+        if not needs_payload:
+            return logits
+
+        outputs: dict[str, torch.Tensor] = {
+            "logits": logits,
+            "aux_loss": aux_loss,
+            "class_scores": logits,
+            "total_distance": transport_cost,
+            "transport_cost": transport_cost,
+            "transported_mass": transport_mass,
+            "rho": rho,
+            "rho_regularization": rho_regularization,
+            "rho_rank_loss": rho_rank_loss,
+            "hlm_rho_regularization": hlm_rho_regularization,
+            "hlm_eff_loss": hlm_eff_loss,
+            "hlm_shot_cov_loss": hlm_shot_cov_loss,
+            "curvature_regularization": curvature_regularization,
+            "curvature": self.curvature.detach().to(dtype=logits.dtype),
+            "mass_bonus": self._mass_reward_weight(logits).detach().to(dtype=logits.dtype),
+            "transport_cost_threshold": self.transport_cost_threshold.detach().to(
+                device=logits.device,
+                dtype=logits.dtype,
+            ),
+            "hyperbolic_backend": logits.new_tensor(0.0 if self.hyperbolic_backend == "native" else 1.0),
+            "ot_backend": self._ot_backend_code(logits),
+            "shot_transport_cost": shot_transport_cost,
+            "shot_transported_mass": shot_transport_mass,
+            "shot_rho": shot_rho,
+            "care_mdr_loss": care_mdr_loss,
+            "care_mdr_weighted_loss": float(self.care_mdr_lambda) * care_mdr_loss,
+        }
+        outputs.update(transport_probe_payload)
+        if fisher_weight is not None:
+            outputs["care_fwec_weight"] = fisher_weight.detach()
+        if query_marginal is not None:
+            outputs["care_query_marginal"] = query_marginal.to(dtype=logits.dtype)
+            outputs["care_query_energy"] = query_energy.detach().to(dtype=logits.dtype)
+            outputs["care_qesm_tau_e"] = logits.new_tensor(self.care_qesm_tau_e)
+
+        if return_aux:
+            outputs.update(
+                {
+                    "transport_plan": plan,
+                    "cost_matrix": cost,
+                    "query_euclidean_tokens": query_euclidean,
+                    "support_euclidean_tokens": support_euclidean,
+                    "query_hyperbolic_tokens": query_hyperbolic,
+                    "support_hyperbolic_tokens": support_hyperbolic,
+                }
+            )
+        return outputs
+
     def _forward_episode(
         self,
         query: torch.Tensor,
         support: torch.Tensor,
         *,
+        query_targets: torch.Tensor | None = None,
         needs_payload: bool = False,
         return_aux: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         if self.uses_hrot_v:
             return self._forward_hrot_v_episode(query, support, needs_payload=needs_payload, return_aux=return_aux)
+        if self.uses_care_uot:
+            return self._forward_care_uot(
+                query,
+                support,
+                query_targets=query_targets,
+                needs_payload=needs_payload,
+                return_aux=return_aux,
+            )
 
         way_num, shot_num = support.shape[:2]
         query_euclidean, query_hyperbolic, query_hw = self._encode_images(query)
@@ -3593,6 +3914,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "nncs_support_marginal",
             "nncs_consistency",
             "nncs_sigma",
+            "care_query_marginal",
+            "care_query_energy",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -3604,9 +3927,14 @@ class HROTFSL(BaseConv64FewShotModel):
             "mean_nncs_min_mass",
             "mean_nncs_consistency",
             "std_nncs_consistency",
+            "care_mdr_loss",
+            "care_mdr_weighted_loss",
+            "care_qesm_tau_e",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
+        if "care_fwec_weight" in batch_outputs[0]:
+            stacked["care_fwec_weight"] = torch.stack([item["care_fwec_weight"] for item in batch_outputs]).mean(dim=0)
         if "transport_probe_cost" in batch_outputs[0]:
             stacked["transport_probe_cost"] = torch.cat(
                 [item["transport_probe_cost"] for item in batch_outputs],
@@ -3742,7 +4070,7 @@ class HROTFSL(BaseConv64FewShotModel):
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         del support_targets
         batch_size, num_query, _, _, _, _ = self.validate_episode_inputs(query, support)
-        self._reshape_query_targets(query_targets, batch_size=batch_size, num_query=num_query)
+        query_targets_2d = self._reshape_query_targets(query_targets, batch_size=batch_size, num_query=num_query)
 
         needs_payload = bool(return_aux or self.training)
         batch_outputs = []
@@ -3752,6 +4080,7 @@ class HROTFSL(BaseConv64FewShotModel):
             episode_outputs = self._forward_episode(
                 query=query[batch_idx],
                 support=support[batch_idx],
+                query_targets=None if query_targets_2d is None else query_targets_2d[batch_idx],
                 needs_payload=needs_payload,
                 return_aux=return_aux,
             )

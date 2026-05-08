@@ -886,6 +886,10 @@ def get_args():
             "J_ECOT",
             "J_ECOT_M2",
             "J_ECOT_NNCS",
+            "J_ECOT_CARE",
+            "CARE",
+            "CARE_UOT",
+            "CARE-UOT",
             "CP_ECOT",
             "J_NCET",
             "NCET",
@@ -1003,6 +1007,15 @@ def get_args():
         choices=["auto", "euclidean", "cosine"],
     )
     parser.add_argument("--hrot_ecot_nncs_min_sigma", type=float, default=1e-6)
+    parser.add_argument("--care_enable_fwec", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--care_enable_qesm", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--care_enable_mdr", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--care_fwec_eps", type=float, default=1e-6)
+    parser.add_argument("--care_fwec_w_clamp_min", type=float, default=0.1)
+    parser.add_argument("--care_fwec_w_clamp_max", type=float, default=10.0)
+    parser.add_argument("--care_qesm_tau_e", type=float, default=1.0)
+    parser.add_argument("--care_mdr_margin", type=float, default=0.05)
+    parser.add_argument("--care_mdr_lambda", type=float, default=0.1)
     parser.add_argument("--hrot_ncet_mix_init", type=float, default=0.25)
     parser.add_argument("--hrot_ncet_real_penalty_init", type=float, default=0.25)
     parser.add_argument("--hrot_ncet_null_penalty_init", type=float, default=0.05)
@@ -2072,7 +2085,16 @@ def get_model(args):
             normalized_hrot_variant = str(hrot_variant).strip().upper().replace("-", "").replace("_", "")
             if normalized_hrot_variant == "CPECOT":
                 hrot_ecot_rho_bank = "0.50,0.80,0.95"
-            elif normalized_hrot_variant in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTNNCS", "ECOTNNCS"}:
+            elif normalized_hrot_variant in {
+                "JECOTM2",
+                "ECOTM2",
+                "M2JECOT",
+                "SBECOT",
+                "JECOTNNCS",
+                "ECOTNNCS",
+                "JECOTCARE",
+                "CAREUOT",
+            }:
                 hrot_ecot_rho_bank = "0.80"
             else:
                 hrot_ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
@@ -2116,6 +2138,10 @@ def get_model(args):
             f"ecot_nncs_detach={getattr(args, 'hrot_ecot_nncs_detach', 'true')}, "
             f"ecot_nncs_distance={getattr(args, 'hrot_ecot_nncs_distance', 'auto')}, "
             f"ecot_nncs_min_sigma={getattr(args, 'hrot_ecot_nncs_min_sigma', 1e-6)}, "
+            f"care_fwec={getattr(args, 'care_enable_fwec', 'true')}, "
+            f"care_qesm={getattr(args, 'care_enable_qesm', 'true')}, "
+            f"care_mdr={getattr(args, 'care_enable_mdr', 'true')}, "
+            f"care_mdr_lambda={getattr(args, 'care_mdr_lambda', 0.1)}, "
             f"ncet_mix_init={getattr(args, 'hrot_ncet_mix_init', 0.25)}, "
             f"ncet_real_penalty_init={getattr(args, 'hrot_ncet_real_penalty_init', 0.25)}, "
             f"ncet_null_penalty_init={getattr(args, 'hrot_ncet_null_penalty_init', 0.05)}, "
@@ -2363,6 +2389,8 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             normalized = "J_ECOT_NNCS"
         if normalized in {"JECOTM2", "ECOTM2", "M2JECOT", "SBECOT", "JECOTSINGLE", "JECOTSINGLEBUDGET"}:
             normalized = "J_ECOT_M2"
+        if normalized in {"JECOTCARE", "CAREUOT", "CARE", "JCAREUOT"}:
+            normalized = "J_ECOT_CARE"
         if normalized in {"JECOT", "ECOT"}:
             normalized = "J_ECOT"
         if normalized in {"CPECOT"}:
@@ -2384,6 +2412,7 @@ def infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=None):
             "J_ECOT",
             "J_ECOT_M2",
             "J_ECOT_NNCS",
+            "J_ECOT_CARE",
             "CP_ECOT",
             "J_NCET",
             "K",
@@ -2491,6 +2520,15 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_nncs_detach",
             "hrot_ecot_nncs_distance",
             "hrot_ecot_nncs_min_sigma",
+            "care_enable_fwec",
+            "care_enable_qesm",
+            "care_enable_mdr",
+            "care_fwec_eps",
+            "care_fwec_w_clamp_min",
+            "care_fwec_w_clamp_max",
+            "care_qesm_tau_e",
+            "care_mdr_margin",
+            "care_mdr_lambda",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]

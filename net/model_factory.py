@@ -360,7 +360,7 @@ MODEL_REGISTRY = {
     "hrot_fsl": {
         "display_name": "HROT-FSL / Episode-Conditioned Optimal Transport J-FSL",
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
-        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2, J_ECOT_NNCS, CP_ECOT, and J_NCET fixed-budget support",
+        "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2, J_ECOT_CARE, J_ECOT_NNCS, CP_ECOT, and J_NCET fixed-budget support",
         "metric": "Hyperbolic Relational Optimal Transport",
     },
     "ec_mrot": {
@@ -2334,6 +2334,15 @@ def build_model_from_args(args):
             eval_use_float64=_bool_flag(getattr(args, "hrot_eval_use_float64", "true"), default=True),
             hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
             ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
+            care_enable_fwec=_bool_flag(getattr(args, "care_enable_fwec", "true"), default=True),
+            care_enable_qesm=_bool_flag(getattr(args, "care_enable_qesm", "true"), default=True),
+            care_enable_mdr=_bool_flag(getattr(args, "care_enable_mdr", "true"), default=True),
+            care_fwec_eps=float(getattr(args, "care_fwec_eps", 1e-6)),
+            care_fwec_w_clamp_min=float(getattr(args, "care_fwec_w_clamp_min", 0.1)),
+            care_fwec_w_clamp_max=float(getattr(args, "care_fwec_w_clamp_max", 10.0)),
+            care_qesm_tau_e=float(getattr(args, "care_qesm_tau_e", 1.0)),
+            care_mdr_margin=float(getattr(args, "care_mdr_margin", 0.05)),
+            care_mdr_lambda=float(getattr(args, "care_mdr_lambda", 0.1)),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
         )
     if args.model == "ec_mrot":
