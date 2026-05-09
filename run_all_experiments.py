@@ -62,7 +62,12 @@ def log_cli_command(args, log_path="results/cli_commands.log"):
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Run all pulse_fewshot benchmark experiments")
+    # Disable prefix matching so flags like `--mode test` are forwarded to main.py
+    # instead of colliding with `--mode_id` / `--models`.
+    parser = argparse.ArgumentParser(
+        description="Run all pulse_fewshot benchmark experiments",
+        allow_abbrev=False,
+    )
     parser.add_argument("--project", type=str, default="pulse_fewshot", help="WandB project name")
     parser.add_argument(
         "--dataset_path",
