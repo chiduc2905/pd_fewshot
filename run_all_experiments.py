@@ -40,7 +40,10 @@ def default_noise_test_root():
         / "dataset"
         / "scalogram_27_1_pd_noise_benchmark_test_moderate"
     )
-    return str(local) if local.is_dir() else None
+    if local.is_dir():
+        return str(local)
+    workspace = Path("/workspace/pd_fewshot/scalogram_27_1_pd_noise_benchmark_test_moderate")
+    return str(workspace) if workspace.is_dir() else None
 
 
 def log_cli_command(args, log_path="results/cli_commands.log"):
