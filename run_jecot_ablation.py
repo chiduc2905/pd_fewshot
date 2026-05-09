@@ -266,6 +266,83 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "Fixed tau-shot pooling",
         ("--hrot_ecot_enable_tau_shot", "false"),
     ),
+    AblationVariant(
+        "abl_m2_amp_marginals",
+        "AMP",
+        "M2 + amplitude-weighted marginals (tau=1.0)",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_amp_marginals", "true",
+            "--hrot_amp_marginals_tau", "1.0",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_token_center",
+        "TC",
+        "M2 + per-shot token centering",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_token_center", "true",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_both",
+        "AMP+TC",
+        "M2 + amplitude marginals + token centering",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_amp_marginals", "true",
+            "--hrot_amp_marginals_tau", "1.0",
+            "--hrot_token_center", "true",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_amp_tau_0.1",
+        "AMP-tau",
+        "M2 + amplitude marginals tau=0.1",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_amp_marginals", "true",
+            "--hrot_amp_marginals_tau", "0.1",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_amp_tau_0.5",
+        "AMP-tau",
+        "M2 + amplitude marginals tau=0.5",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_amp_marginals", "true",
+            "--hrot_amp_marginals_tau", "0.5",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_amp_tau_2.0",
+        "AMP-tau",
+        "M2 + amplitude marginals tau=2.0",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_amp_marginals", "true",
+            "--hrot_amp_marginals_tau", "2.0",
+        ),
+    ),
+    AblationVariant(
+        "abl_m2_amp_tau_5.0",
+        "AMP-tau",
+        "M2 + amplitude marginals tau=5.0",
+        (
+            "--hrot_variant", "J_ECOT_M2",
+            "--hrot_ecot_rho_bank", "0.80",
+            "--hrot_amp_marginals", "true",
+            "--hrot_amp_marginals_tau", "5.0",
+        ),
+    ),
 )
 VARIANT_BY_NAME = {variant.name: variant for variant in VARIANTS}
 DEFAULT_VARIANT_NAMES = tuple(

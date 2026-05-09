@@ -507,6 +507,10 @@ class HROTFSL(BaseConv64FewShotModel):
         eval_use_float64: bool = True,
         hyperbolic_backend: str = "auto",
         ot_backend: str = "native",
+        hrot_amp_marginals: bool = False,
+        hrot_amp_marginals_tau: float = 1.0,
+        hrot_token_center: bool = False,
+        hrot_token_center_query: bool = True,
         care_enable_fwec: bool = True,
         care_enable_qesm: bool = True,
         care_enable_mdr: bool = True,
@@ -752,6 +756,10 @@ class HROTFSL(BaseConv64FewShotModel):
         self.normalize_euclidean_tokens = bool(normalize_euclidean_tokens)
         self.normalize_rho = bool(normalize_rho)
         self.eval_use_float64 = bool(eval_use_float64)
+        self.hrot_amp_marginals = bool(hrot_amp_marginals)
+        self.hrot_amp_marginals_tau = float(hrot_amp_marginals_tau)
+        self.hrot_token_center = bool(hrot_token_center)
+        self.hrot_token_center_query = bool(hrot_token_center_query)
         self.care_enable_fwec = bool(care_enable_fwec)
         self.care_enable_qesm = bool(care_enable_qesm)
         self.care_enable_mdr = bool(care_enable_mdr)
@@ -1400,6 +1408,54 @@ class HROTFSL(BaseConv64FewShotModel):
         ball = self._build_ball(projected)
         hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
         return euclidean_tokens, hyperbolic_tokens, prenorm_tokens, spatial_hw
+
+    def _encode_images_with_amp_norms(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, int]]:
+        """Encode images and additionally return per-token pre-projection L2 norms.
+
+        The norms are computed on the LayerNorm output (before the Linear
+        projection) and are used by Module A (amplitude-weighted marginals).
+        """
+        feature_map = self.encode(images)
+        spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+        tokens = feature_map_to_tokens(feature_map)
+        if self.use_raw_backbone_tokens:
+            pre_proj_norms = tokens.norm(p=2, dim=-1).clamp(min=1e-6)
+            projected = self.token_projector(tokens)
+        else:
+            ln_out = self.token_projector[0](tokens)
+            pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
+            projected = self.token_projector[1](ln_out)
+        euclidean_tokens = (
+            F.normalize(projected, p=2, dim=-1, eps=self.eps)
+            if self.normalize_euclidean_tokens
+            else projected
+        )
+        ball = self._build_ball(projected)
+        hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
+        return euclidean_tokens, hyperbolic_tokens, pre_proj_norms, spatial_hw
+
+    @staticmethod
+    def _build_amp_marginals(
+        pre_proj_norms: torch.Tensor,
+        rho: float,
+        tau_w: float,
+    ) -> torch.Tensor:
+        """Build amplitude-weighted marginals from pre-projection token norms.
+
+        Args:
+            pre_proj_norms: ``(N, L)`` per-token L2 norms.
+            rho: total mass budget (sum of returned marginal equals rho).
+            tau_w: softmax temperature.
+
+        Returns:
+            Marginal weights ``(N, L)`` summing to ``rho`` per row.
+        """
+        norm_sq = pre_proj_norms.pow(2)
+        weights = torch.softmax(norm_sq / float(tau_w), dim=-1)
+        return rho * weights
 
     def _euclidean_cost(self, query_tokens: torch.Tensor, class_tokens: torch.Tensor) -> torch.Tensor:
         query_norm = query_tokens.pow(2).sum(dim=-1)
@@ -3559,10 +3615,22 @@ class HROTFSL(BaseConv64FewShotModel):
             )
 
         way_num, shot_num = support.shape[:2]
-        query_euclidean, query_hyperbolic, query_hw = self._encode_images(query)
-        support_euclidean, support_hyperbolic, support_hw = self._encode_images(
-            support.reshape(way_num * shot_num, *support.shape[-3:])
-        )
+        query_amp_norms = None
+        support_amp_norms = None
+        if self.hrot_amp_marginals:
+            query_euclidean, query_hyperbolic, query_amp_norms, query_hw = (
+                self._encode_images_with_amp_norms(query)
+            )
+            support_euclidean, support_hyperbolic, support_amp_norms, support_hw = (
+                self._encode_images_with_amp_norms(
+                    support.reshape(way_num * shot_num, *support.shape[-3:])
+                )
+            )
+        else:
+            query_euclidean, query_hyperbolic, query_hw = self._encode_images(query)
+            support_euclidean, support_hyperbolic, support_hw = self._encode_images(
+                support.reshape(way_num * shot_num, *support.shape[-3:])
+            )
         if query_hw != support_hw:
             raise ValueError(f"Query/support token grids must match, got {query_hw} vs {support_hw}")
 
@@ -3962,17 +4030,75 @@ class HROTFSL(BaseConv64FewShotModel):
                         }
                     )
             else:
-                flat_cost = self._ground_cost(query_euclidean, flat_support_euclidean)
+                cost_query_tokens = query_euclidean
+                cost_support_tokens = flat_support_euclidean
+                if self.hrot_token_center:
+                    support_for_center = cost_support_tokens.reshape(
+                        way_num,
+                        matching_shot_num,
+                        cost_support_tokens.shape[-2],
+                        cost_support_tokens.shape[-1],
+                    )
+                    support_mean = support_for_center.mean(dim=2, keepdim=True)
+                    centered_support = support_for_center - support_mean
+                    if self.training:
+                        centered_norms = centered_support.norm(dim=-1)
+                        if (centered_norms < 1e-4).any():
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "Token centering produced near-zero vectors "
+                                "(min norm %.2e)", centered_norms.min().item(),
+                            )
+                    cost_support_tokens = centered_support.reshape(
+                        way_num * matching_shot_num,
+                        cost_support_tokens.shape[-2],
+                        cost_support_tokens.shape[-1],
+                    )
+                    if self.hrot_token_center_query:
+                        query_mean = cost_query_tokens.mean(dim=1, keepdim=True)
+                        cost_query_tokens = cost_query_tokens - query_mean
+
+                flat_cost = self._ground_cost(cost_query_tokens, cost_support_tokens)
                 flat_cost, tsw_payload = self._apply_tsw_to_cost(
                     flat_cost,
-                    query_euclidean,
-                    flat_support_euclidean,
+                    cost_query_tokens,
+                    cost_support_tokens,
                 )
                 if self.uses_ecot:
                     nncs_support_weight = None
                     nncs_payload = None
                     if self.uses_ecot_nncs_marginal:
                         nncs_support_weight, nncs_payload = self._compute_nncs_support_payload(support_euclidean)
+
+                    amp_query_weight = None
+                    amp_support_weight = None
+                    if self.hrot_amp_marginals and query_amp_norms is not None:
+                        amp_query_weight = self._build_amp_marginals(
+                            query_amp_norms,
+                            rho=self.ecot_base_rho,
+                            tau_w=self.hrot_amp_marginals_tau,
+                        )
+                        amp_query_weight = (
+                            amp_query_weight
+                            / amp_query_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                            * float(amp_query_weight.shape[-1])
+                        )
+                    if self.hrot_amp_marginals and support_amp_norms is not None:
+                        amp_support_weight = self._build_amp_marginals(
+                            support_amp_norms,
+                            rho=self.ecot_base_rho,
+                            tau_w=self.hrot_amp_marginals_tau,
+                        )
+                        amp_support_weight = (
+                            amp_support_weight
+                            / amp_support_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                        )
+                        amp_support_weight = amp_support_weight.reshape(
+                            way_num,
+                            matching_shot_num,
+                            amp_support_weight.shape[-1],
+                        )
+
                     crs_support_tokens = flat_support_euclidean.reshape(
                         way_num,
                         matching_shot_num,
@@ -3983,7 +4109,8 @@ class HROTFSL(BaseConv64FewShotModel):
                         flat_cost,
                         way_num=way_num,
                         shot_num=matching_shot_num,
-                        support_weight=nncs_support_weight,
+                        support_weight=amp_support_weight if amp_support_weight is not None else nncs_support_weight,
+                        query_weight=amp_query_weight,
                         support_tokens=crs_support_tokens,
                         query_tokens=query_euclidean,
                         spatial_hw=support_hw,

@@ -1097,6 +1097,25 @@ def get_args():
     )
     parser.add_argument("--hrot_ecot_noise_sink_cost_init", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_noise_sink_score_penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--hrot_amp_marginals",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--hrot_amp_marginals_tau", type=float, default=1.0)
+    parser.add_argument(
+        "--hrot_token_center",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument(
+        "--hrot_token_center_query",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
     parser.add_argument("--care_enable_fwec", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--care_enable_qesm", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--care_enable_mdr", type=str, default="true", choices=["true", "false"])
@@ -2258,6 +2277,10 @@ def get_model(args):
             f"ecot_transport_mode={ecot_transport_mode}, "
             f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
             f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
+            f"amp_marginals={getattr(args, 'hrot_amp_marginals', 'false')}, "
+            f"amp_marginals_tau={getattr(args, 'hrot_amp_marginals_tau', 1.0)}, "
+            f"token_center={getattr(args, 'hrot_token_center', 'false')}, "
+            f"token_center_query={getattr(args, 'hrot_token_center_query', 'true')}, "
             f"care_fwec={getattr(args, 'care_enable_fwec', 'true')}, "
             f"care_qesm={getattr(args, 'care_enable_qesm', 'true')}, "
             f"care_mdr={getattr(args, 'care_enable_mdr', 'true')}, "
@@ -2661,6 +2684,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_enable_noise_sink",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
+            "hrot_amp_marginals",
+            "hrot_amp_marginals_tau",
+            "hrot_token_center",
+            "hrot_token_center_query",
             "care_enable_fwec",
             "care_enable_qesm",
             "care_enable_mdr",

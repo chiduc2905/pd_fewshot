@@ -2385,6 +2385,19 @@ def build_model_from_args(args):
             ),
             ecot_noise_sink_cost_init=float(getattr(args, "hrot_ecot_noise_sink_cost_init", 1.0)),
             ecot_noise_sink_score_penalty=float(getattr(args, "hrot_ecot_noise_sink_score_penalty", 0.0)),
+            hrot_amp_marginals=_bool_flag(
+                getattr(args, "hrot_amp_marginals", "false"),
+                default=False,
+            ),
+            hrot_amp_marginals_tau=float(getattr(args, "hrot_amp_marginals_tau", 1.0)),
+            hrot_token_center=_bool_flag(
+                getattr(args, "hrot_token_center", "false"),
+                default=False,
+            ),
+            hrot_token_center_query=_bool_flag(
+                getattr(args, "hrot_token_center_query", "true"),
+                default=True,
+            ),
             ncet_mix_init=float(getattr(args, "hrot_ncet_mix_init", 0.25)),
             ncet_real_penalty_init=float(getattr(args, "hrot_ncet_real_penalty_init", 0.25)),
             ncet_null_penalty_init=float(getattr(args, "hrot_ncet_null_penalty_init", 0.05)),

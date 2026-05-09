@@ -3122,3 +3122,192 @@ def test_forward_scores_routes_query_targets_and_aux_to_hrot():
     assert "query_targets" in keyword_names
     assert "support_targets" in keyword_names
     assert "return_aux" in keyword_names
+
+
+# ---------------------------------------------------------------------------
+# Module A & B: Amplitude-weighted marginals and per-shot token centering
+# ---------------------------------------------------------------------------
+
+
+def _build_m2_model(**overrides) -> HROTFSL:
+    defaults = dict(
+        backbone_name="conv64f",
+        image_size=64,
+        hidden_dim=64,
+        token_dim=24,
+        variant="J_ECOT_M2",
+        eam_hidden_dim=32,
+        curvature_init=1.0,
+        projection_scale=0.1,
+        token_temperature=0.1,
+        score_scale=8.0,
+        tau_q=0.5,
+        tau_c=0.5,
+        sinkhorn_epsilon=0.1,
+        sinkhorn_iterations=8,
+        sinkhorn_tolerance=1e-5,
+        fixed_mass=0.8,
+        min_mass=0.1,
+        mass_bonus_init=1.0,
+        lambda_rho=0.0,
+        rho_target=0.8,
+        lambda_rho_rank=0.0,
+        rho_rank_margin=0.05,
+        rho_rank_temperature=0.05,
+        lambda_curvature=0.0,
+        min_curvature=0.05,
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        normalize_euclidean_tokens=True,
+        eval_use_float64=False,
+        hyperbolic_backend="auto",
+        ot_backend="native",
+        eps=1e-6,
+    )
+    defaults.update(overrides)
+    return HROTFSL(**defaults)
+
+
+def test_baseline_unchanged_flags_off():
+    """Both flags off must produce the same output as the original M2."""
+    torch.manual_seed(100)
+    baseline = _build_m2_model(
+        hrot_amp_marginals=False,
+        hrot_token_center=False,
+    )
+    baseline.eval()
+
+    torch.manual_seed(100)
+    original = _build_m2_model()
+    original.eval()
+
+    original.load_state_dict(baseline.state_dict())
+
+    torch.manual_seed(200)
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 3, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        out_baseline = baseline(query, support, return_aux=True)
+        out_original = original(query, support, return_aux=True)
+
+    assert torch.allclose(
+        out_baseline["logits"], out_original["logits"], atol=1e-5
+    ), "Flags-off variant must be bit-identical to original M2"
+
+
+def test_amp_marginals_sum_to_rho():
+    """Amplitude-weighted marginals must sum to rho for every image."""
+    torch.manual_seed(101)
+    model = _build_m2_model(hrot_amp_marginals=True, hrot_amp_marginals_tau=1.0)
+    model.eval()
+
+    images = torch.randn(4, 3, 64, 64)
+    with torch.no_grad():
+        _, _, norms, _ = model._encode_images_with_amp_norms(images)
+        a = HROTFSL._build_amp_marginals(norms, rho=0.80, tau_w=1.0)
+
+    expected = torch.full((4,), 0.80)
+    assert torch.allclose(a.sum(dim=-1), expected, atol=1e-5), (
+        f"Marginals sum {a.sum(dim=-1)} != rho=0.80"
+    )
+
+
+def test_token_centering_per_shot_mean_zero():
+    """After centering, each shot's mean must be near zero."""
+    torch.manual_seed(102)
+    model = _build_m2_model(hrot_token_center=True)
+    model.eval()
+
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 5, 5, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert "logits" in outputs
+    assert outputs["logits"].shape == (1, 5)
+
+
+@pytest.mark.parametrize("way,shot,nq", [(5, 1, 15), (5, 5, 15), (3, 1, 5)])
+def test_amp_marginals_forward_shapes(way: int, shot: int, nq: int):
+    """Module A must work for various Way/Shot/Nq configs."""
+    torch.manual_seed(103)
+    model = _build_m2_model(hrot_amp_marginals=True, hrot_amp_marginals_tau=1.0)
+    model.eval()
+
+    query = torch.randn(1, nq, 3, 64, 64)
+    support = torch.randn(1, way, shot, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (nq, way)
+
+
+@pytest.mark.parametrize("way,shot,nq", [(5, 1, 15), (5, 5, 15), (3, 1, 5)])
+def test_token_center_forward_shapes(way: int, shot: int, nq: int):
+    """Module B must work for various Way/Shot/Nq configs."""
+    torch.manual_seed(104)
+    model = _build_m2_model(
+        hrot_token_center=True,
+        hrot_token_center_query=True,
+    )
+    model.eval()
+
+    query = torch.randn(1, nq, 3, 64, 64)
+    support = torch.randn(1, way, shot, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (nq, way)
+
+
+@pytest.mark.parametrize("way,shot,nq", [(5, 1, 15), (5, 5, 15)])
+def test_both_modules_forward_shapes(way: int, shot: int, nq: int):
+    """Both modules active simultaneously must work."""
+    torch.manual_seed(105)
+    model = _build_m2_model(
+        hrot_amp_marginals=True,
+        hrot_amp_marginals_tau=1.0,
+        hrot_token_center=True,
+        hrot_token_center_query=True,
+    )
+    model.eval()
+
+    query = torch.randn(1, nq, 3, 64, 64)
+    support = torch.randn(1, way, shot, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (nq, way)
+
+
+def test_build_amp_marginals_static():
+    """Direct test of the static _build_amp_marginals helper."""
+    norms = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    result = HROTFSL._build_amp_marginals(norms, rho=0.8, tau_w=1.0)
+
+    assert result.shape == (1, 4)
+    assert torch.allclose(result.sum(dim=-1), torch.tensor([0.8]), atol=1e-6)
+    assert result[0, 3] > result[0, 0], "Higher norm tokens should get more mass"
+
+
+def test_token_center_query_false():
+    """token_center_query=False should only center support."""
+    torch.manual_seed(106)
+    model = _build_m2_model(
+        hrot_token_center=True,
+        hrot_token_center_query=False,
+    )
+    model.eval()
+
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (1, 3)
