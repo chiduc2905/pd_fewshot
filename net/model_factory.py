@@ -2304,6 +2304,13 @@ def build_model_from_args(args):
             ecot_crs_entropy_reg=float(getattr(args, "hrot_ecot_crs_entropy_reg", 0.0)),
             ecot_crs_side=str(getattr(args, "hrot_ecot_crs_side", "support")),
             ecot_crs_ssm_type=str(getattr(args, "hrot_ecot_crs_ssm_type", "auto")),
+            ecot_enable_mea_marginal=_bool_flag(
+                getattr(args, "hrot_ecot_enable_mea_marginal", "false"),
+                default=False,
+            ),
+            ecot_mea_eta_init=float(getattr(args, "hrot_ecot_mea_eta_init", 0.35)),
+            ecot_mea_temperature_init=float(getattr(args, "hrot_ecot_mea_temperature_init", 0.70)),
+            ecot_mea_entropy_reg=float(getattr(args, "hrot_ecot_mea_entropy_reg", 0.0)),
             ecot_enable_noise_sink=_bool_flag(
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
                 default=False,

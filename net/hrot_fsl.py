@@ -20,6 +20,7 @@ from net.hyperbolic.poincare_ops import (
 )
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
+from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
     compute_partial_transported_mass,
@@ -452,6 +453,10 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_crs_entropy_reg: float = 0.0,
         ecot_crs_side: str = "support",
         ecot_crs_ssm_type: str = "auto",
+        ecot_enable_mea_marginal: bool = False,
+        ecot_mea_eta_init: float = 0.35,
+        ecot_mea_temperature_init: float = 0.70,
+        ecot_mea_entropy_reg: float = 0.0,
         ecot_enable_noise_sink: bool = False,
         ecot_noise_sink_cost_init: float = 1.0,
         ecot_noise_sink_score_penalty: float = 0.0,
@@ -604,6 +609,12 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_crs_ssm_type = str(ecot_crs_ssm_type).strip().lower()
         if ecot_crs_ssm_type not in {"auto", "simple", "mamba"}:
             raise ValueError(f"Unsupported CRS SSM type: {ecot_crs_ssm_type}")
+        if not 0.0 < float(ecot_mea_eta_init) < 1.0:
+            raise ValueError("ecot_mea_eta_init must be in (0, 1)")
+        if float(ecot_mea_temperature_init) <= 0.0:
+            raise ValueError("ecot_mea_temperature_init must be positive")
+        if float(ecot_mea_entropy_reg) < 0.0:
+            raise ValueError("ecot_mea_entropy_reg must be non-negative")
         if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
             raise ValueError("ecot_noise_sink_cost_init must be positive")
         if float(ecot_noise_sink_score_penalty) < 0.0:
@@ -655,11 +666,16 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_ecot = variant in {"J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT"}
         self.uses_ecot_nncs_marginal = uses_nncs_marginal
         self.uses_ecot_crs_marginal = bool(ecot_enable_crs_marginal)
+        self.uses_ecot_mea_marginal = self.uses_ecot and bool(ecot_enable_mea_marginal)
         self.uses_ecot_noise_sink = self.uses_ecot and bool(ecot_enable_noise_sink)
         if self.uses_ecot_crs_marginal and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CRS marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
+        if bool(ecot_enable_mea_marginal) and variant not in {"J_ECOT", "J_ECOT_M2"}:
+            raise ValueError("MEA marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if self.uses_ecot_crs_marginal and self.uses_ecot_nncs_marginal:
             raise ValueError("CRS and NNCS support marginals are mutually exclusive")
+        if self.uses_ecot_mea_marginal and (self.uses_ecot_crs_marginal or self.uses_ecot_nncs_marginal):
+            raise ValueError("MEA, CRS, and NNCS marginals are mutually exclusive")
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
@@ -778,6 +794,10 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_crs_entropy_reg = float(ecot_crs_entropy_reg)
         self.ecot_crs_side = ecot_crs_side
         self.ecot_crs_ssm_type = ecot_crs_ssm_type
+        self.ecot_enable_mea_marginal = bool(ecot_enable_mea_marginal)
+        self.ecot_mea_eta_init = float(ecot_mea_eta_init)
+        self.ecot_mea_temperature_init = float(ecot_mea_temperature_init)
+        self.ecot_mea_entropy_reg = float(ecot_mea_entropy_reg)
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"
@@ -896,6 +916,16 @@ class HROTFSL(BaseConv64FewShotModel):
                 eps=self.eps,
             )
             if self.uses_ecot_crs_marginal
+            else None
+        )
+        self.mea_marginal = (
+            MutualEvidenceAttentionMarginal(
+                eta_init=self.ecot_mea_eta_init,
+                temperature_init=self.ecot_mea_temperature_init,
+                entropy_reg=self.ecot_mea_entropy_reg,
+                eps=self.eps,
+            )
+            if self.uses_ecot_mea_marginal
             else None
         )
         self.q_eam_feature_dim = 5 if self.uses_noise_calibrated_transport else None
@@ -2440,7 +2470,32 @@ class HROTFSL(BaseConv64FewShotModel):
 
         transport_kwargs: dict[str, torch.Tensor] = {}
         crs_payload: dict[str, torch.Tensor] = {}
-        if query_weight is not None:
+        mea_payload: dict[str, torch.Tensor] = {}
+        if self.mea_marginal is not None:
+            if query_weight is not None or support_weight is not None:
+                raise ValueError("MEA marginal cannot be combined with explicit query/support weights")
+            query_marginal, support_marginal, mea_aux = self.mea_marginal(
+                flat_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+                rho=self._ecot_base_rho_tensor(flat_cost),
+            )
+            query_prob = mea_aux["mea_query_pi"].reshape(num_query, num_pairs, query_len)
+            support_prob = mea_aux["mea_support_pi"].reshape(num_query, num_pairs, support_len)
+            a_bank = query_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            b_bank = support_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+            transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
+            mea_payload = {
+                key: value.to(device=flat_cost.device, dtype=flat_cost.dtype)
+                if torch.is_tensor(value) and value.is_floating_point()
+                else value
+                for key, value in mea_aux.items()
+                if torch.is_tensor(value)
+            }
+            mea_payload["mea_query_marginal"] = query_marginal.reshape(num_query, way_num, shot_num, query_len)
+            mea_payload["mea_support_marginal"] = support_marginal.reshape(num_query, way_num, shot_num, support_len)
+        elif query_weight is not None:
             if tuple(query_weight.shape) != (num_query, query_len):
                 raise ValueError(
                     "query_weight must have shape (NumQuery, QueryTokens), "
@@ -2683,7 +2738,8 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_rho = base_rho.expand(num_query, way_num, shot_num).clone()
         policy_entropy = -(pi_budget.clamp_min(self.eps) * pi_budget.clamp_min(self.eps).log()).sum()
         crs_aux_loss = crs_payload.get("crs_aux_loss", identity_loss.new_zeros(()))
-        ecot_aux_loss = self.ecot_identity_reg * identity_loss + crs_aux_loss
+        mea_aux_loss = mea_payload.get("mea_aux_loss", identity_loss.new_zeros(()))
+        ecot_aux_loss = self.ecot_identity_reg * identity_loss + crs_aux_loss + mea_aux_loss
 
         payload: dict[str, torch.Tensor] = {
             "logits": logits,
@@ -2713,6 +2769,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_aux_loss": ecot_aux_loss,
         }
         payload.update(crs_payload)
+        payload.update(mea_payload)
         payload.update(cp_payload)
         if noise_query_mass_bank is not None:
             payload.update(
@@ -4320,6 +4377,18 @@ class HROTFSL(BaseConv64FewShotModel):
             "crs_query_pi",
             "crs_query_p_cross_ref",
             "crs_query_p_ssm",
+            "mea_query_marginal",
+            "mea_support_marginal",
+            "mea_query_pi",
+            "mea_support_pi",
+            "mea_query_attention",
+            "mea_support_attention",
+            "mea_query_entropy",
+            "mea_support_entropy",
+            "mea_query_peak_ratio",
+            "mea_support_peak_ratio",
+            "mea_query_uniform_kl",
+            "mea_support_uniform_kl",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
@@ -4339,6 +4408,10 @@ class HROTFSL(BaseConv64FewShotModel):
             "crs_tau_ssm",
             "crs_entropy_loss",
             "crs_aux_loss",
+            "mea_eta",
+            "mea_temperature",
+            "mea_entropy_loss",
+            "mea_aux_loss",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

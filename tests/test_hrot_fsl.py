@@ -15,6 +15,7 @@ from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbo
 from net.model_factory import build_model_from_args
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass
+from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
 from net.modules.partial_ot import partial_transport_plan_residuals
 from net.modules.unbalanced_ot import (
     sinkhorn_balanced_log,
@@ -1045,6 +1046,47 @@ def test_crs_marginal_side_both_shapes_query_marginal():
     )
 
 
+def test_mea_marginal_shapes_budget_and_gradients():
+    torch.manual_seed(78)
+    module = MutualEvidenceAttentionMarginal(
+        eta_init=0.35,
+        temperature_init=0.70,
+        entropy_reg=1e-3,
+    )
+    flat_cost = torch.rand(2, 6, 4, 5, requires_grad=True)
+
+    query_marginal, support_marginal, aux = module(flat_cost, way_num=3, shot_num=2, rho=0.8)
+    loss = query_marginal.square().sum() + support_marginal.square().sum() + aux["mea_aux_loss"]
+    loss.backward()
+
+    assert query_marginal.shape == (2, 6, 4)
+    assert support_marginal.shape == (2, 6, 5)
+    assert aux["mea_query_pi"].shape == (2, 3, 2, 4)
+    assert aux["mea_support_pi"].shape == (2, 3, 2, 5)
+    assert aux["mea_query_attention"].shape == (2, 3, 2, 4, 5)
+    assert aux["mea_support_attention"].shape == (2, 3, 2, 4, 5)
+    assert torch.all(query_marginal > 0.0)
+    assert torch.all(support_marginal > 0.0)
+    assert torch.allclose(query_marginal.sum(dim=-1), torch.full((2, 6), 0.8), atol=1e-5, rtol=1e-5)
+    assert torch.allclose(support_marginal.sum(dim=-1), torch.full((2, 6), 0.8), atol=1e-5, rtol=1e-5)
+    assert torch.allclose(
+        aux["mea_query_attention"].sum(dim=-2),
+        torch.ones_like(aux["mea_query_attention"].sum(dim=-2)),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        aux["mea_support_attention"].sum(dim=-1),
+        torch.ones_like(aux["mea_support_attention"].sum(dim=-1)),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert module.raw_eta.grad is not None
+    assert module.raw_temperature.grad is not None
+    assert torch.isfinite(module.raw_eta.grad).all()
+    assert torch.isfinite(module.raw_temperature.grad).all()
+
+
 def test_hrot_fsl_crs_disabled_matches_original_m2():
     torch.manual_seed(74)
     m2_model = _build_model(
@@ -1141,6 +1183,59 @@ def test_hrot_fsl_ecot_noise_sink_backpropagates_sink_cost():
     assert model.raw_noise_sink_cost.grad is not None
     assert torch.isfinite(model.raw_noise_sink_cost.grad).all()
     assert model.raw_noise_sink_cost.grad.abs().sum().item() > 1e-10
+
+
+def test_hrot_fsl_mea_m2_runs_and_preserves_budget():
+    torch.manual_seed(79)
+    model = _build_model(
+        variant="J_ECOT_M2",
+        ecot_rho_bank="0.80",
+        ecot_base_rho=0.80,
+        ecot_enable_mea_marginal=True,
+        ecot_mea_eta_init=0.35,
+        ecot_mea_temperature_init=0.70,
+        sinkhorn_iterations=6,
+    )
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    query_len = outputs["query_euclidean_tokens"].shape[-2]
+    support_len = outputs["support_euclidean_tokens"].shape[-2]
+    assert model.uses_ecot_mea_marginal
+    assert model.mea_marginal is not None
+    assert "crs_support_marginal" not in outputs
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["mea_query_marginal"].shape == (1, 2, 3, 2, query_len)
+    assert outputs["mea_support_marginal"].shape == (1, 2, 3, 2, support_len)
+    assert torch.all(outputs["mea_query_marginal"] > 0.0)
+    assert torch.all(outputs["mea_support_marginal"] > 0.0)
+    assert torch.allclose(
+        outputs["mea_query_marginal"].sum(dim=-1),
+        torch.full_like(outputs["mea_query_marginal"].sum(dim=-1), model.ecot_base_rho),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["mea_support_marginal"].sum(dim=-1),
+        torch.full_like(outputs["mea_support_marginal"].sum(dim=-1), model.ecot_base_rho),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    for key in (
+        "mea_query_attention",
+        "mea_support_attention",
+        "mea_query_entropy",
+        "mea_support_entropy",
+        "mea_eta",
+        "mea_temperature",
+    ):
+        assert key in outputs
+        assert torch.isfinite(outputs[key]).all()
 
 
 @pytest.mark.parametrize("shot_num", [1, 5])
@@ -2677,6 +2772,28 @@ def test_hrot_fsl_model_factory_accepts_ecot_noise_sink():
 
     assert model.uses_ecot_noise_sink
     assert model.raw_noise_sink_cost is not None
+
+
+def test_hrot_fsl_model_factory_accepts_ecot_mea_marginal():
+    args = SimpleNamespace(
+        model="hrot_fsl",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_variant="J_ECOT_M2",
+        hrot_ecot_rho_bank="0.80",
+        hrot_ecot_base_rho=0.80,
+        hrot_ecot_enable_mea_marginal="true",
+        hrot_ecot_mea_eta_init=0.35,
+        hrot_ecot_mea_temperature_init=0.70,
+        hrot_sinkhorn_iterations=8,
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.uses_ecot_mea_marginal
+    assert model.mea_marginal is not None
+    assert model.crs_marginal is None
 
 
 @pytest.mark.parametrize("factory_variant", ["E", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "Q", "R", "S", "T", "U", "V"])

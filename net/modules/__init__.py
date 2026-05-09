@@ -8,6 +8,7 @@ from .hierarchical_reliability_consensus import (
     ShotConditionedTokenAdapter,
 )
 from .hierarchical_set_v2 import ConsensusClassAggregator, SetConditionedShotRefiner
+from .mutual_evidence_attention import MutualEvidenceAttentionMarginal
 
 __all__ = [
     "AttentiveTokenPool",
@@ -18,6 +19,7 @@ __all__ = [
     "ReliabilityCoupledTokenSWHead",
     "ShotConditionedTokenAdapter",
     "ConsensusClassAggregator",
+    "MutualEvidenceAttentionMarginal",
     "SetConditionedShotRefiner",
 ]
 

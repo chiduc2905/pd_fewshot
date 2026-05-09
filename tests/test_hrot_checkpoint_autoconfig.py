@@ -284,6 +284,26 @@ def test_infer_hrot_variant_uses_j_ecot_m2_checkpoint_args():
     assert overrides["hrot_ecot_base_rho"] == 0.80
 
 
+def test_infer_hrot_arch_overrides_detects_mea_marginal_state():
+    state_dict = {
+        "raw_ecot_lambda": torch.tensor(0.0),
+        "episode_controller.network.0.weight": torch.randn(32, 11),
+        "mea_marginal.raw_eta": torch.tensor(0.0),
+        "mea_marginal.raw_temperature": torch.tensor(0.0),
+    }
+    checkpoint_args = {
+        "hrot_variant": "J_ECOT_M2",
+        "hrot_ecot_rho_bank": "0.80",
+        "hrot_ecot_base_rho": 0.80,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+
+    assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "J_ECOT_M2"
+    assert overrides["hrot_variant"] == "J_ECOT_M2"
+    assert overrides["hrot_ecot_enable_mea_marginal"] == "true"
+
+
 def test_infer_hrot_variant_maps_old_j_hlm_state_to_j_ecot():
     state_dict = {
         "raw_transport_cost_threshold": torch.tensor(0.0),
