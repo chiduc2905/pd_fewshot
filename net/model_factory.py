@@ -56,6 +56,13 @@ def _load_symbols(module_name, *symbol_names):
     return tuple(_load_symbol(module_name, symbol_name) for symbol_name in symbol_names)
 
 
+M2_MODEL_NAMES = frozenset(
+    {"m2", "m2_uot", "m2_full_ot", "jecot_m2", "jecot_m2_uot", "jecot_m2_full_ot"}
+)
+M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
+HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_MODEL_NAMES))
+
+
 MODEL_REGISTRY = {
     "cosine": {
         "display_name": "Cosine Classifier",
@@ -362,6 +369,42 @@ MODEL_REGISTRY = {
         "paper_name": "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning",
         "architecture": "Backbone spatial tokens -> optional Euclidean projector -> Poincare-ball embedding -> balanced/unbalanced relational transport, with J_ECOT, J_ECOT_M2/CRS-M2, J_ECOT_CARE, J_ECOT_NNCS, CP_ECOT, and J_NCET fixed-budget support",
         "metric": "Hyperbolic Relational Optimal Transport",
+    },
+    "m2": {
+        "display_name": "J-ECOT-M2 / SB-ECOT",
+        "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
+        "architecture": "Backbone spatial tokens -> shot-decomposed local measures -> single rho=0.80 KL-relaxed UOT -> threshold-calibrated evidence -> episode-calibrated shot pooling",
+        "metric": "Single-Budget Episode-Calibrated UOT",
+    },
+    "m2_uot": {
+        "display_name": "J-ECOT-M2-UOT",
+        "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
+        "architecture": "Alias for M2 with rho=0.80 KL-relaxed unbalanced OT",
+        "metric": "Single-Budget Episode-Calibrated UOT",
+    },
+    "m2_full_ot": {
+        "display_name": "J-ECOT-M2-FullOT",
+        "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
+        "architecture": "M2 counterfactual with the same shot-decomposed evidence scorer but balanced full-mass OT at rho=1.0",
+        "metric": "Single-Budget Episode-Calibrated Balanced OT",
+    },
+    "jecot_m2": {
+        "display_name": "J-ECOT-M2 / SB-ECOT",
+        "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
+        "architecture": "Alias for M2 with rho=0.80 KL-relaxed unbalanced OT",
+        "metric": "Single-Budget Episode-Calibrated UOT",
+    },
+    "jecot_m2_uot": {
+        "display_name": "J-ECOT-M2-UOT",
+        "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
+        "architecture": "Alias for M2 with rho=0.80 KL-relaxed unbalanced OT",
+        "metric": "Single-Budget Episode-Calibrated UOT",
+    },
+    "jecot_m2_full_ot": {
+        "display_name": "J-ECOT-M2-FullOT",
+        "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
+        "architecture": "Alias for the M2 balanced full-mass OT counterfactual at rho=1.0",
+        "metric": "Single-Budget Episode-Calibrated Balanced OT",
     },
     "ec_mrot": {
         "display_name": "EC-MROT",
@@ -2211,9 +2254,25 @@ def build_model_from_args(args):
             crj_trim_fraction=float(getattr(args, "crj_trim_fraction", 0.0)),
             crj_clip_logit=float(getattr(args, "crj_clip_logit", 0.0)),
         )
-    if args.model == "hrot_fsl":
-        HROTFSL = _load_symbol("net.hrot_fsl", "HROTFSL")
+    if args.model in HROT_FSL_MODEL_NAMES:
+        is_m2_model = args.model in M2_MODEL_NAMES
+        is_m2_full_ot = args.model in M2_FULL_OT_MODEL_NAMES
+        HROTFSL = (
+            _load_symbol("net.jecot_m2", "JECOTM2")
+            if is_m2_model
+            else _load_symbol("net.hrot_fsl", "HROTFSL")
+        )
         hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        m2_default_rho = 1.0 if is_m2_full_ot else 0.80
+        ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
+        ecot_base_rho = getattr(args, "hrot_ecot_base_rho", None)
+        if is_m2_model and ecot_rho_bank is None:
+            ecot_rho_bank = f"{m2_default_rho:.6g}"
+        if is_m2_model and ecot_base_rho is None:
+            ecot_base_rho = m2_default_rho
+        ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
+        if ecot_transport_mode is None:
+            ecot_transport_mode = "balanced" if is_m2_full_ot else "unbalanced"
         return HROTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,
@@ -2226,7 +2285,7 @@ def build_model_from_args(args):
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
-            variant=str(getattr(args, "hrot_variant", "E")),
+            variant="J_ECOT_M2" if is_m2_model else str(getattr(args, "hrot_variant", "E")),
             eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
             curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
             projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),
@@ -2255,8 +2314,8 @@ def build_model_from_args(args):
             ),
             hrot_tsw_enable=_bool_flag(getattr(args, "hrot_tsw_enable", "false"), default=False),
             hrot_tsw_share_gate=_bool_flag(getattr(args, "hrot_tsw_share_gate", "true"), default=True),
-            ecot_rho_bank=getattr(args, "hrot_ecot_rho_bank", None),
-            ecot_base_rho=getattr(args, "hrot_ecot_base_rho", None),
+            ecot_rho_bank=ecot_rho_bank,
+            ecot_base_rho=ecot_base_rho,
             ecot_budget_tau=float(getattr(args, "hrot_ecot_budget_tau", 1.0)),
             ecot_max_lambda=float(getattr(args, "hrot_ecot_max_lambda", 1.0)),
             ecot_lambda_init=float(getattr(args, "hrot_ecot_lambda_init", -8.0)),
@@ -2311,6 +2370,7 @@ def build_model_from_args(args):
             ecot_mea_eta_init=float(getattr(args, "hrot_ecot_mea_eta_init", 0.35)),
             ecot_mea_temperature_init=float(getattr(args, "hrot_ecot_mea_temperature_init", 0.70)),
             ecot_mea_entropy_reg=float(getattr(args, "hrot_ecot_mea_entropy_reg", 0.0)),
+            ecot_transport_mode=ecot_transport_mode,
             ecot_enable_noise_sink=_bool_flag(
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
                 default=False,

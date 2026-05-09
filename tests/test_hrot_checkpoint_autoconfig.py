@@ -112,6 +112,24 @@ def test_hrot_variant_cli_accepts_j_ecot_m2(monkeypatch):
     assert args.hrot_ecot_base_rho is None
 
 
+def test_m2_model_cli_accepts_transport_mode(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "m2_full_ot",
+            "--hrot_ecot_transport_mode",
+            "full_ot",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.model == "m2_full_ot"
+    assert args.hrot_ecot_transport_mode == "full_ot"
+
+
 def test_hrot_variant_cli_accepts_j_ecot_care(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",

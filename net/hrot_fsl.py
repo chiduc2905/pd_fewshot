@@ -46,6 +46,7 @@ HROT_PARTIAL_OT_BACKENDS = (
     | HROT_PARTIAL_OT_EXACT_BACKENDS
 )
 HROT_GROUND_COSTS = {"auto", "euclidean", "cosine"}
+HROT_ECOT_TRANSPORT_MODES = {"unbalanced", "balanced"}
 
 
 class HROTFSLResult(dict):
@@ -134,6 +135,22 @@ def _normalize_hrot_ground_cost(ground_cost: str) -> str:
     normalized = aliases.get(normalized, normalized)
     if normalized not in HROT_GROUND_COSTS:
         raise ValueError(f"Unsupported HROT ground cost: {ground_cost}")
+    return normalized
+
+
+def _normalize_ecot_transport_mode(mode: str | None) -> str:
+    normalized = "unbalanced" if mode is None else str(mode).strip().lower().replace("-", "_")
+    aliases = {
+        "uot": "unbalanced",
+        "unbalanced_ot": "unbalanced",
+        "kl_uot": "unbalanced",
+        "ot": "balanced",
+        "balanced_ot": "balanced",
+        "full_ot": "balanced",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in HROT_ECOT_TRANSPORT_MODES:
+        raise ValueError(f"Unsupported ECOT transport mode: {mode}")
     return normalized
 
 
@@ -457,6 +474,7 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_mea_eta_init: float = 0.35,
         ecot_mea_temperature_init: float = 0.70,
         ecot_mea_entropy_reg: float = 0.0,
+        ecot_transport_mode: str | None = None,
         ecot_enable_noise_sink: bool = False,
         ecot_noise_sink_cost_init: float = 1.0,
         ecot_noise_sink_score_penalty: float = 0.0,
@@ -615,6 +633,7 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_mea_temperature_init must be positive")
         if float(ecot_mea_entropy_reg) < 0.0:
             raise ValueError("ecot_mea_entropy_reg must be non-negative")
+        ecot_transport_mode = _normalize_ecot_transport_mode(ecot_transport_mode)
         if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
             raise ValueError("ecot_noise_sink_cost_init must be positive")
         if float(ecot_noise_sink_score_penalty) < 0.0:
@@ -683,6 +702,10 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_budget_bank = self.uses_ecot
         self.uses_hyperbolic_geometry = variant in {"C", "D", "E"}
         self.uses_unbalanced_transport = variant in {"B", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
+        if self.uses_ecot and ecot_transport_mode == "balanced":
+            if any(abs(float(value) - 1.0) > 1e-6 for value in ecot_rho_bank_values):
+                raise ValueError("balanced/full OT ECOT mode requires hrot_ecot_rho_bank=1.0")
+            self.uses_unbalanced_transport = False
         self.uses_learned_mass = variant in {"E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_shot_decomposed_transport = variant in {"G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}
         self.uses_geodesic_eam = variant in {"H", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "V"}
@@ -798,6 +821,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_mea_eta_init = float(ecot_mea_eta_init)
         self.ecot_mea_temperature_init = float(ecot_mea_temperature_init)
         self.ecot_mea_entropy_reg = float(ecot_mea_entropy_reg)
+        self.ecot_transport_mode = ecot_transport_mode
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"

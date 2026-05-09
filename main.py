@@ -33,7 +33,15 @@ from function.function import (
     plot_training_curves,
     seed_func,
 )
-from net.model_factory import build_model_from_args, get_model_choices, get_model_metadata, resolve_fewshot_backbone
+from net.model_factory import (
+    HROT_FSL_MODEL_NAMES,
+    M2_FULL_OT_MODEL_NAMES,
+    M2_MODEL_NAMES,
+    build_model_from_args,
+    get_model_choices,
+    get_model_metadata,
+    resolve_fewshot_backbone,
+)
 from visualization import (
     compute_support_episode_distribution,
     export_dataset_noise_profile,
@@ -1064,6 +1072,13 @@ def get_args():
     parser.add_argument("--hrot_ecot_mea_eta_init", type=float, default=0.35)
     parser.add_argument("--hrot_ecot_mea_temperature_init", type=float, default=0.70)
     parser.add_argument("--hrot_ecot_mea_entropy_reg", type=float, default=0.0)
+    parser.add_argument(
+        "--hrot_ecot_transport_mode",
+        type=str,
+        default=None,
+        choices=["unbalanced", "uot", "unbalanced_ot", "balanced", "ot", "balanced_ot", "full_ot"],
+        help="Transport family for ECOT/M2 ablations; M2 uses UOT and m2_full_ot uses balanced full OT by default.",
+    )
     parser.add_argument(
         "--hrot_ecot_enable_noise_sink",
         type=str,
@@ -2139,13 +2154,15 @@ def get_model(args):
             f"sw_proj={getattr(args, 'warn_sw_num_projections', 64)}, "
             f"prior_temp={getattr(args, 'warn_prior_temperature', 1.0)})"
         )
-    if args.model == "hrot_fsl":
+    if args.model in HROT_FSL_MODEL_NAMES:
         hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
         hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
             getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
         )
-        hrot_variant = getattr(args, "hrot_variant", "E")
+        hrot_variant = "J_ECOT_M2" if args.model in M2_MODEL_NAMES else getattr(args, "hrot_variant", "E")
         hrot_ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
+        if args.model in M2_MODEL_NAMES and hrot_ecot_rho_bank is None:
+            hrot_ecot_rho_bank = "1.0" if args.model in M2_FULL_OT_MODEL_NAMES else "0.80"
         if hrot_ecot_rho_bank is None:
             normalized_hrot_variant = str(hrot_variant).strip().upper().replace("-", "").replace("_", "")
             if normalized_hrot_variant == "CPECOT":
@@ -2163,9 +2180,21 @@ def get_model(args):
                 hrot_ecot_rho_bank = "0.80"
             else:
                 hrot_ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
+        hrot_ecot_base_rho = getattr(args, "hrot_ecot_base_rho", None)
+        if args.model in M2_MODEL_NAMES and hrot_ecot_base_rho is None:
+            hrot_ecot_base_rho = 1.0 if args.model in M2_FULL_OT_MODEL_NAMES else 0.80
+        ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
+        if ecot_transport_mode is None:
+            ecot_transport_mode = "balanced" if args.model in M2_FULL_OT_MODEL_NAMES else "unbalanced"
+        hrot_label = "m2" if args.model in M2_MODEL_NAMES else "hrot_fsl"
+        hrot_path_text = (
+            "shot-decomposed single-budget episode-calibrated transport "
+            if args.model in M2_MODEL_NAMES
+            else "Poincare-ball geometry -> balanced/unbalanced relational transport "
+        )
         print(
-            "  hrot_fsl: backbone spatial tokens -> optional Euclidean projector -> "
-            "Poincare-ball geometry -> balanced/unbalanced relational transport "
+            f"  {hrot_label}: backbone spatial tokens -> optional Euclidean projector -> "
+            f"{hrot_path_text}"
             f"(variant={hrot_variant}, "
             f"token_dim={hrot_token_dim}, "
             f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
@@ -2191,7 +2220,7 @@ def get_model(args):
             f"tsw_enable={getattr(args, 'hrot_tsw_enable', 'false')}, "
             f"tsw_share_gate={getattr(args, 'hrot_tsw_share_gate', 'true')}, "
             f"ecot_rho_bank={hrot_ecot_rho_bank}, "
-            f"ecot_base_rho={getattr(args, 'hrot_ecot_base_rho', None)}, "
+            f"ecot_base_rho={hrot_ecot_base_rho}, "
             f"ecot_budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
             f"ecot_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
             f"ecot_controller_hidden={getattr(args, 'hrot_ecot_controller_hidden', 32)}, "
@@ -2212,6 +2241,7 @@ def get_model(args):
             f"ecot_mea_enable={getattr(args, 'hrot_ecot_enable_mea_marginal', 'false')}, "
             f"ecot_mea_eta={getattr(args, 'hrot_ecot_mea_eta_init', 0.35)}, "
             f"ecot_mea_temp={getattr(args, 'hrot_ecot_mea_temperature_init', 0.70)}, "
+            f"ecot_transport_mode={ecot_transport_mode}, "
             f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
             f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
             f"care_fwec={getattr(args, 'care_enable_fwec', 'true')}, "
@@ -2694,7 +2724,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
 
 
 def maybe_autoconfigure_hrot_from_checkpoint(args):
-    if getattr(args, "model", None) != "hrot_fsl":
+    if getattr(args, "model", None) not in HROT_FSL_MODEL_NAMES:
         return args
 
     checkpoint_path = getattr(args, "resume", None) or getattr(args, "weights", None)
@@ -2716,6 +2746,21 @@ def maybe_autoconfigure_hrot_from_checkpoint(args):
     if changed:
         changed_text = ", ".join(f"{key}={value}" for key, value in changed)
         print(f"HROT checkpoint-aligned config from {checkpoint_path}: {changed_text}")
+    return args
+
+
+def apply_standalone_m2_defaults(args):
+    if getattr(args, "model", None) not in M2_MODEL_NAMES:
+        return args
+    full_ot = args.model in M2_FULL_OT_MODEL_NAMES
+    default_rho = 1.0 if full_ot else 0.80
+    args.hrot_variant = "J_ECOT_M2"
+    if getattr(args, "hrot_ecot_rho_bank", None) is None:
+        args.hrot_ecot_rho_bank = f"{default_rho:.6g}"
+    if getattr(args, "hrot_ecot_base_rho", None) is None:
+        args.hrot_ecot_base_rho = default_rho
+    if getattr(args, "hrot_ecot_transport_mode", None) is None:
+        args.hrot_ecot_transport_mode = "balanced" if full_ot else "unbalanced"
     return args
 
 
@@ -3113,7 +3158,7 @@ def forward_scores(
             support_targets=support_targets,
             return_aux=collect_diagnostics,
         )
-    if args.model in {"hrot_fsl", "ec_mrot"}:
+    if args.model in HROT_FSL_MODEL_NAMES or args.model == "ec_mrot":
         return net(
             query,
             support,
@@ -4721,6 +4766,7 @@ def main():
     args = get_args()
     args = apply_optional_env_overrides(args)
     args = maybe_autoconfigure_hrot_from_checkpoint(args)
+    args = apply_standalone_m2_defaults(args)
     if _bool_flag(getattr(args, "cudnn_deterministic", "true"), default=True):
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     args.device = resolve_runtime_device(args)

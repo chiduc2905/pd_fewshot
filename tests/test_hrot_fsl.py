@@ -263,6 +263,68 @@ def test_hrot_tsw_is_conditional_and_exposes_m2_aux():
     assert torch.all(outputs["cost_matrix"] >= 0.0)
 
 
+def test_m2_model_factory_exposes_uot_and_full_ot_as_standalone_models():
+    base_args = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=16,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=8,
+        hrot_sinkhorn_tolerance=1e-5,
+    )
+
+    m2 = build_model_from_args(SimpleNamespace(model="m2", **base_args))
+    assert m2.variant == "J_ECOT_M2"
+    assert m2.ecot_rho_bank == (0.8,)
+    assert m2.ecot_base_rho == 0.8
+    assert m2.ecot_transport_mode == "unbalanced"
+    assert m2.uses_unbalanced_transport
+
+    m2_full_ot = build_model_from_args(SimpleNamespace(model="m2_full_ot", **base_args))
+    assert m2_full_ot.variant == "J_ECOT_M2"
+    assert m2_full_ot.ecot_rho_bank == (1.0,)
+    assert m2_full_ot.ecot_base_rho == 1.0
+    assert m2_full_ot.ecot_transport_mode == "balanced"
+    assert not m2_full_ot.uses_unbalanced_transport
+
+
+def test_m2_full_ot_forward_uses_balanced_full_mass_transport():
+    torch.manual_seed(39)
+    model = _build_model(
+        variant="J_ECOT_M2",
+        ecot_transport_mode="balanced",
+        ecot_rho_bank="1.0",
+        ecot_base_rho=1.0,
+    )
+    model.eval()
+
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 2, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.ecot_transport_mode == "balanced"
+    assert not model.uses_unbalanced_transport
+    assert torch.allclose(
+        outputs["shot_transported_mass"],
+        torch.ones_like(outputs["shot_transported_mass"]),
+        atol=2e-3,
+        rtol=2e-3,
+    )
+
+
+def test_m2_full_ot_rejects_partial_rho_bank():
+    with pytest.raises(ValueError, match="balanced/full OT"):
+        _build_model(
+            variant="J_ECOT_M2",
+            ecot_transport_mode="balanced",
+            ecot_rho_bank="0.80",
+            ecot_base_rho=0.80,
+        )
+
+
 def test_hrot_fsl_variant_t_uses_structural_cover_objective():
     torch.manual_seed(33)
     model = _build_model(variant="T")
