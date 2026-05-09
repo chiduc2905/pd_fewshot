@@ -947,7 +947,7 @@ def get_args():
         type=str,
         default="false",
         choices=["true", "false"],
-        help="Enable Token Saliency Reweighting on the HROT cost matrix",
+        help="Enable legacy Token Saliency Reweighting on the HROT cost matrix; use only for ablation/negative control",
     )
     parser.add_argument(
         "--hrot_tsw_share_gate",

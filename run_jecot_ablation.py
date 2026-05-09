@@ -46,8 +46,8 @@ VARIANTS: tuple[AblationVariant, ...] = (
     ),
     AblationVariant(
         "abl_m2_tsw",
-        "M2+TSW",
-        "M2 + Token Saliency Reweighting (shared gate)",
+        "TSW-legacy",
+        "Legacy M2 + Token Saliency Reweighting negative-control (shared gate)",
         (
             "--hrot_ecot_rho_bank",
             "0.80",
@@ -59,8 +59,8 @@ VARIANTS: tuple[AblationVariant, ...] = (
     ),
     AblationVariant(
         "abl_m2_tsw_split",
-        "M2+TSW",
-        "M2 + Token Saliency Reweighting (split gate)",
+        "TSW-legacy",
+        "Legacy M2 + Token Saliency Reweighting negative-control (split gate)",
         (
             "--hrot_ecot_rho_bank",
             "0.80",
@@ -74,7 +74,7 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "m2_baseline",
         "M2",
         "J-ECOT-M2 single base-rho baseline",
-        ("--hrot_variant", "J_ECOT", "--hrot_ecot_rho_bank", "0.80"),
+        ("--hrot_variant", "J_ECOT_M2", "--hrot_ecot_rho_bank", "0.80"),
     ),
     AblationVariant(
         "m2_original",
@@ -82,7 +82,7 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "J-ECOT-M2 original uniform support marginal",
         (
             "--hrot_variant",
-            "J_ECOT",
+            "J_ECOT_M2",
             "--hrot_ecot_rho_bank",
             "0.80",
             "--hrot_ecot_base_rho",
@@ -97,7 +97,7 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "M2 with cross-referenced support marginal only",
         (
             "--hrot_variant",
-            "J_ECOT",
+            "J_ECOT_M2",
             "--hrot_ecot_rho_bank",
             "0.80",
             "--hrot_ecot_base_rho",
@@ -116,7 +116,7 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "M2 with selective-SSM support marginal only",
         (
             "--hrot_variant",
-            "J_ECOT",
+            "J_ECOT_M2",
             "--hrot_ecot_rho_bank",
             "0.80",
             "--hrot_ecot_base_rho",
@@ -135,7 +135,7 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "M2 with cross-referenced selective support marginal",
         (
             "--hrot_variant",
-            "J_ECOT",
+            "J_ECOT_M2",
             "--hrot_ecot_rho_bank",
             "0.80",
             "--hrot_ecot_base_rho",
@@ -154,7 +154,7 @@ VARIANTS: tuple[AblationVariant, ...] = (
         "M2 with explicit ECOT dustbin/noise-sink transport",
         (
             "--hrot_variant",
-            "J_ECOT",
+            "J_ECOT_M2",
             "--hrot_ecot_rho_bank",
             "0.80",
             "--hrot_ecot_base_rho",
@@ -249,6 +249,11 @@ VARIANTS: tuple[AblationVariant, ...] = (
     ),
 )
 VARIANT_BY_NAME = {variant.name: variant for variant in VARIANTS}
+DEFAULT_VARIANT_NAMES = tuple(
+    variant.name
+    for variant in VARIANTS
+    if variant.name not in {"abl_m2_tsw", "abl_m2_tsw_split"}
+)
 
 
 def format_samples(samples: int | None) -> str:
@@ -317,8 +322,12 @@ def get_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--variants",
         type=str,
-        default=",".join(variant.name for variant in VARIANTS),
-        help="Comma-separated subset of: " + ", ".join(variant.name for variant in VARIANTS),
+        default=",".join(DEFAULT_VARIANT_NAMES),
+        help=(
+            "Comma-separated subset of: "
+            + ", ".join(variant.name for variant in VARIANTS)
+            + ". Defaults exclude the legacy TSW negative-controls."
+        ),
     )
     parser.add_argument("--continue_on_error", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
