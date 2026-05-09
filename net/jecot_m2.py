@@ -26,4 +26,5 @@ class JECOTM2(HROTFSL):
         kwargs.setdefault("ecot_rho_bank", f"{float(rho):.6g}")
         kwargs.setdefault("ecot_base_rho", float(rho))
         kwargs.setdefault("ecot_transport_mode", transport_mode)
+        kwargs.setdefault("ecot_enable_ccdm_marginal", True)
         super().__init__(*args, **kwargs)

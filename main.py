@@ -1073,6 +1073,16 @@ def get_args():
     parser.add_argument("--hrot_ecot_mea_temperature_init", type=float, default=0.70)
     parser.add_argument("--hrot_ecot_mea_entropy_reg", type=float, default=0.0)
     parser.add_argument(
+        "--hrot_ecot_enable_ccdm_marginal",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--hrot_ecot_ccdm_tau_q_init", type=float, default=0.50)
+    parser.add_argument("--hrot_ecot_ccdm_tau_b_init", type=float, default=0.50)
+    parser.add_argument("--hrot_ecot_ccdm_entropy_reg", type=float, default=0.0)
+    parser.add_argument("--hrot_ecot_ccdm_entropy_shot_weight", type=float, default=0.0)
+    parser.add_argument(
         "--hrot_ecot_transport_mode",
         type=str,
         default=None,
@@ -2241,6 +2251,10 @@ def get_model(args):
             f"ecot_mea_enable={getattr(args, 'hrot_ecot_enable_mea_marginal', 'false')}, "
             f"ecot_mea_eta={getattr(args, 'hrot_ecot_mea_eta_init', 0.35)}, "
             f"ecot_mea_temp={getattr(args, 'hrot_ecot_mea_temperature_init', 0.70)}, "
+            f"ecot_ccdm_enable={getattr(args, 'hrot_ecot_enable_ccdm_marginal', 'false')}, "
+            f"ecot_ccdm_tau_q={getattr(args, 'hrot_ecot_ccdm_tau_q_init', 0.50)}, "
+            f"ecot_ccdm_tau_b={getattr(args, 'hrot_ecot_ccdm_tau_b_init', 0.50)}, "
+            f"ecot_ccdm_ew={getattr(args, 'hrot_ecot_ccdm_entropy_shot_weight', 0.0)}, "
             f"ecot_transport_mode={ecot_transport_mode}, "
             f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
             f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
@@ -2639,6 +2653,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_mea_eta_init",
             "hrot_ecot_mea_temperature_init",
             "hrot_ecot_mea_entropy_reg",
+            "hrot_ecot_enable_ccdm_marginal",
+            "hrot_ecot_ccdm_tau_q_init",
+            "hrot_ecot_ccdm_tau_b_init",
+            "hrot_ecot_ccdm_entropy_reg",
+            "hrot_ecot_ccdm_entropy_shot_weight",
             "hrot_ecot_enable_noise_sink",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
@@ -2664,6 +2683,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             and any(key.startswith("mea_marginal.") for key in state_dict)
         ):
             overrides["hrot_ecot_enable_mea_marginal"] = "true"
+        if (
+            "hrot_ecot_enable_ccdm_marginal" not in overrides
+            and any(key.startswith("ccdm_marginal.") for key in state_dict)
+        ):
+            overrides["hrot_ecot_enable_ccdm_marginal"] = "true"
         for ncet_key in (
             "hrot_ncet_mix_init",
             "hrot_ncet_real_penalty_init",

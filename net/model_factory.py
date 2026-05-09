@@ -2370,6 +2370,14 @@ def build_model_from_args(args):
             ecot_mea_eta_init=float(getattr(args, "hrot_ecot_mea_eta_init", 0.35)),
             ecot_mea_temperature_init=float(getattr(args, "hrot_ecot_mea_temperature_init", 0.70)),
             ecot_mea_entropy_reg=float(getattr(args, "hrot_ecot_mea_entropy_reg", 0.0)),
+            ecot_enable_ccdm_marginal=_bool_flag(
+                getattr(args, "hrot_ecot_enable_ccdm_marginal", "false"),
+                default=False,
+            ),
+            ecot_ccdm_tau_q_init=float(getattr(args, "hrot_ecot_ccdm_tau_q_init", 0.50)),
+            ecot_ccdm_tau_b_init=float(getattr(args, "hrot_ecot_ccdm_tau_b_init", 0.50)),
+            ecot_ccdm_entropy_reg=float(getattr(args, "hrot_ecot_ccdm_entropy_reg", 0.0)),
+            ecot_ccdm_entropy_shot_weight=float(getattr(args, "hrot_ecot_ccdm_entropy_shot_weight", 0.0)),
             ecot_transport_mode=ecot_transport_mode,
             ecot_enable_noise_sink=_bool_flag(
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
