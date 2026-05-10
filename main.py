@@ -1098,6 +1098,19 @@ def get_args():
     parser.add_argument("--hrot_ecot_noise_sink_cost_init", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_noise_sink_score_penalty", type=float, default=0.0)
     parser.add_argument(
+        "--hrot_ecot_episode_feature_normalize",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="J_ECOT_M2 only: z-score projected tokens over the full episode (query+support) before L2; default off.",
+    )
+    parser.add_argument(
+        "--hrot_ecot_episode_feature_norm_eps",
+        type=float,
+        default=1e-6,
+        help="Epsilon added to per-dim std for J_ECOT_M2 episode token normalization.",
+    )
+    parser.add_argument(
         "--hrot_amp_marginals",
         type=str,
         default="false",
@@ -2277,6 +2290,8 @@ def get_model(args):
             f"ecot_transport_mode={ecot_transport_mode}, "
             f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
             f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
+            f"ecot_episode_feat_norm={getattr(args, 'hrot_ecot_episode_feature_normalize', 'false')}, "
+            f"ecot_episode_feat_norm_eps={getattr(args, 'hrot_ecot_episode_feature_norm_eps', 1e-6)}, "
             f"amp_marginals={getattr(args, 'hrot_amp_marginals', 'false')}, "
             f"amp_marginals_tau={getattr(args, 'hrot_amp_marginals_tau', 1.0)}, "
             f"token_center={getattr(args, 'hrot_token_center', 'false')}, "
@@ -2684,6 +2699,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_enable_noise_sink",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
+            "hrot_ecot_episode_feature_normalize",
+            "hrot_ecot_episode_feature_norm_eps",
             "hrot_amp_marginals",
             "hrot_amp_marginals_tau",
             "hrot_token_center",

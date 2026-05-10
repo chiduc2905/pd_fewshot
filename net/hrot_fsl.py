@@ -484,6 +484,8 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_enable_noise_sink: bool = False,
         ecot_noise_sink_cost_init: float = 1.0,
         ecot_noise_sink_score_penalty: float = 0.0,
+        ecot_episode_feature_normalize: bool = False,
+        ecot_episode_feature_norm_eps: float = 1e-6,
         ncet_mix_init: float = 0.25,
         ncet_real_penalty_init: float = 0.25,
         ncet_null_penalty_init: float = 0.05,
@@ -656,6 +658,10 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_noise_sink_cost_init must be positive")
         if float(ecot_noise_sink_score_penalty) < 0.0:
             raise ValueError("ecot_noise_sink_score_penalty must be non-negative")
+        if bool(ecot_episode_feature_normalize) and variant != "J_ECOT_M2":
+            raise ValueError("ecot_episode_feature_normalize is supported only for variant J_ECOT_M2")
+        if float(ecot_episode_feature_norm_eps) <= 0.0:
+            raise ValueError("ecot_episode_feature_norm_eps must be positive")
         nncs_enabled_by_default = variant == "J_ECOT_NNCS"
         ecot_enable_nncs_marginal = (
             nncs_enabled_by_default
@@ -858,6 +864,8 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_transport_mode = ecot_transport_mode
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
+        self.ecot_episode_feature_normalize = bool(ecot_episode_feature_normalize)
+        self.ecot_episode_feature_norm_eps = float(ecot_episode_feature_norm_eps)
         self.ecot_display_name = "Episode-Conditioned Optimal Transport J-FSL"
         self.ecot_paper_name = "Episode-Conditioned Mass-Response Transport for Shot-Decomposed Few-Shot Learning"
         self.ncet_mix_init = float(ncet_mix_init)
@@ -1436,6 +1444,55 @@ class HROTFSL(BaseConv64FewShotModel):
         ball = self._build_ball(projected)
         hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
         return euclidean_tokens, hyperbolic_tokens, pre_proj_norms, spatial_hw
+
+    @staticmethod
+    def _episode_joint_standardize_projected(
+        query_proj: torch.Tensor,
+        support_proj: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-dimension z-score over all episode tokens (query + support), shared mu/sigma."""
+        feat_dim = query_proj.shape[-1]
+        pooled = torch.cat(
+            [query_proj.reshape(-1, feat_dim), support_proj.reshape(-1, feat_dim)],
+            dim=0,
+        )
+        mu = pooled.mean(dim=0)
+        sig = pooled.std(dim=0, unbiased=False) + float(eps)
+        return (query_proj - mu) / sig, (support_proj - mu) / sig
+
+    def _euclidean_and_hyperbolic_from_projected(self, projected: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        euclidean_tokens = (
+            F.normalize(projected, p=2, dim=-1, eps=self.eps)
+            if self.normalize_euclidean_tokens
+            else projected
+        )
+        ball = self._build_ball(projected)
+        hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
+        return euclidean_tokens, hyperbolic_tokens
+
+    def _project_tokens_from_images(self, images: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
+        feature_map = self.encode(images)
+        spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+        tokens = feature_map_to_tokens(feature_map)
+        projected = self.token_projector(tokens)
+        return projected, spatial_hw
+
+    def _project_and_amp_norms_from_images(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
+        feature_map = self.encode(images)
+        spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+        tokens = feature_map_to_tokens(feature_map)
+        if self.use_raw_backbone_tokens:
+            pre_proj_norms = tokens.norm(p=2, dim=-1).clamp(min=1e-6)
+            projected = self.token_projector(tokens)
+        else:
+            ln_out = self.token_projector[0](tokens)
+            pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
+            projected = self.token_projector[1](ln_out)
+        return projected, pre_proj_norms, spatial_hw
 
     @staticmethod
     def _build_amp_marginals(
@@ -3617,15 +3674,41 @@ class HROTFSL(BaseConv64FewShotModel):
         way_num, shot_num = support.shape[:2]
         query_amp_norms = None
         support_amp_norms = None
+        use_m2_episode_norm = self.variant == "J_ECOT_M2" and self.ecot_episode_feature_normalize
         if self.hrot_amp_marginals:
-            query_euclidean, query_hyperbolic, query_amp_norms, query_hw = (
-                self._encode_images_with_amp_norms(query)
-            )
-            support_euclidean, support_hyperbolic, support_amp_norms, support_hw = (
-                self._encode_images_with_amp_norms(
+            if use_m2_episode_norm:
+                query_proj, query_amp_norms, query_hw = self._project_and_amp_norms_from_images(query)
+                support_proj, support_amp_norms, support_hw = self._project_and_amp_norms_from_images(
                     support.reshape(way_num * shot_num, *support.shape[-3:])
                 )
+                query_proj, support_proj = self._episode_joint_standardize_projected(
+                    query_proj,
+                    support_proj,
+                    self.ecot_episode_feature_norm_eps,
+                )
+                query_euclidean, query_hyperbolic = self._euclidean_and_hyperbolic_from_projected(query_proj)
+                support_euclidean, support_hyperbolic = self._euclidean_and_hyperbolic_from_projected(support_proj)
+            else:
+                query_euclidean, query_hyperbolic, query_amp_norms, query_hw = (
+                    self._encode_images_with_amp_norms(query)
+                )
+                support_euclidean, support_hyperbolic, support_amp_norms, support_hw = (
+                    self._encode_images_with_amp_norms(
+                        support.reshape(way_num * shot_num, *support.shape[-3:])
+                    )
+                )
+        elif use_m2_episode_norm:
+            query_proj, query_hw = self._project_tokens_from_images(query)
+            support_proj, support_hw = self._project_tokens_from_images(
+                support.reshape(way_num * shot_num, *support.shape[-3:])
             )
+            query_proj, support_proj = self._episode_joint_standardize_projected(
+                query_proj,
+                support_proj,
+                self.ecot_episode_feature_norm_eps,
+            )
+            query_euclidean, query_hyperbolic = self._euclidean_and_hyperbolic_from_projected(query_proj)
+            support_euclidean, support_hyperbolic = self._euclidean_and_hyperbolic_from_projected(support_proj)
         else:
             query_euclidean, query_hyperbolic, query_hw = self._encode_images(query)
             support_euclidean, support_hyperbolic, support_hw = self._encode_images(

@@ -2385,6 +2385,11 @@ def build_model_from_args(args):
             ),
             ecot_noise_sink_cost_init=float(getattr(args, "hrot_ecot_noise_sink_cost_init", 1.0)),
             ecot_noise_sink_score_penalty=float(getattr(args, "hrot_ecot_noise_sink_score_penalty", 0.0)),
+            ecot_episode_feature_normalize=_bool_flag(
+                getattr(args, "hrot_ecot_episode_feature_normalize", "false"),
+                default=False,
+            ),
+            ecot_episode_feature_norm_eps=float(getattr(args, "hrot_ecot_episode_feature_norm_eps", 1e-6)),
             hrot_amp_marginals=_bool_flag(
                 getattr(args, "hrot_amp_marginals", "false"),
                 default=False,

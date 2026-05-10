@@ -1004,6 +1004,34 @@ def test_hrot_fsl_variant_j_ecot_m2_defaults_to_single_base_budget():
     assert model.ecot_base_idx == 0
 
 
+def test_ecot_episode_feature_normalize_rejects_non_m2_variant():
+    with pytest.raises(ValueError, match="ecot_episode_feature_normalize"):
+        _build_model(variant="J_ECOT", ecot_episode_feature_normalize=True)
+
+
+def test_episode_joint_standardize_zero_mean_over_pooled_tokens():
+    torch.manual_seed(0)
+    q = torch.randn(2, 4, 8)
+    s = torch.randn(3, 4, 8)
+    eps = 1e-6
+    qn, sn = HROTFSL._episode_joint_standardize_projected(q, s, eps)
+    d = 8
+    zn = torch.cat([qn.reshape(-1, d), sn.reshape(-1, d)], dim=0)
+    assert torch.allclose(zn.mean(dim=0), torch.zeros(d), atol=1e-6, rtol=0.0)
+
+
+def test_j_ecot_m2_episode_feature_normalize_forward_finite():
+    torch.manual_seed(41)
+    model = _build_model(variant="J_ECOT_M2", ecot_episode_feature_normalize=True)
+    model.eval()
+    query = torch.randn(1, 1, 3, 64, 64)
+    support = torch.randn(1, 2, 1, 3, 64, 64)
+    with torch.no_grad():
+        logits = model(query, support)
+    assert logits.shape == (1, 2)
+    assert torch.isfinite(logits).all()
+
+
 def test_crs_marginal_shapes_positive_budget_and_diagnostics():
     torch.manual_seed(70)
     module = CrossReferencedSelectiveMarginal(
