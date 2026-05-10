@@ -2334,6 +2334,10 @@ def build_model_from_args(args):
                 getattr(args, "hrot_ecot_enable_threshold_offset", "false"),
                 default=False,
             ),
+            ecot_m2_ablate_threshold_mass=_bool_flag(
+                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "false"),
+                default=False,
+            ),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),
@@ -2551,6 +2555,10 @@ def build_model_from_args(args):
             ecot_tau_shot_max=float(getattr(args, "hrot_ecot_tau_shot_max", 2.0)),
             ecot_enable_threshold_offset=_bool_flag(
                 getattr(args, "hrot_ecot_enable_threshold_offset", "false"),
+                default=False,
+            ),
+            ecot_m2_ablate_threshold_mass=_bool_flag(
+                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "false"),
                 default=False,
             ),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),

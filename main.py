@@ -1005,6 +1005,13 @@ def get_args():
     parser.add_argument("--hrot_ecot_tau_shot_max", type=float, default=2.0)
     parser.add_argument("--hrot_ecot_enable_threshold_offset", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
+        "--hrot_ecot_m2_ablate_threshold_mass",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="J_ECOT_M2 only: score uses -transport_cost only (zeros the T * mass term).",
+    )
+    parser.add_argument(
         "--hrot_ecot_identity_reg",
         "--ecot_identity_reg",
         dest="hrot_ecot_identity_reg",
@@ -2694,6 +2701,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_tau_shot_min",
             "hrot_ecot_tau_shot_max",
             "hrot_ecot_enable_threshold_offset",
+            "hrot_ecot_m2_ablate_threshold_mass",
             "hrot_ecot_identity_reg",
             "hrot_ecot_policy_entropy_reg",
             "hrot_ecot_consensus_tau_mode",

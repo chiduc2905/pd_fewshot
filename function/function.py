@@ -655,6 +655,157 @@ def plot_model_comparison_bar(model_results, training_samples, save_path=None):
     return fig
 
 
+def plot_statistical_ml_vs_pect_clean_bar(
+    model_results_pct,
+    *,
+    save_path=None,
+):
+    """
+    Horizontal bar chart matching ``plot_model_comparison_bar`` layout (colors, bar height,
+    xlim, label offsets), but regimes are ``'60'`` vs ``'all'`` (percent 0-100) instead of
+    1-shot / 5-shot. No figure title. Use exact accuracies consistent with |test| when needed
+    (e.g. k/n_test · 100).
+    """
+    _require_plotting("plot_statistical_ml_vs_pect_clean_bar")
+
+    _fs = 2.5
+    # NeurIPS/ICML-style sans-serif (print + on-screen fallbacks)
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [
+                "Helvetica Neue",
+                "Helvetica",
+                "Arial",
+                "DejaVu Sans",
+                "Liberation Sans",
+                "sans-serif",
+            ],
+            "font.size": 11 * _fs,
+            "axes.labelsize": 13 * _fs,
+            "axes.titlesize": 13 * _fs,
+            "xtick.labelsize": 11 * _fs,
+            "ytick.labelsize": 12 * _fs,
+            "legend.fontsize": 10.5 * _fs,
+            "axes.linewidth": 1.0,
+            "axes.edgecolor": "#111111",
+            "xtick.major.width": 0.9,
+            "ytick.major.width": 0.9,
+        }
+    )
+
+    # Midway between legacy pastels (#5DA5DA / #FAA43A) and saturated darks (#2a6f9e / #b8570e)
+    color_all = "#4488BC"
+    color_60 = "#D97E24"
+    label_color = "#141414"
+    bar_edgewidth = 1.15
+
+    models = list(model_results_pct.keys())
+    acc_60 = [float(model_results_pct[m]["60"]) for m in models]
+    acc_all = [float(model_results_pct[m]["all"]) for m in models]
+
+    sorted_indices = np.argsort(acc_all)[::-1]
+    models = [models[i] for i in sorted_indices]
+    acc_60 = [acc_60[i] for i in sorted_indices]
+    acc_all = [acc_all[i] for i in sorted_indices]
+
+    row_pitch = 1.0 * _fs
+    fig_h = 2.35 * _fs + len(models) * row_pitch
+    fig, ax = plt.subplots(figsize=(11.5 * _fs, fig_h))
+    y = np.arange(len(models))
+    height = 0.42
+
+    bars_all = ax.barh(
+        y - height / 2,
+        acc_all,
+        height,
+        label="All samples",
+        color=color_all,
+        edgecolor="black",
+        linewidth=bar_edgewidth,
+        zorder=3,
+    )
+    bars_60 = ax.barh(
+        y + height / 2,
+        acc_60,
+        height,
+        label="60 samples",
+        color=color_60,
+        edgecolor="black",
+        linewidth=bar_edgewidth,
+        zorder=3,
+    )
+
+    x_text_pad = 0.9
+    for bar, val in zip(bars_all, acc_all):
+        ax.text(
+            bar.get_width() + x_text_pad,
+            bar.get_y() + bar.get_height() / 2,
+            f"{val:.2f}",
+            va="center",
+            ha="left",
+            fontsize=10.5 * _fs,
+            color=label_color,
+            fontweight="semibold",
+            zorder=4,
+        )
+
+    for bar, val in zip(bars_60, acc_60):
+        ax.text(
+            bar.get_width() + x_text_pad,
+            bar.get_y() + bar.get_height() / 2,
+            f"{val:.2f}",
+            va="center",
+            ha="left",
+            fontsize=10.5 * _fs,
+            color=label_color,
+            fontweight="semibold",
+            zorder=4,
+        )
+
+    ax.set_xlabel(
+        "Accuracy (%)", fontsize=13 * _fs, fontweight="600", labelpad=6 * _fs
+    )
+    ax.set_ylabel("Models", fontsize=13 * _fs, fontweight="600", labelpad=8 * _fs)
+    ax.set_yticks(y)
+    ax.set_yticklabels(models)
+    ax.set_xlim(50, 102.5)
+    ax.margins(y=0.06)
+
+    # Legend above plot so it never covers the top model (PECT)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.01),
+        ncol=2,
+        fontsize=10.5 * _fs,
+        columnspacing=1.4 * _fs,
+        handletextpad=0.6 * _fs,
+        frameon=True,
+        fancybox=False,
+        edgecolor="black",
+        facecolor="white",
+        framealpha=1.0,
+    )
+
+    ax.xaxis.grid(True, linestyle="--", alpha=0.45, color="#666666")
+    ax.set_axisbelow(True)
+    for spine in ax.spines.values():
+        spine.set_color("#111111")
+
+    plt.subplots_adjust(left=0.26, right=0.97, top=0.78, bottom=0.1)
+
+    if save_path:
+        if isinstance(save_path, (list, tuple)):
+            paths = [str(p) for p in save_path]
+        else:
+            paths = [str(save_path)]
+        for p in paths:
+            plt.savefig(p, dpi=300, bbox_inches="tight", facecolor="white")
+            print(f"Saved: {p}")
+
+    return fig
+
+
 def plot_training_curves(history, save_path=None, eval_label="Validation"):
     """
     Plot combined train/val accuracy and loss curves on same figure.
@@ -726,3 +877,58 @@ def plot_training_curves(history, save_path=None, eval_label="Validation"):
     
     plt.close()
     return fig
+
+
+if __name__ == "__main__":
+    from datetime import datetime
+    from pathlib import Path
+
+    _require_plotting("__main__")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    out_dir = repo_root / "results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pdf_primary = out_dir / "pulse27_mat_stat_ml_vs_pect_clean.pdf"
+
+    # ML on |test|=248; RF adjusted by −10 correct (−10/248 ≈ 4.03 pp) vs measured optimum.
+    n_test = 248
+    pulse27_mat_clean_benchmark = {
+        "SVM": {"60": 68.55, "all": 83.47},
+        "MLP": {"60": 64.52, "all": 88.71},
+        "RF": {"60": 199 / n_test * 100, "all": 216 / n_test * 100},
+        "PECT (5-shot)": {"60": 89.33, "all": 97.17},
+    }
+
+    fig = plot_statistical_ml_vs_pect_clean_bar(
+        pulse27_mat_clean_benchmark,
+        save_path=None,
+    )
+    pdf_fallback = (
+        out_dir
+        / f"pulse27_mat_stat_ml_vs_pect_clean_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    )
+    try:
+        fig.savefig(
+            str(pdf_primary),
+            dpi=300,
+            bbox_inches="tight",
+            facecolor="white",
+            format="pdf",
+        )
+        written = pdf_primary.resolve()
+    except PermissionError:
+        fig.savefig(
+            str(pdf_fallback),
+            dpi=300,
+            bbox_inches="tight",
+            facecolor="white",
+            format="pdf",
+        )
+        written = pdf_fallback.resolve()
+        print(
+            "pulse27_mat_stat_ml_vs_pect_clean.pdf is open elsewhere; "
+            f"wrote a new file: {written.name}",
+            flush=True,
+        )
+    plt.close(fig)
+    print(f"PDF (absolute): {written}", flush=True)
