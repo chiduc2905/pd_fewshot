@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
 import wandb
+import matplotlib.pyplot as plt
 
 try:
     from thop import profile, clever_format
@@ -1226,6 +1227,19 @@ def get_args():
         ],
     )
     parser.add_argument("--hrot_eps", type=float, default=1e-6)
+    parser.add_argument(
+        "--jecot_m2_val_query_csv",
+        type=str,
+        default="",
+        help="J-ECOT-M2 only: if non-empty, append per-query validation diagnostics to this CSV path on each evaluate() call.",
+    )
+    parser.add_argument(
+        "--jecot_m2_val_save_hist_fig",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="J-ECOT-M2 only: save true_avg_cost histogram with threshold line under path_results each validation epoch.",
+    )
     parser.add_argument("--crj_token_dim", type=int, default=None)
     parser.add_argument("--crj_use_raw_backbone_tokens", type=str, default=None, choices=["true", "false"])
     parser.add_argument("--crj_pool_gamma", type=float, default=0.65)
@@ -3733,6 +3747,207 @@ def finalize_diagnostics(metric_sums, total_weight):
     return {key: value / float(total_weight) for key, value in metric_sums.items()}
 
 
+def _unwrap_data_parallel(net):
+    return net.module if hasattr(net, "module") else net
+
+
+def _jecot_m2_transport_eps(net) -> float:
+    core = _unwrap_data_parallel(net)
+    return float(getattr(core, "eps", 1e-8))
+
+
+def init_jecot_m2_validation_accumulator():
+    return {
+        "count": 0,
+        "sum_true_mass": 0.0,
+        "sum_best_wrong_mass": 0.0,
+        "sum_true_cost": 0.0,
+        "sum_best_wrong_cost": 0.0,
+        "sum_true_avg_cost": 0.0,
+        "sum_best_wrong_avg_cost": 0.0,
+        "sum_true_logit": 0.0,
+        "sum_best_wrong_logit": 0.0,
+        "sum_margin": 0.0,
+        "wrong_count": 0,
+        "failure_wrong_count": 0,
+        "true_avg_cost_samples": [],
+    }
+
+
+def accumulate_jecot_m2_validation_batch(
+    scores: dict,
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    preds: torch.Tensor,
+    acc: dict,
+    eps: float,
+) -> None:
+    transport_cost = scores.get("transport_cost")
+    transport_mass = scores.get("transported_mass")
+    if (
+        not torch.is_tensor(transport_cost)
+        or not torch.is_tensor(transport_mass)
+        or transport_cost.dim() != 2
+        or transport_mass.dim() != 2
+        or logits.shape != transport_cost.shape
+    ):
+        return
+    way = transport_mass.shape[1]
+    if way < 2:
+        return
+    with torch.no_grad():
+        y = targets.long()
+        M = transport_mass
+        C = transport_cost
+        S = logits
+        mass_y = M.gather(1, y.unsqueeze(1)).squeeze(1)
+        cost_y = C.gather(1, y.unsqueeze(1)).squeeze(1)
+        logit_y = S.gather(1, y.unsqueeze(1)).squeeze(1)
+        mask = F.one_hot(y, num_classes=way).bool()
+        mass_wrong = M.masked_fill(mask, float("-inf"))
+        bw_mass = mass_wrong.max(dim=1).values
+        logits_wrong = S.masked_fill(mask, float("-inf"))
+        bw_logit = logits_wrong.max(dim=1).values
+        runner = logits_wrong.argmax(dim=1)
+        bw_cost = C.gather(1, runner.unsqueeze(1)).squeeze(1)
+        runner_mass = M.gather(1, runner.unsqueeze(1)).squeeze(1)
+        avg_y = cost_y / (mass_y + eps)
+        bw_avg_cost = bw_cost / (runner_mass + eps)
+        margin = logit_y - bw_logit
+        failure_case = (mass_y > bw_mass) & (logit_y < bw_logit)
+        wrong = preds.ne(y)
+        n = int(y.numel())
+        acc["count"] += n
+        acc["sum_true_mass"] += float(mass_y.sum().item())
+        acc["sum_best_wrong_mass"] += float(bw_mass.sum().item())
+        acc["sum_true_cost"] += float(cost_y.sum().item())
+        acc["sum_best_wrong_cost"] += float(bw_cost.sum().item())
+        acc["sum_true_avg_cost"] += float(avg_y.sum().item())
+        acc["sum_best_wrong_avg_cost"] += float(bw_avg_cost.sum().item())
+        acc["sum_true_logit"] += float(logit_y.sum().item())
+        acc["sum_best_wrong_logit"] += float(bw_logit.sum().item())
+        acc["sum_margin"] += float(margin.sum().item())
+        w = wrong
+        acc["wrong_count"] += int(w.sum().item())
+        acc["failure_wrong_count"] += int((failure_case & w).sum().item())
+        acc["true_avg_cost_samples"].extend(avg_y.detach().float().cpu().numpy().tolist())
+
+
+def finalize_jecot_m2_validation_accumulator(acc: dict) -> dict:
+    n = int(acc["count"])
+    out: dict = {}
+    if n <= 0:
+        return out
+    out["m2_mean_true_mass"] = acc["sum_true_mass"] / n
+    out["m2_mean_best_wrong_mass"] = acc["sum_best_wrong_mass"] / n
+    out["m2_mean_true_cost"] = acc["sum_true_cost"] / n
+    out["m2_mean_best_wrong_cost"] = acc["sum_best_wrong_cost"] / n
+    out["m2_mean_true_avg_cost"] = acc["sum_true_avg_cost"] / n
+    out["m2_mean_best_wrong_avg_cost"] = acc["sum_best_wrong_avg_cost"] / n
+    out["m2_mean_true_logit"] = acc["sum_true_logit"] / n
+    out["m2_mean_best_wrong_logit"] = acc["sum_best_wrong_logit"] / n
+    out["m2_mean_logit_margin"] = acc["sum_margin"] / n
+    wn = int(acc["wrong_count"])
+    out["m2_failure_case_rate_among_wrong"] = (
+        float(acc["failure_wrong_count"]) / float(wn) if wn > 0 else float("nan")
+    )
+    return out
+
+
+def _jecot_m2_query_log_rows(
+    scores: dict,
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    preds: torch.Tensor,
+    eps: float,
+    global_offset: int,
+) -> list[dict]:
+    transport_cost = scores.get("transport_cost")
+    transport_mass = scores.get("transported_mass")
+    if (
+        not torch.is_tensor(transport_cost)
+        or not torch.is_tensor(transport_mass)
+        or transport_cost.dim() != 2
+        or transport_mass.dim() != 2
+        or logits.shape != transport_cost.shape
+    ):
+        return []
+    way = transport_mass.shape[1]
+    if way < 2:
+        return []
+    rows: list[dict] = []
+    with torch.no_grad():
+        y = targets.long()
+        M = transport_mass
+        C = transport_cost
+        S = logits
+        mass_y = M.gather(1, y.unsqueeze(1)).squeeze(1)
+        cost_y = C.gather(1, y.unsqueeze(1)).squeeze(1)
+        logit_y = S.gather(1, y.unsqueeze(1)).squeeze(1)
+        mask = F.one_hot(y, num_classes=way).bool()
+        mass_wrong = M.masked_fill(mask, float("-inf"))
+        bw_mass = mass_wrong.max(dim=1).values
+        logits_wrong = S.masked_fill(mask, float("-inf"))
+        bw_logit = logits_wrong.max(dim=1).values
+        runner = logits_wrong.argmax(dim=1)
+        bw_cost = C.gather(1, runner.unsqueeze(1)).squeeze(1)
+        runner_mass = M.gather(1, runner.unsqueeze(1)).squeeze(1)
+        avg_y = cost_y / (mass_y + eps)
+        bw_avg_cost = bw_cost / (runner_mass + eps)
+        margin = logit_y - bw_logit
+        failure_case = ((mass_y > bw_mass) & (logit_y < bw_logit)).bool()
+        for i in range(y.numel()):
+            rows.append(
+                {
+                    "query_idx": global_offset + i,
+                    "y": int(y[i].item()),
+                    "pred": int(preds[i].item()),
+                    "true_mass": float(mass_y[i].item()),
+                    "best_wrong_mass": float(bw_mass[i].item()),
+                    "true_cost": float(cost_y[i].item()),
+                    "best_wrong_cost": float(bw_cost[i].item()),
+                    "true_avg_cost": float(avg_y[i].item()),
+                    "best_wrong_avg_cost": float(bw_avg_cost[i].item()),
+                    "true_logit": float(logit_y[i].item()),
+                    "best_wrong_logit": float(bw_logit[i].item()),
+                    "margin": float(margin[i].item()),
+                    "failure_case": int(failure_case[i].item()),
+                }
+            )
+    return rows
+
+
+def save_jecot_m2_validation_histogram(true_avg_costs: np.ndarray, threshold: float, save_path: str) -> None:
+    if true_avg_costs.size == 0 or not np.isfinite(threshold):
+        return
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.hist(true_avg_costs[np.isfinite(true_avg_costs)], bins=40, color="#2E86AB", alpha=0.85, edgecolor="white")
+    ax.axvline(threshold, color="#E94F37", linewidth=2.0, label=f"T={threshold:.4g}")
+    ax.set_xlabel("True-class avg cost C_y / (M_y + eps)")
+    ax.set_ylabel("Count")
+    ax.set_title("J-ECOT-M2 validation: true avg cost vs learned threshold")
+    ax.legend()
+    ax.grid(True, alpha=0.3, linestyle="--")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def save_jecot_m2_threshold_curve(history_thresholds: list, save_path: str, eval_label: str = "Validation") -> None:
+    if not history_thresholds:
+        return
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    epochs = range(1, len(history_thresholds) + 1)
+    ax.plot(epochs, history_thresholds, color="#2E86AB", marker="o", markersize=3, linewidth=2)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Transport cost threshold T")
+    ax.set_title(f"J-ECOT-M2 learned T over epochs ({eval_label})")
+    ax.grid(True, alpha=0.3, linestyle="--")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def prefix_diagnostics(metrics, prefix):
     return {f"{prefix}{key}": value for key, value in metrics.items()}
 
@@ -3887,6 +4102,16 @@ def format_diagnostic_summary(metrics):
         "transport_mass_true",
         "transport_mass_best_negative",
         "transport_mass_gap",
+        "m2_mean_true_mass",
+        "m2_mean_best_wrong_mass",
+        "m2_mean_true_cost",
+        "m2_mean_best_wrong_cost",
+        "m2_mean_true_avg_cost",
+        "m2_mean_best_wrong_avg_cost",
+        "m2_mean_true_logit",
+        "m2_mean_best_wrong_logit",
+        "m2_mean_logit_margin",
+        "m2_failure_case_rate_among_wrong",
         "mean_shot_distance",
         "mean_gamma_entropy",
         "mean_consistency_penalty",
@@ -4001,6 +4226,8 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         "train_loss": [],
         "val_loss": [],
     }
+    if args.model in M2_MODEL_NAMES:
+        history["m2_transport_cost_threshold"] = []
     best_acc = 0.0
     start_epoch = 1
 
@@ -4024,6 +4251,9 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
     elif args.weights:
         load_model_weights(net, args.weights, args.device)
         print(f"Initialized model weights from {args.weights}")
+
+    if args.model in M2_MODEL_NAMES:
+        history.setdefault("m2_transport_cost_threshold", [])
 
     selection_split, selection_episode_num, selection_query_num = get_selection_protocol(args)
     train_smoothing = effective_label_smoothing(args, train=True)
@@ -4169,11 +4399,13 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
             ),
         )
 
+        m2_val_aux: dict = {}
         selection_acc, selection_loss, selection_diag = evaluate(
             net,
             selection_loader,
             args,
             phase=selection_split,
+            m2_aux_out=m2_val_aux if args.model in M2_MODEL_NAMES else None,
         )
         avg_loss = total_loss / len(train_loader)
 
@@ -4181,6 +4413,11 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         history["val_acc"].append(selection_acc)
         history["train_loss"].append(avg_loss)
         history["val_loss"].append(selection_loss if selection_loss else 0.0)
+        if args.model in M2_MODEL_NAMES:
+            t_cur = m2_val_aux.get("transport_cost_threshold")
+            history["m2_transport_cost_threshold"].append(
+                float(t_cur) if t_cur is not None and np.isfinite(t_cur) else float("nan")
+            )
 
         train_selection_gap = train_acc - selection_acc
         print(
@@ -4205,6 +4442,27 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         wandb_payload[f"train_{selection_split}_gap"] = train_selection_gap
         wandb_payload.update(prefix_diagnostics(train_diag, "diag/train_"))
         wandb_payload.update(prefix_diagnostics(selection_diag, f"diag/{selection_split}_"))
+        if args.model in M2_MODEL_NAMES:
+            thr = m2_val_aux.get("transport_cost_threshold")
+            if thr is not None and np.isfinite(thr):
+                wandb_payload["jecot_m2/transport_cost_threshold"] = float(thr)
+            hist = m2_val_aux.get("true_avg_cost_hist")
+            if isinstance(hist, np.ndarray) and hist.size > 0:
+                wandb_payload["jecot_m2/val_true_avg_cost_hist"] = wandb.Histogram(hist[np.isfinite(hist)])
+            if _bool_flag(getattr(args, "jecot_m2_val_save_hist_fig", "true"), default=True):
+                samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
+                tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
+                hist_path = os.path.join(
+                    args.path_results,
+                    f"m2_val_avg_cost_hist_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot"
+                    f"{tag_suffix}_ep{epoch:04d}.png",
+                )
+                try:
+                    if thr is not None and isinstance(hist, np.ndarray):
+                        save_jecot_m2_validation_histogram(hist, float(thr), hist_path)
+                        wandb_payload["jecot_m2/val_avg_cost_hist_fig"] = wandb.Image(hist_path)
+                except (RuntimeError, ValueError, OSError) as exc:
+                    print(f"Skipping M2 validation histogram: {exc}")
         wandb.log(wandb_payload)
 
         if selection_acc > best_acc:
@@ -4241,12 +4499,24 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
             wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
     except RuntimeError as exc:
         print(f"Skipping training curves: {exc}")
+    if args.model in M2_MODEL_NAMES and history.get("m2_transport_cost_threshold"):
+        t_path = f"{curves_path}_m2_threshold.png"
+        try:
+            save_jecot_m2_threshold_curve(
+                history["m2_transport_cost_threshold"],
+                t_path,
+                eval_label=selection_split.title(),
+            )
+            if os.path.exists(t_path):
+                wandb.log({"jecot_m2/threshold_curve": wandb.Image(t_path)})
+        except (RuntimeError, ValueError, OSError) as exc:
+            print(f"Skipping M2 threshold curve: {exc}")
 
     print(f"Best {selection_split.title()} Accuracy: {best_acc:.4f}")
     return best_acc, history
 
 
-def evaluate(net, loader, args, phase="val"):
+def evaluate(net, loader, args, phase="val", m2_aux_out: dict | None = None):
     device = torch.device(args.device)
     relation_loss_fn = RelationLoss().to(device)
     contrastive_loss_fn = ContrastiveLoss().to(device)
@@ -4256,6 +4526,12 @@ def evaluate(net, loader, args, phase="val"):
     num_batches = 0
     diag_sums = defaultdict(float)
     non_blocking = _pin_memory_enabled(args) and device.type == "cuda"
+    m2_active = args.model in M2_MODEL_NAMES
+    m2_acc = init_jecot_m2_validation_accumulator() if m2_active else None
+    m2_eps = _jecot_m2_transport_eps(net) if m2_active else 1e-8
+    m2_csv_path = str(getattr(args, "jecot_m2_val_query_csv", "") or "").strip()
+    m2_csv_rows: list[dict] | None = [] if (m2_active and m2_csv_path) else None
+    m2_query_offset = 0
 
     with torch.no_grad():
         for query, q_labels, support, support_labels in loader:
@@ -4306,10 +4582,45 @@ def evaluate(net, loader, args, phase="val"):
                 aux_loss=aux_loss,
             )
             accumulate_diagnostics(diag_sums, batch_metrics, weight=targets.size(0))
+            if m2_acc is not None:
+                accumulate_jecot_m2_validation_batch(
+                    scores,
+                    logits,
+                    targets,
+                    preds,
+                    m2_acc,
+                    m2_eps,
+                )
+                if m2_csv_rows is not None:
+                    m2_csv_rows.extend(
+                        _jecot_m2_query_log_rows(
+                            scores,
+                            logits,
+                            targets,
+                            preds,
+                            m2_eps,
+                            m2_query_offset,
+                        )
+                    )
+                    m2_query_offset += int(targets.numel())
 
     acc = correct / total if total > 0 else 0.0
     avg_loss = total_loss / num_batches if num_batches > 0 else None
-    return acc, avg_loss, finalize_diagnostics(diag_sums, total)
+    diag = finalize_diagnostics(diag_sums, total)
+    if m2_acc is not None:
+        diag.update(finalize_jecot_m2_validation_accumulator(m2_acc))
+        core = _unwrap_data_parallel(net)
+        thr = None
+        if hasattr(core, "transport_cost_threshold"):
+            thr = float(core.transport_cost_threshold.detach().float().mean().item())
+        hist = np.asarray(m2_acc["true_avg_cost_samples"], dtype=np.float64)
+        if m2_aux_out is not None:
+            m2_aux_out["transport_cost_threshold"] = thr
+            m2_aux_out["true_avg_cost_hist"] = hist
+        if m2_csv_path and m2_csv_rows:
+            os.makedirs(os.path.dirname(m2_csv_path) or ".", exist_ok=True)
+            write_rows_csv(m2_csv_path, m2_csv_rows)
+    return acc, avg_loss, diag
 
 
 def calculate_p_value(acc, baseline, n):
