@@ -147,8 +147,20 @@ def get_args():
         choices=["none", "contrib", "contrib_detailed"],
         help="Expand SPIFCE contribution ablations with tagged runs",
     )
+    parser.add_argument(
+        "--m2_ablate_T",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="M2 only: forwards --hrot_ecot_m2_ablate_threshold_mass true (drops T * mass in ECOT score).",
+    )
     args, passthrough_args = parser.parse_known_args()
     args.passthrough_args = passthrough_args
+    if str(getattr(args, "m2_ablate_T", "false")).lower() == "true":
+        args.passthrough_args = list(args.passthrough_args) + [
+            "--hrot_ecot_m2_ablate_threshold_mass",
+            "true",
+        ]
     return args
 
 

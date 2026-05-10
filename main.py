@@ -1006,6 +1006,7 @@ def get_args():
     parser.add_argument("--hrot_ecot_enable_threshold_offset", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
         "--hrot_ecot_m2_ablate_threshold_mass",
+        "--m2_ablate_T",
         type=str,
         default="false",
         choices=["true", "false"],
