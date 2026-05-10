@@ -1193,7 +1193,19 @@ def get_args():
     parser.add_argument("--hrot_hlm_return_diagnostics", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--hrot_min_mass", type=float, default=0.1)
     parser.add_argument("--hrot_mass_bonus_init", type=float, default=1.0)
-    parser.add_argument("--hrot_transport_cost_threshold_init", type=float, default=None)
+    parser.add_argument(
+        "--hrot_transport_cost_threshold_init",
+        "--jecot_m2_T_init",
+        type=float,
+        default=None,
+        dest="hrot_transport_cost_threshold_init",
+        metavar="T0",
+        help=(
+            "Initial learned transport cost threshold T (positive). Used by HROT variants with cost-threshold "
+            "scoring, including J-ECOT-M2 (T enters score as T*m - cost). Stored as softplus(raw). "
+            "If omitted, T0 = hrot_mass_bonus_init / hrot_score_scale (defaults 1.0/16 ≈ 0.0625)."
+        ),
+    )
     parser.add_argument("--hrot_lambda_rho", type=float, default=0.01)
     parser.add_argument("--hrot_rho_target", type=float, default=0.8)
     parser.add_argument("--hrot_lambda_rho_rank", type=float, default=0.05)
