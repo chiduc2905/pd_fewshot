@@ -111,6 +111,15 @@ def get_args():
     parser.add_argument("--shot_num", type=int, default=None, choices=[1, 5], help="Optional fixed shot number")
     parser.add_argument("--mode_id", type=int, default=None, choices=[1, 2, 3, 4], help="Optional sample mode")
     parser.add_argument(
+        "--mode_ids",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated mode ids (e.g. 3,4). Runs all combinations of models × listed modes × shots. "
+            "Mutually exclusive with --mode_id."
+        ),
+    )
+    parser.add_argument(
         "--models",
         type=str,
         default="covamnet,protonet,cosine,relationnet,matchingnet,dn4,feat,deepemd,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net,fgwuot_fsl",
@@ -775,8 +784,28 @@ def generate_comparison_charts(dataset_name, shots, models, test_protocol="clean
         print(f"Model comparison chart saved to {save_path}")
 
 
+def parse_mode_ids(mode_ids_str):
+    if not mode_ids_str or not str(mode_ids_str).strip():
+        return None
+    parsed = []
+    for token in str(mode_ids_str).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        mid = int(token)
+        if mid not in EXPERIMENT_MODES:
+            raise ValueError(f"Invalid mode id {mid} in --mode_ids (expected one of {sorted(EXPERIMENT_MODES)})")
+        parsed.append(mid)
+    if not parsed:
+        return None
+    return parsed
+
+
 def main():
     args = get_args()
+    parsed_mode_ids = parse_mode_ids(getattr(args, "mode_ids", None))
+    if args.mode_id is not None and parsed_mode_ids is not None:
+        raise ValueError("Use either --mode_id or --mode_ids, not both.")
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
     if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
@@ -821,7 +850,11 @@ def main():
                 f"(got {requested_models})"
             )
         ablation_variants = build_spifce_ablation_variants(args.spifce_ablation_suite)
-        samples_list = [EXPERIMENT_MODES[args.mode_id]] if args.mode_id is not None else SAMPLES_LIST
+        samples_list = (
+            [EXPERIMENT_MODES[args.mode_id]]
+            if args.mode_id is not None
+            else ([EXPERIMENT_MODES[mid] for mid in parsed_mode_ids] if parsed_mode_ids else SAMPLES_LIST)
+        )
         experiments = [
             {
                 "model": "spifce",
@@ -878,6 +911,57 @@ def main():
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
         print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print("=" * 72)
+    elif parsed_mode_ids is not None:
+        experiments = [
+            {
+                "model": model,
+                "samples": EXPERIMENT_MODES[mode_id],
+                "shot": shot,
+                "variant_args": None,
+                "experiment_tag": None,
+                "experiment_label": None,
+            }
+            for model in requested_models
+            for mode_id in parsed_mode_ids
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - Multi-Mode Experiment")
+        print("=" * 72)
+        print("Modes       : " + ", ".join(f"{mid} ({EXPERIMENT_MODES[mid] if EXPERIMENT_MODES[mid] else 'All'} samples)" for mid in parsed_mode_ids))
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(map(str, shots))}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        if any(model.startswith("spif") for model in requested_models):
+            print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
+        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(f"Test Seed   : final_test_seed={args.final_test_seed}")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
+            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
+            "augment=off, masks=off, "
+            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
+            f"train SFC={DEEPEMD_5SHOT_TRAIN_SFC}, "
+            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
+            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, "
+            f"test exact={DEEPEMD_5SHOT_TEST_EXACT}, test SFC={DEEPEMD_5SHOT_TEST_SFC}"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(f"Total       : {len(experiments)} experiment(s)")
         print("=" * 72)
     elif args.mode_id is not None:
         samples = EXPERIMENT_MODES[args.mode_id]
