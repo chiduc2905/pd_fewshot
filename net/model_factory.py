@@ -2339,10 +2339,18 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_cost_per_mass_score=_bool_flag(
-                getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"),
-                default=False,
+                getattr(
+                    args,
+                    "hrot_ecot_m2_cost_per_mass_score",
+                    "true" if is_m2_model else "false",
+                ),
+                default=is_m2_model,
             ),
             ecot_m2_cost_per_mass_alpha=float(getattr(args, "hrot_ecot_m2_cost_per_mass_alpha", 1.0)),
+            ecot_m2_cost_per_mass_detach_mass=_bool_flag(
+                getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", "true"),
+                default=True,
+            ),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),
@@ -2571,6 +2579,10 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_cost_per_mass_alpha=float(getattr(args, "hrot_ecot_m2_cost_per_mass_alpha", 1.0)),
+            ecot_m2_cost_per_mass_detach_mass=_bool_flag(
+                getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", "true"),
+                default=True,
+            ),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),

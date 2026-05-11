@@ -3,8 +3,9 @@
 M2 is exposed as a first-class model instead of a J-ECOT ablation flag.  The
 model keeps the HROTFSL implementation backend, but fixes the architectural
 identity to the single-budget episode-calibrated transport module:
-shot-decomposed local measures, one transport budget, threshold-calibrated
-evidence scoring, and episode-calibrated support-shot pooling.
+shot-decomposed local measures, one transport budget, cost-per-mass evidence
+scoring (with detached mass denominator by default), and episode-calibrated
+support-shot pooling.
 """
 
 from __future__ import annotations
@@ -27,4 +28,6 @@ class JECOTM2(HROTFSL):
         kwargs.setdefault("ecot_base_rho", float(rho))
         kwargs.setdefault("ecot_transport_mode", transport_mode)
         kwargs.setdefault("ecot_enable_ccdm_marginal", True)
+        kwargs.setdefault("ecot_m2_cost_per_mass_score", True)
+        kwargs.setdefault("ecot_m2_cost_per_mass_detach_mass", True)
         super().__init__(*args, **kwargs)

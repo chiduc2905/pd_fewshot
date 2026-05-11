@@ -1015,11 +1015,13 @@ def get_args():
     parser.add_argument(
         "--hrot_ecot_m2_cost_per_mass_score",
         type=str,
-        default="false",
+        default="true",
         choices=["true", "false"],
         help=(
             "J_ECOT_M2 only: replace T*m - cost with -alpha * cost / (mass + hrot_eps) "
-            "(average transport cost per unit mass; mutually exclusive with --hrot_ecot_m2_ablate_threshold_mass)."
+            "(average transport cost per unit mass; default true for M2 models; mutually exclusive with "
+            "--hrot_ecot_m2_ablate_threshold_mass). "
+            "Logits are ~1/rho larger in magnitude than T*m-cost for typical rho; consider lowering --hrot_score_scale if softmax saturates."
         ),
     )
     parser.add_argument(
@@ -1027,6 +1029,16 @@ def get_args():
         type=float,
         default=1.0,
         help="J_ECOT_M2 only: alpha in -alpha * transport_cost / (transported_mass + eps) when cost-per-mass scoring is enabled.",
+    )
+    parser.add_argument(
+        "--hrot_ecot_m2_cost_per_mass_detach_mass",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help=(
+            "J_ECOT_M2 only (with cost-per-mass score): use transported_mass.detach() in the denominator so gradients "
+            "do not shrink mass toward eps; default true."
+        ),
     )
     parser.add_argument(
         "--hrot_ecot_identity_reg",
@@ -2722,6 +2734,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_m2_ablate_threshold_mass",
             "hrot_ecot_m2_cost_per_mass_score",
             "hrot_ecot_m2_cost_per_mass_alpha",
+            "hrot_ecot_m2_cost_per_mass_detach_mass",
             "hrot_ecot_identity_reg",
             "hrot_ecot_policy_entropy_reg",
             "hrot_ecot_consensus_tau_mode",

@@ -453,8 +453,9 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_tau_shot_max: float = 2.0,
         ecot_enable_threshold_offset: bool = False,
         ecot_m2_ablate_threshold_mass: bool = False,
-        ecot_m2_cost_per_mass_score: bool = False,
+        ecot_m2_cost_per_mass_score: bool = True,
         ecot_m2_cost_per_mass_alpha: float = 1.0,
+        ecot_m2_cost_per_mass_detach_mass: bool = True,
         ecot_identity_reg: float = 1e-4,
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
@@ -845,6 +846,9 @@ class HROTFSL(BaseConv64FewShotModel):
             )
         if self.ecot_m2_cost_per_mass_score and self.ecot_m2_cost_per_mass_alpha <= 0.0:
             raise ValueError("ecot_m2_cost_per_mass_alpha must be positive when ecot_m2_cost_per_mass_score is enabled")
+        self.ecot_m2_cost_per_mass_detach_mass = (
+            bool(ecot_m2_cost_per_mass_detach_mass) and variant == "J_ECOT_M2"
+        )
         self.ecot_identity_reg = float(ecot_identity_reg)
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
         self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
@@ -2860,10 +2864,15 @@ class HROTFSL(BaseConv64FewShotModel):
         threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
+                mass_denom = (
+                    shot_mass_bank.detach()
+                    if self.ecot_m2_cost_per_mass_detach_mass
+                    else shot_mass_bank
+                )
                 score_terms = (
                     -float(self.ecot_m2_cost_per_mass_alpha)
                     * shot_cost_bank
-                    / (shot_mass_bank + self.eps)
+                    / (mass_denom + self.eps)
                 )
             else:
                 thr = (
