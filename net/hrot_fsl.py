@@ -453,6 +453,8 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_tau_shot_max: float = 2.0,
         ecot_enable_threshold_offset: bool = False,
         ecot_m2_ablate_threshold_mass: bool = False,
+        ecot_m2_cost_per_mass_score: bool = False,
+        ecot_m2_cost_per_mass_alpha: float = 1.0,
         ecot_identity_reg: float = 1e-4,
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
@@ -835,6 +837,14 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_tau_shot_max = float(ecot_tau_shot_max)
         self.ecot_enable_threshold_offset = bool(ecot_enable_threshold_offset)
         self.ecot_m2_ablate_threshold_mass = bool(ecot_m2_ablate_threshold_mass) and variant == "J_ECOT_M2"
+        self.ecot_m2_cost_per_mass_score = bool(ecot_m2_cost_per_mass_score) and variant == "J_ECOT_M2"
+        self.ecot_m2_cost_per_mass_alpha = float(ecot_m2_cost_per_mass_alpha)
+        if self.ecot_m2_ablate_threshold_mass and self.ecot_m2_cost_per_mass_score:
+            raise ValueError(
+                "ecot_m2_ablate_threshold_mass and ecot_m2_cost_per_mass_score are mutually exclusive on J_ECOT_M2"
+            )
+        if self.ecot_m2_cost_per_mass_score and self.ecot_m2_cost_per_mass_alpha <= 0.0:
+            raise ValueError("ecot_m2_cost_per_mass_alpha must be positive when ecot_m2_cost_per_mass_score is enabled")
         self.ecot_identity_reg = float(ecot_identity_reg)
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
         self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
@@ -2849,12 +2859,19 @@ class HROTFSL(BaseConv64FewShotModel):
 
         threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
-            thr = (
-                torch.zeros_like(active_threshold)
-                if self.ecot_m2_ablate_threshold_mass
-                else active_threshold
-            )
-            score_terms = thr * shot_mass_bank - shot_cost_bank
+            if self.ecot_m2_cost_per_mass_score:
+                score_terms = (
+                    -float(self.ecot_m2_cost_per_mass_alpha)
+                    * shot_cost_bank
+                    / (shot_mass_bank + self.eps)
+                )
+            else:
+                thr = (
+                    torch.zeros_like(active_threshold)
+                    if self.ecot_m2_ablate_threshold_mass
+                    else active_threshold
+                )
+                score_terms = thr * shot_mass_bank - shot_cost_bank
             if sink_penalty_bank is not None:
                 score_terms = score_terms - flat_cost.new_tensor(self.ecot_noise_sink_score_penalty) * sink_penalty_bank
             return self.score_scale * score_terms
