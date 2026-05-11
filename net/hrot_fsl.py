@@ -2655,19 +2655,25 @@ class HROTFSL(BaseConv64FewShotModel):
         cost: torch.Tensor,
         swts_temp: float,
         eps: float,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Self-Weighted Transport Score for mass-removed M2 (-C ablation).
 
         plan, cost: same shape with leading batch dims and last two (Lq, Ls).
-        Returns a tensor with the same leading dimensions as ``plan`` minus
-        the final two (one scalar per transport problem in the bank).
+        Returns ``(score_terms, w_entropy_mean)`` where ``score_terms`` has the
+        same leading dimensions as ``plan`` minus the final two, and
+        ``w_entropy_mean`` is a scalar tensor: mean of
+        ``-(w * log(w)).sum(-1)`` over all query/class/shot/budget cells.
         """
         s = (plan * (-cost)).sum(dim=-1)
         q = plan.sum(dim=-1)
         temp = max(float(swts_temp), float(eps))
         w = torch.softmax(q / temp, dim=-1)
         lq = int(plan.shape[-2])
-        return lq * (w * s).sum(dim=-1)
+        score = lq * (w * s).sum(dim=-1)
+        w_c = w.clamp_min(float(eps))
+        w_entropy_cells = -(w * w_c.log()).sum(dim=-1)
+        w_entropy_mean = w_entropy_cells.mean()
+        return score, w_entropy_mean
 
     def _forward_ecot_budget_bank(
         self,
@@ -2903,6 +2909,16 @@ class HROTFSL(BaseConv64FewShotModel):
 
         threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
 
+        swts_pre_score: torch.Tensor | None = None
+        swts_w_entropy_mean: torch.Tensor | None = None
+        if self.ecot_m2_use_swts:
+            swts_pre_score, swts_w_entropy_mean = self._ecot_swts_mass_removed_score_terms(
+                plan_bank,
+                D_bank,
+                self.ecot_m2_swts_temp,
+                self.eps,
+            )
+
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
                 mass_denom = (
@@ -2922,12 +2938,7 @@ class HROTFSL(BaseConv64FewShotModel):
                     else active_threshold
                 )
                 if self.ecot_m2_use_swts:
-                    score_terms = self._ecot_swts_mass_removed_score_terms(
-                        plan_bank,
-                        D_bank,
-                        self.ecot_m2_swts_temp,
-                        self.eps,
-                    )
+                    score_terms = swts_pre_score
                 else:
                     score_terms = thr * shot_mass_bank - shot_cost_bank
             if sink_penalty_bank is not None:
@@ -3057,6 +3068,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_policy_entropy_loss": -self.ecot_policy_entropy_reg * policy_entropy,
             "ecot_aux_loss": ecot_aux_loss,
         }
+        if swts_w_entropy_mean is not None:
+            payload["mean_ecot_m2_swts_w_entropy"] = swts_w_entropy_mean.detach()
         payload.update(crs_payload)
         payload.update(mea_payload)
         payload.update(ccdm_payload)
@@ -4737,6 +4750,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_aux_loss",
             "ecot_lambda_k",
             "ecot_tau_k",
+            "mean_ecot_m2_swts_w_entropy",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

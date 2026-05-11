@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -17,8 +19,18 @@ def test_swts_recovers_neg_cost_when_balanced():
     rho = 0.8
     P = torch.full_like(D, rho / (Lq * Ls))
     C = (P * D).sum(dim=(-2, -1))
-    swts = HROTFSL._ecot_swts_mass_removed_score_terms(P, D, 1.0, 1e-6)
+    swts, _ent = HROTFSL._ecot_swts_mass_removed_score_terms(P, D, 1.0, 1e-6)
     assert torch.allclose(swts, -C, atol=1e-5), "SWTS must equal -C for uniform plan"
+
+
+def test_swts_uniform_plan_w_entropy_is_log_lq():
+    Lq, Ls = 25, 25
+    D = torch.rand(1, 1, 1, 1, Lq, Ls)
+    rho = 0.8
+    P = torch.full_like(D, rho / (Lq * Ls))
+    _score, ent_mean = HROTFSL._ecot_swts_mass_removed_score_terms(P, D, 1.0, 1e-6)
+    expected = math.log(Lq)
+    assert abs(float(ent_mean) - expected) < 1e-4
 
 
 def test_swts_upweights_good_tokens():
@@ -39,7 +51,7 @@ def test_swts_large_temp_matches_neg_cost_random_plan():
     P = P / P.sum(dim=(-2, -1), keepdim=True).clamp_min(1e-9)
     D = torch.rand_like(P)
     C = (P * D).sum(dim=(-2, -1))
-    swts = HROTFSL._ecot_swts_mass_removed_score_terms(P, D, 1e4, 1e-8)
+    swts, _ent = HROTFSL._ecot_swts_mass_removed_score_terms(P, D, 1e4, 1e-8)
     assert torch.allclose(swts, -C, atol=1e-4)
 
 

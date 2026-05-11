@@ -3796,6 +3796,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "ec_mrot_local_budget_entropy",
         "ec_mrot_response_grid_spacing_loss",
         "ec_mrot_aux_loss",
+        "mean_ecot_m2_swts_w_entropy",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
