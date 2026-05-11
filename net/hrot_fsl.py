@@ -452,10 +452,12 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_tau_shot_min: float = 0.5,
         ecot_tau_shot_max: float = 2.0,
         ecot_enable_threshold_offset: bool = False,
-        ecot_m2_ablate_threshold_mass: bool = False,
-        ecot_m2_cost_per_mass_score: bool = True,
+        ecot_m2_ablate_threshold_mass: bool = True,
+        ecot_m2_cost_per_mass_score: bool = False,
         ecot_m2_cost_per_mass_alpha: float = 1.0,
         ecot_m2_cost_per_mass_detach_mass: bool = True,
+        ecot_m2_use_swts: bool = False,
+        ecot_m2_swts_temp: float = 1.0,
         ecot_identity_reg: float = 1e-4,
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
@@ -849,6 +851,21 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_m2_cost_per_mass_detach_mass = (
             bool(ecot_m2_cost_per_mass_detach_mass) and variant == "J_ECOT_M2"
         )
+        if bool(ecot_m2_use_swts) and variant == "J_ECOT_M2":
+            if float(ecot_m2_swts_temp) <= 0.0:
+                raise ValueError("ecot_m2_swts_temp must be positive when ecot_m2_use_swts is enabled.")
+            if not self.ecot_m2_ablate_threshold_mass or self.ecot_m2_cost_per_mass_score:
+                raise ValueError(
+                    "ecot_m2_use_swts is only supported on J_ECOT_M2 with ecot_m2_ablate_threshold_mass=True "
+                    "and ecot_m2_cost_per_mass_score=False."
+                )
+        self.ecot_m2_use_swts = (
+            bool(ecot_m2_use_swts)
+            and variant == "J_ECOT_M2"
+            and self.ecot_m2_ablate_threshold_mass
+            and not self.ecot_m2_cost_per_mass_score
+        )
+        self.ecot_m2_swts_temp = float(ecot_m2_swts_temp)
         self.ecot_identity_reg = float(ecot_identity_reg)
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
         self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
@@ -2632,6 +2649,26 @@ class HROTFSL(BaseConv64FewShotModel):
         }
         return support_weight.to(dtype=support_tokens.dtype), payload
 
+    @staticmethod
+    def _ecot_swts_mass_removed_score_terms(
+        plan: torch.Tensor,
+        cost: torch.Tensor,
+        swts_temp: float,
+        eps: float,
+    ) -> torch.Tensor:
+        """Self-Weighted Transport Score for mass-removed M2 (-C ablation).
+
+        plan, cost: same shape with leading batch dims and last two (Lq, Ls).
+        Returns a tensor with the same leading dimensions as ``plan`` minus
+        the final two (one scalar per transport problem in the bank).
+        """
+        s = (plan * (-cost)).sum(dim=-1)
+        q = plan.sum(dim=-1)
+        temp = max(float(swts_temp), float(eps))
+        w = torch.softmax(q / temp, dim=-1)
+        lq = int(plan.shape[-2])
+        return lq * (w * s).sum(dim=-1)
+
     def _forward_ecot_budget_bank(
         self,
         flat_cost: torch.Tensor,
@@ -2842,6 +2879,9 @@ class HROTFSL(BaseConv64FewShotModel):
         plan_bank = plan_bank.reshape(num_query, way_num, shot_num, budget_count, query_len, support_len)
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
+        D_bank = flat_cost.view(num_query, way_num, shot_num, 1, query_len, support_len).expand(
+            -1, -1, -1, budget_count, -1, -1
+        )
         noise_query_mass_bank = (
             None
             if noise_query_mass is None
@@ -2862,6 +2902,7 @@ class HROTFSL(BaseConv64FewShotModel):
             sink_penalty_bank = 0.5 * (noise_query_mass_bank + noise_support_mass_bank)
 
         threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
                 mass_denom = (
@@ -2880,7 +2921,15 @@ class HROTFSL(BaseConv64FewShotModel):
                     if self.ecot_m2_ablate_threshold_mass
                     else active_threshold
                 )
-                score_terms = thr * shot_mass_bank - shot_cost_bank
+                if self.ecot_m2_use_swts:
+                    score_terms = self._ecot_swts_mass_removed_score_terms(
+                        plan_bank,
+                        D_bank,
+                        self.ecot_m2_swts_temp,
+                        self.eps,
+                    )
+                else:
+                    score_terms = thr * shot_mass_bank - shot_cost_bank
             if sink_penalty_bank is not None:
                 score_terms = score_terms - flat_cost.new_tensor(self.ecot_noise_sink_score_penalty) * sink_penalty_bank
             return self.score_scale * score_terms

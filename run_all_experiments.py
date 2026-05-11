@@ -150,9 +150,9 @@ def get_args():
     parser.add_argument(
         "--m2_ablate_T",
         type=str,
-        default="false",
+        default="true",
         choices=["true", "false"],
-        help="M2 only: forwards --hrot_ecot_m2_ablate_threshold_mass true (drops T * mass in ECOT score).",
+        help="M2 only: forwards --hrot_ecot_m2_ablate_threshold_mass (drops T * mass); default true.",
     )
     parser.add_argument(
         "--m2_cost_per_mass",
@@ -162,17 +162,31 @@ def get_args():
         help="M2 only: forwards --hrot_ecot_m2_cost_per_mass_score true (cost/mass score; mutually exclusive with m2_ablate_T).",
     )
     args, passthrough_args = parser.parse_known_args()
-    args.passthrough_args = passthrough_args
-    if str(getattr(args, "m2_ablate_T", "false")).lower() == "true":
-        args.passthrough_args = list(args.passthrough_args) + [
-            "--hrot_ecot_m2_ablate_threshold_mass",
-            "true",
-        ]
-    if str(getattr(args, "m2_cost_per_mass", "false")).lower() == "true":
-        args.passthrough_args = list(args.passthrough_args) + [
+    extra = list(passthrough_args)
+    ablate_t = str(getattr(args, "m2_ablate_T", "true")).lower() == "true"
+    cost_pm = str(getattr(args, "m2_cost_per_mass", "false")).lower() == "true"
+    if cost_pm:
+        extra += [
             "--hrot_ecot_m2_cost_per_mass_score",
             "true",
+            "--hrot_ecot_m2_ablate_threshold_mass",
+            "false",
         ]
+    elif ablate_t:
+        extra += [
+            "--hrot_ecot_m2_ablate_threshold_mass",
+            "true",
+            "--hrot_ecot_m2_cost_per_mass_score",
+            "false",
+        ]
+    else:
+        extra += [
+            "--hrot_ecot_m2_ablate_threshold_mass",
+            "false",
+            "--hrot_ecot_m2_cost_per_mass_score",
+            "false",
+        ]
+    args.passthrough_args = extra
     return args
 
 

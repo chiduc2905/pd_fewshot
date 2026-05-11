@@ -1184,6 +1184,7 @@ def test_hrot_fsl_crs_disabled_matches_original_m2():
         ecot_rho_bank="0.80",
         ecot_base_rho=0.80,
         sinkhorn_iterations=8,
+        ecot_m2_ablate_threshold_mass=False,
         ecot_m2_cost_per_mass_score=False,
     )
     disabled_model = _build_model(
@@ -1446,6 +1447,7 @@ def test_hrot_fsl_variant_j_ecot_care_disabled_matches_m2():
         ecot_rho_bank="0.80",
         ecot_base_rho=0.80,
         sinkhorn_iterations=8,
+        ecot_m2_ablate_threshold_mass=False,
         ecot_m2_cost_per_mass_score=False,
     )
     care_model = _build_model(

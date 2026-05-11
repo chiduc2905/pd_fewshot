@@ -1008,19 +1008,19 @@ def get_args():
         "--hrot_ecot_m2_ablate_threshold_mass",
         "--m2_ablate_T",
         type=str,
-        default="false",
+        default="true",
         choices=["true", "false"],
-        help="J_ECOT_M2 only: score uses -transport_cost only (zeros the T * mass term).",
+        help="J_ECOT_M2 only: score uses -transport_cost only (zeros the T * mass term); default on.",
     )
     parser.add_argument(
         "--hrot_ecot_m2_cost_per_mass_score",
         type=str,
-        default="true",
+        default="false",
         choices=["true", "false"],
         help=(
             "J_ECOT_M2 only: replace T*m - cost with -alpha * cost / (mass + hrot_eps) "
-            "(average transport cost per unit mass; default true for M2 models; mutually exclusive with "
-            "--hrot_ecot_m2_ablate_threshold_mass). "
+            "(average transport cost per unit mass; default off; requires --hrot_ecot_m2_ablate_threshold_mass false; "
+            "mutually exclusive with --hrot_ecot_m2_ablate_threshold_mass). "
             "Logits are ~1/rho larger in magnitude than T*m-cost for typical rho; consider lowering --hrot_score_scale if softmax saturates."
         ),
     )
@@ -1039,6 +1039,22 @@ def get_args():
             "J_ECOT_M2 only (with cost-per-mass score): use transported_mass.detach() in the denominator so gradients "
             "do not shrink mass toward eps; default true."
         ),
+    )
+    parser.add_argument(
+        "--hrot_ecot_m2_use_swts",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "J_ECOT_M2 mass-removed score only: Self-Weighted Transport Score from transport plan P and cost D "
+            "(requires ablate T*m and not cost-per-mass)."
+        ),
+    )
+    parser.add_argument(
+        "--hrot_ecot_m2_swts_temp",
+        type=float,
+        default=1.0,
+        help="J_ECOT_M2 SWTS: softmax temperature over query marginals q(r); large values recover uniform weights (~ -C).",
     )
     parser.add_argument(
         "--hrot_ecot_identity_reg",
@@ -1238,7 +1254,8 @@ def get_args():
         metavar="T0",
         help=(
             "Initial learned transport cost threshold T (positive). Used by HROT variants with cost-threshold "
-            "scoring, including J-ECOT-M2 (T enters score as T*m - cost unless --hrot_ecot_m2_cost_per_mass_score). "
+            "scoring, including J-ECOT-M2 (default: T*m term ablated unless --hrot_ecot_m2_ablate_threshold_mass false; "
+            "cost/mass score via --hrot_ecot_m2_cost_per_mass_score true). "
             "Stored as softplus(raw). "
             "If omitted, T0 = hrot_mass_bonus_init / hrot_score_scale (defaults 1.0/16 ≈ 0.0625)."
         ),
@@ -2735,6 +2752,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_m2_cost_per_mass_score",
             "hrot_ecot_m2_cost_per_mass_alpha",
             "hrot_ecot_m2_cost_per_mass_detach_mass",
+            "hrot_ecot_m2_use_swts",
+            "hrot_ecot_m2_swts_temp",
             "hrot_ecot_identity_reg",
             "hrot_ecot_policy_entropy_reg",
             "hrot_ecot_consensus_tau_mode",
