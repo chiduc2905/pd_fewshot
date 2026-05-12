@@ -36,8 +36,10 @@ from function.function import (
 )
 from net.model_factory import (
     HROT_FSL_MODEL_NAMES,
+    M2_LIKE_MODEL_NAMES,
     M2_FULL_OT_MODEL_NAMES,
     M2_MODEL_NAMES,
+    OURS_MODEL_NAMES,
     build_model_from_args,
     get_model_choices,
     get_model_metadata,
@@ -1071,6 +1073,18 @@ def get_args():
         type=float,
         default=1.0,
         help="J_ECOT_M2 AQM: softmax temperature; large values recover uniform query marginal (same as AQM off).",
+    )
+    parser.add_argument(
+        "--ours_ablation",
+        type=str,
+        default="full",
+        choices=["full", "balanced_ot", "uniform_evidence", "prototype"],
+        help=(
+            "Ours only: contribution ablation selector. full=UOT+AQM+SWTS, "
+            "balanced_ot=replaces UOT with full balanced OT, "
+            "uniform_evidence removes adaptive evidence calibration, "
+            "prototype replaces token transport with global prototypes."
+        ),
     )
     parser.add_argument(
         "--hrot_ecot_identity_reg",
@@ -2297,9 +2311,9 @@ def get_model(args):
         hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
             getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
         )
-        hrot_variant = "J_ECOT_M2" if args.model in M2_MODEL_NAMES else getattr(args, "hrot_variant", "E")
+        hrot_variant = "J_ECOT_M2" if args.model in M2_LIKE_MODEL_NAMES else getattr(args, "hrot_variant", "E")
         hrot_ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
-        if args.model in M2_MODEL_NAMES and hrot_ecot_rho_bank is None:
+        if args.model in M2_LIKE_MODEL_NAMES and hrot_ecot_rho_bank is None:
             hrot_ecot_rho_bank = "1.0" if args.model in M2_FULL_OT_MODEL_NAMES else "0.80"
         if hrot_ecot_rho_bank is None:
             normalized_hrot_variant = str(hrot_variant).strip().upper().replace("-", "").replace("_", "")
@@ -2319,15 +2333,21 @@ def get_model(args):
             else:
                 hrot_ecot_rho_bank = "0.45,0.60,0.75,0.80,0.90"
         hrot_ecot_base_rho = getattr(args, "hrot_ecot_base_rho", None)
-        if args.model in M2_MODEL_NAMES and hrot_ecot_base_rho is None:
+        if args.model in M2_LIKE_MODEL_NAMES and hrot_ecot_base_rho is None:
             hrot_ecot_base_rho = 1.0 if args.model in M2_FULL_OT_MODEL_NAMES else 0.80
         ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
         if ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if args.model in M2_FULL_OT_MODEL_NAMES else "unbalanced"
-        hrot_label = "m2" if args.model in M2_MODEL_NAMES else "hrot_fsl"
+        if args.model in OURS_MODEL_NAMES:
+            ours_ablation = str(getattr(args, "ours_ablation", "full"))
+            if ours_ablation == "balanced_ot":
+                hrot_ecot_rho_bank = "1.0"
+                hrot_ecot_base_rho = 1.0
+                ecot_transport_mode = "balanced"
+        hrot_label = "ours" if args.model in OURS_MODEL_NAMES else ("m2" if args.model in M2_MODEL_NAMES else "hrot_fsl")
         hrot_path_text = (
             "shot-decomposed single-budget episode-calibrated transport "
-            if args.model in M2_MODEL_NAMES
+            if args.model in M2_LIKE_MODEL_NAMES
             else "Poincare-ball geometry -> balanced/unbalanced relational transport "
         )
         print(
@@ -2411,6 +2431,19 @@ def get_model(args):
             f"compact_eam_prior_mix={getattr(args, 'hrot_compact_eam_prior_mix', 0.5)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
+        if args.model in OURS_MODEL_NAMES:
+            ours_ablation = str(getattr(args, "ours_ablation", "full"))
+            evidence_text = "uniform evidence" if ours_ablation == "uniform_evidence" else "AQM(tau=2)+SWTS(tau=2)"
+            transport_text = "balanced full OT(rho=1.0)" if ours_ablation == "balanced_ot" else "UOT(rho=0.8)"
+            if ours_ablation == "prototype":
+                transport_text = "global prototype control"
+                evidence_text = "no token transport"
+            print(
+                "  ours_design: "
+                f"ablation={ours_ablation}, "
+                f"active_design={transport_text}+{evidence_text}, "
+                "full_defaults=UOT(rho=0.8)+AQM(tau=2)+SWTS(tau=2)"
+            )
     if args.model == "ec_mrot":
         hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
         hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
@@ -2922,7 +2955,7 @@ def maybe_autoconfigure_hrot_from_checkpoint(args):
 
 
 def apply_standalone_m2_defaults(args):
-    if getattr(args, "model", None) not in M2_MODEL_NAMES:
+    if getattr(args, "model", None) not in M2_LIKE_MODEL_NAMES:
         return args
     full_ot = args.model in M2_FULL_OT_MODEL_NAMES
     default_rho = 1.0 if full_ot else 0.80
@@ -4318,7 +4351,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         "train_loss": [],
         "val_loss": [],
     }
-    if args.model in M2_MODEL_NAMES:
+    if args.model in M2_LIKE_MODEL_NAMES:
         history["m2_transport_cost_threshold"] = []
     best_acc = 0.0
     start_epoch = 1
@@ -4344,7 +4377,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         load_model_weights(net, args.weights, args.device)
         print(f"Initialized model weights from {args.weights}")
 
-    if args.model in M2_MODEL_NAMES:
+    if args.model in M2_LIKE_MODEL_NAMES:
         history.setdefault("m2_transport_cost_threshold", [])
 
     selection_split, selection_episode_num, selection_query_num = get_selection_protocol(args)
@@ -4497,7 +4530,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
             selection_loader,
             args,
             phase=selection_split,
-            m2_aux_out=m2_val_aux if args.model in M2_MODEL_NAMES else None,
+            m2_aux_out=m2_val_aux if args.model in M2_LIKE_MODEL_NAMES else None,
         )
         avg_loss = total_loss / len(train_loader)
 
@@ -4505,7 +4538,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         history["val_acc"].append(selection_acc)
         history["train_loss"].append(avg_loss)
         history["val_loss"].append(selection_loss if selection_loss else 0.0)
-        if args.model in M2_MODEL_NAMES:
+        if args.model in M2_LIKE_MODEL_NAMES:
             t_cur = m2_val_aux.get("transport_cost_threshold")
             history["m2_transport_cost_threshold"].append(
                 float(t_cur) if t_cur is not None and np.isfinite(t_cur) else float("nan")
@@ -4534,7 +4567,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
         wandb_payload[f"train_{selection_split}_gap"] = train_selection_gap
         wandb_payload.update(prefix_diagnostics(train_diag, "diag/train_"))
         wandb_payload.update(prefix_diagnostics(selection_diag, f"diag/{selection_split}_"))
-        if args.model in M2_MODEL_NAMES:
+        if args.model in M2_LIKE_MODEL_NAMES:
             thr = m2_val_aux.get("transport_cost_threshold")
             if thr is not None and np.isfinite(thr):
                 wandb_payload["jecot_m2/transport_cost_threshold"] = float(thr)
@@ -4591,7 +4624,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
             wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
     except RuntimeError as exc:
         print(f"Skipping training curves: {exc}")
-    if args.model in M2_MODEL_NAMES and history.get("m2_transport_cost_threshold"):
+    if args.model in M2_LIKE_MODEL_NAMES and history.get("m2_transport_cost_threshold"):
         t_path = f"{curves_path}_m2_threshold.png"
         try:
             save_jecot_m2_threshold_curve(
@@ -4618,7 +4651,7 @@ def evaluate(net, loader, args, phase="val", m2_aux_out: dict | None = None):
     num_batches = 0
     diag_sums = defaultdict(float)
     non_blocking = _pin_memory_enabled(args) and device.type == "cuda"
-    m2_active = args.model in M2_MODEL_NAMES
+    m2_active = args.model in M2_LIKE_MODEL_NAMES
     m2_acc = init_jecot_m2_validation_accumulator() if m2_active else None
     m2_eps = _jecot_m2_transport_eps(net) if m2_active else 1e-8
     m2_csv_path = str(getattr(args, "jecot_m2_val_query_csv", "") or "").strip()

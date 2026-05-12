@@ -59,10 +59,12 @@ def _load_symbols(module_name, *symbol_names):
 M2_MODEL_NAMES = frozenset(
     {"m2", "m2_uot", "m2_full_ot", "jecot_m2", "jecot_m2_uot", "jecot_m2_full_ot"}
 )
+OURS_MODEL_NAMES = frozenset({"ours"})
+M2_LIKE_MODEL_NAMES = frozenset(set(M2_MODEL_NAMES) | set(OURS_MODEL_NAMES))
 # Registry name for the single canonical SB-ECOT entrypoint (aliases share the same class but different CLI defaults).
 CANONICAL_M2_MODEL_NAME = "m2"
 M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
-HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_MODEL_NAMES))
+HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES))
 
 
 MODEL_REGISTRY = {
@@ -407,6 +409,12 @@ MODEL_REGISTRY = {
         "paper_name": "Single-Budget Episode-Calibrated Optimal Transport",
         "architecture": "Alias for the M2 balanced full-mass OT counterfactual at rho=1.0",
         "metric": "Single-Budget Episode-Calibrated Balanced OT",
+    },
+    "ours": {
+        "display_name": "Ours",
+        "paper_name": "Ours",
+        "architecture": "Backbone spatial tokens -> single-budget UOT -> adaptive query marginals and self-weighted transport score (tau=2) -> episode-calibrated shot pooling; contribution ablations swap transport relaxation, evidence calibration, or token transport for a prototype control",
+        "metric": "Adaptive Evidence-Calibrated Token UOT",
     },
     "ec_mrot": {
         "display_name": "EC-MROT",
@@ -2257,9 +2265,14 @@ def build_model_from_args(args):
             crj_clip_logit=float(getattr(args, "crj_clip_logit", 0.0)),
         )
     if args.model in HROT_FSL_MODEL_NAMES:
+        is_ours_model = args.model in OURS_MODEL_NAMES
         is_m2_model = args.model in M2_MODEL_NAMES
+        is_m2_like_model = args.model in M2_LIKE_MODEL_NAMES
         is_m2_full_ot = args.model in M2_FULL_OT_MODEL_NAMES
         HROTFSL = (
+            _load_symbol("net.ours", "OursM2")
+            if is_ours_model
+            else
             _load_symbol("net.jecot_m2", "JECOTM2")
             if is_m2_model
             else _load_symbol("net.hrot_fsl", "HROTFSL")
@@ -2268,12 +2281,12 @@ def build_model_from_args(args):
         m2_default_rho = 1.0 if is_m2_full_ot else 0.80
         ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
         ecot_base_rho = getattr(args, "hrot_ecot_base_rho", None)
-        if is_m2_model and ecot_rho_bank is None:
+        if is_m2_like_model and ecot_rho_bank is None:
             ecot_rho_bank = f"{m2_default_rho:.6g}"
-        if is_m2_model and ecot_base_rho is None:
+        if is_m2_like_model and ecot_base_rho is None:
             ecot_base_rho = m2_default_rho
         ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
-        if ecot_transport_mode is None:
+        if is_m2_like_model and ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if is_m2_full_ot else "unbalanced"
         return HROTFSL(
             in_channels=3,
@@ -2287,7 +2300,8 @@ def build_model_from_args(args):
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
-            variant="J_ECOT_M2" if is_m2_model else str(getattr(args, "hrot_variant", "E")),
+            variant="J_ECOT_M2" if is_m2_like_model else str(getattr(args, "hrot_variant", "E")),
+            **({"ours_ablation": str(getattr(args, "ours_ablation", "full"))} if is_ours_model else {}),
             eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
             curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
             projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),
@@ -2337,8 +2351,8 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_ablate_threshold_mass=_bool_flag(
-                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "true" if is_m2_model else "false"),
-                default=is_m2_model,
+                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "true" if is_m2_like_model else "false"),
+                default=is_m2_like_model,
             ),
             ecot_m2_cost_per_mass_score=_bool_flag(
                 getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"),
@@ -2350,10 +2364,16 @@ def build_model_from_args(args):
                 if getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", None) is None
                 else _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass"), default=False)
             ),
-            ecot_m2_use_swts=_bool_flag(getattr(args, "hrot_ecot_m2_use_swts", "false"), default=False),
-            ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 1.0)),
-            ecot_m2_use_aqm=_bool_flag(getattr(args, "hrot_ecot_m2_use_aqm", "false"), default=False),
-            ecot_m2_tau_aqm=float(getattr(args, "hrot_ecot_m2_tau_aqm", 1.0)),
+            ecot_m2_use_swts=_bool_flag(
+                getattr(args, "hrot_ecot_m2_use_swts", "true" if is_ours_model else "false"),
+                default=is_ours_model,
+            ),
+            ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 2.0 if is_ours_model else 1.0)),
+            ecot_m2_use_aqm=_bool_flag(
+                getattr(args, "hrot_ecot_m2_use_aqm", "true" if is_ours_model else "false"),
+                default=is_ours_model,
+            ),
+            ecot_m2_tau_aqm=float(getattr(args, "hrot_ecot_m2_tau_aqm", 2.0 if is_ours_model else 1.0)),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),

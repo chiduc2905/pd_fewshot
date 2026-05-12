@@ -289,6 +289,73 @@ def test_m2_model_factory_exposes_uot_and_full_ot_as_standalone_models():
     assert not m2_full_ot.uses_unbalanced_transport
 
 
+def test_ours_model_factory_exposes_full_design_and_contribution_ablation_controls():
+    base_args = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=16,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=6,
+        hrot_sinkhorn_tolerance=1e-5,
+    )
+
+    full = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="full", **base_args))
+    assert full.variant == "J_ECOT_M2"
+    assert full.ours_ablation == "full"
+    assert full.ecot_rho_bank == (0.8,)
+    assert full.ecot_base_rho == 0.8
+    assert full.ecot_transport_mode == "unbalanced"
+    assert full.uses_unbalanced_transport
+    assert full.ecot_m2_use_aqm
+    assert full.ecot_m2_tau_aqm == 2.0
+    assert full.ecot_m2_use_swts
+    assert full.ecot_m2_swts_temp == 2.0
+
+    balanced = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="balanced_ot", **base_args))
+    assert balanced.ecot_rho_bank == (1.0,)
+    assert balanced.ecot_base_rho == 1.0
+    assert balanced.ecot_transport_mode == "balanced"
+    assert not balanced.uses_unbalanced_transport
+    assert balanced.ecot_m2_use_aqm
+    assert balanced.ecot_m2_use_swts
+
+    uniform = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="uniform_evidence", **base_args))
+    assert uniform.ecot_transport_mode == "unbalanced"
+    assert uniform.uses_unbalanced_transport
+    assert not uniform.ecot_m2_use_aqm
+    assert not uniform.ecot_m2_use_swts
+
+
+def test_ours_prototype_ablation_forward_uses_global_prototype_control():
+    torch.manual_seed(390)
+    model = build_model_from_args(
+        SimpleNamespace(
+            model="ours",
+            ours_ablation="prototype",
+            device="cpu",
+            image_size=64,
+            fewshot_backbone="conv64f",
+            hrot_token_dim=16,
+            hrot_eam_hidden_dim=16,
+            hrot_sinkhorn_iterations=4,
+            hrot_sinkhorn_tolerance=1e-5,
+        )
+    )
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["prototype_distance"].shape == (2, 3)
+    assert outputs["prototype_control"].item() == 1.0
+    assert "transport_plan" not in outputs
+
+
 def test_m2_full_ot_forward_uses_balanced_full_mass_transport():
     torch.manual_seed(39)
     model = _build_model(

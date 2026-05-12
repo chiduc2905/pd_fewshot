@@ -148,6 +148,13 @@ def get_args():
         help="Expand SPIFCE contribution ablations with tagged runs",
     )
     parser.add_argument(
+        "--ours_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "contrib"],
+        help="Expand Ours contribution ablations with tagged runs",
+    )
+    parser.add_argument(
         "--m2_ablate_T",
         type=str,
         default="true",
@@ -221,6 +228,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "pars_net",
     "hrot_fsl",
     "m2",
+    "ours",
     "m2_uot",
     "m2_full_ot",
     "jecot_m2",
@@ -522,6 +530,31 @@ def build_spifce_ablation_variants(suite_name):
                 "--spif_local_only",
                 "true",
             ],
+        },
+    ]
+
+
+def build_ours_ablation_variants():
+    return [
+        {
+            "tag": "ours_full",
+            "label": "Full Ours",
+            "extra_args": ["--ours_ablation", "full"],
+        },
+        {
+            "tag": "ours_balanced_ot",
+            "label": "Balanced full OT instead of UOT",
+            "extra_args": ["--ours_ablation", "balanced_ot"],
+        },
+        {
+            "tag": "ours_uniform_evidence",
+            "label": "Uniform evidence instead of adaptive evidence calibration",
+            "extra_args": ["--ours_ablation", "uniform_evidence"],
+        },
+        {
+            "tag": "ours_prototype",
+            "label": "Global prototype control instead of token transport",
+            "extra_args": ["--ours_ablation", "prototype"],
         },
     ]
 
@@ -881,7 +914,80 @@ def main():
     os.makedirs("results", exist_ok=True)
     log_cli_command(args)
 
-    if args.spifce_ablation_suite != "none":
+    if args.spifce_ablation_suite != "none" and args.ours_ablation_suite != "none":
+        raise ValueError("Use only one ablation suite at a time: --spifce_ablation_suite or --ours_ablation_suite.")
+
+    if args.ours_ablation_suite != "none":
+        if requested_models != ["ours"]:
+            raise ValueError(
+                "`--ours_ablation_suite` currently supports only `--models ours` "
+                f"(got {requested_models})"
+            )
+        ablation_variants = build_ours_ablation_variants()
+        samples_list = (
+            [EXPERIMENT_MODES[args.mode_id]]
+            if args.mode_id is not None
+            else ([EXPERIMENT_MODES[mid] for mid in parsed_mode_ids] if parsed_mode_ids else SAMPLES_LIST)
+        )
+        experiments = [
+            {
+                "model": "ours",
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "experiment_label": variant["label"],
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - Ours Contribution Ablation Suite")
+        print("=" * 72)
+        if args.mode_id is None:
+            print("Mode Mapping:")
+            for mode_id, sample_count in EXPERIMENT_MODES.items():
+                print(f"  Mode {mode_id}: {sample_count if sample_count else 'All'} samples")
+        else:
+            samples = EXPERIMENT_MODES[args.mode_id]
+            print(f"Mode        : {args.mode_id} ({samples if samples else 'All'} samples)")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.ours_ablation_suite}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            print(f"  - {variant['tag']}: {variant['label']}")
+        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(f"Test Seed   : final_test_seed={args.final_test_seed}")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
+            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
+            "augment=off, masks=off, Ours full=UOT(rho=0.8)+AQM(tau=2)+SWTS(tau=2), "
+            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
+            f"train SFC={DEEPEMD_5SHOT_TRAIN_SFC}, "
+            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
+            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, "
+            f"test exact={DEEPEMD_5SHOT_TEST_EXACT}, test SFC={DEEPEMD_5SHOT_TEST_SFC}"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print("=" * 72)
+    elif args.spifce_ablation_suite != "none":
         if requested_models != ["spifce"]:
             raise ValueError(
                 "`--spifce_ablation_suite` currently supports only `--models spifce` "
