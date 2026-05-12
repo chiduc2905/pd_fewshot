@@ -30,5 +30,5 @@ class JECOTM2(HROTFSL):
         kwargs.setdefault("ecot_enable_ccdm_marginal", True)
         kwargs.setdefault("ecot_m2_ablate_threshold_mass", True)
         kwargs.setdefault("ecot_m2_cost_per_mass_score", False)
-        kwargs.setdefault("ecot_m2_cost_per_mass_detach_mass", True)
+        kwargs.setdefault("ecot_m2_cost_per_mass_detach_mass", False)
         super().__init__(*args, **kwargs)

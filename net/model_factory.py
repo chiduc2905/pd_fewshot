@@ -59,6 +59,8 @@ def _load_symbols(module_name, *symbol_names):
 M2_MODEL_NAMES = frozenset(
     {"m2", "m2_uot", "m2_full_ot", "jecot_m2", "jecot_m2_uot", "jecot_m2_full_ot"}
 )
+# Registry name for the single canonical SB-ECOT entrypoint (aliases share the same class but different CLI defaults).
+CANONICAL_M2_MODEL_NAME = "m2"
 M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
 HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_MODEL_NAMES))
 
@@ -2343,9 +2345,10 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_cost_per_mass_alpha=float(getattr(args, "hrot_ecot_m2_cost_per_mass_alpha", 1.0)),
-            ecot_m2_cost_per_mass_detach_mass=_bool_flag(
-                getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", "true"),
-                default=True,
+            ecot_m2_cost_per_mass_detach_mass=(
+                (False if getattr(args, "model", None) == CANONICAL_M2_MODEL_NAME else True)
+                if getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", None) is None
+                else _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass"), default=False)
             ),
             ecot_m2_use_swts=_bool_flag(getattr(args, "hrot_ecot_m2_use_swts", "false"), default=False),
             ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 1.0)),
@@ -2577,9 +2580,10 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_cost_per_mass_alpha=float(getattr(args, "hrot_ecot_m2_cost_per_mass_alpha", 1.0)),
-            ecot_m2_cost_per_mass_detach_mass=_bool_flag(
-                getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", "true"),
-                default=True,
+            ecot_m2_cost_per_mass_detach_mass=(
+                True
+                if getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", None) is None
+                else _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass"), default=True)
             ),
             ecot_m2_use_swts=_bool_flag(getattr(args, "hrot_ecot_m2_use_swts", "false"), default=False),
             ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 1.0)),

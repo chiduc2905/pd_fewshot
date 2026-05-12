@@ -1033,11 +1033,11 @@ def get_args():
     parser.add_argument(
         "--hrot_ecot_m2_cost_per_mass_detach_mass",
         type=str,
-        default="true",
+        default=argparse.SUPPRESS,
         choices=["true", "false"],
         help=(
-            "J_ECOT_M2 only (with cost-per-mass score): use transported_mass.detach() in the denominator so gradients "
-            "do not shrink mass toward eps; default true."
+            "J_ECOT_M2 only (with cost-per-mass score): if true, use transported_mass.detach() in the denominator. "
+            "Omit this flag for defaults: `--model m2` only defaults to false (no detach); any other model name defaults to true."
         ),
     )
     parser.add_argument(
