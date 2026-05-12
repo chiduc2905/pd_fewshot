@@ -458,6 +458,8 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_m2_cost_per_mass_detach_mass: bool = True,
         ecot_m2_use_swts: bool = False,
         ecot_m2_swts_temp: float = 1.0,
+        ecot_m2_use_aqm: bool = False,
+        ecot_m2_tau_aqm: float = 1.0,
         ecot_identity_reg: float = 1e-4,
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
@@ -866,6 +868,11 @@ class HROTFSL(BaseConv64FewShotModel):
             and not self.ecot_m2_cost_per_mass_score
         )
         self.ecot_m2_swts_temp = float(ecot_m2_swts_temp)
+        if bool(ecot_m2_use_aqm) and variant == "J_ECOT_M2":
+            if float(ecot_m2_tau_aqm) <= 0.0:
+                raise ValueError("ecot_m2_tau_aqm must be positive when ecot_m2_use_aqm is enabled.")
+        self.ecot_m2_use_aqm = bool(ecot_m2_use_aqm) and variant == "J_ECOT_M2"
+        self.ecot_m2_tau_aqm = float(ecot_m2_tau_aqm)
         self.ecot_identity_reg = float(ecot_identity_reg)
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
         self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
@@ -2706,6 +2713,7 @@ class HROTFSL(BaseConv64FewShotModel):
         rho_bank_flat = rho_bank_flat.reshape(num_query, num_pairs * budget_count)
 
         transport_kwargs: dict[str, torch.Tensor] = {}
+        mean_aqm_a_entropy: torch.Tensor | None = None
         crs_payload: dict[str, torch.Tensor] = {}
         mea_payload: dict[str, torch.Tensor] = {}
         ccdm_payload: dict[str, torch.Tensor] = {}
@@ -2833,6 +2841,14 @@ class HROTFSL(BaseConv64FewShotModel):
                 )
                 a_bank = a_bank * rho_bank.view(1, 1, budget_count, 1)
                 transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+
+        if self.ecot_m2_use_aqm and "a" not in transport_kwargs:
+            sim_max = (-cost_bank).max(dim=-1).values
+            tau_aqm = max(float(self.ecot_m2_tau_aqm), float(self.eps))
+            a_aqm = rho_bank_flat.unsqueeze(-1) * F.softmax(sim_max / tau_aqm, dim=-1)
+            transport_kwargs["a"] = a_aqm
+            a_norm = a_aqm / a_aqm.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            mean_aqm_a_entropy = -(a_norm * a_norm.clamp_min(self.eps).log()).sum(dim=-1).mean()
 
         noise_query_mass = None
         noise_support_mass = None
@@ -3070,6 +3086,8 @@ class HROTFSL(BaseConv64FewShotModel):
         }
         if swts_w_entropy_mean is not None:
             payload["mean_ecot_m2_swts_w_entropy"] = swts_w_entropy_mean.detach()
+        if mean_aqm_a_entropy is not None:
+            payload["mean_aqm_a_entropy"] = mean_aqm_a_entropy.detach()
         payload.update(crs_payload)
         payload.update(mea_payload)
         payload.update(ccdm_payload)
@@ -4751,6 +4769,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_lambda_k",
             "ecot_tau_k",
             "mean_ecot_m2_swts_w_entropy",
+            "mean_aqm_a_entropy",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

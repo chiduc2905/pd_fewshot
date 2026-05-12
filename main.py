@@ -1057,6 +1057,22 @@ def get_args():
         help="J_ECOT_M2 SWTS: softmax temperature over query marginals q(r); large values recover uniform weights (~ -C).",
     )
     parser.add_argument(
+        "--hrot_ecot_m2_use_aqm",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "J_ECOT_M2 only: Adaptive Query Marginals — non-uniform query marginal a from per-token max similarity "
+            "to support when no explicit query marginal (MEA/CCDM/QESM/CRS-query) is used."
+        ),
+    )
+    parser.add_argument(
+        "--hrot_ecot_m2_tau_aqm",
+        type=float,
+        default=1.0,
+        help="J_ECOT_M2 AQM: softmax temperature; large values recover uniform query marginal (same as AQM off).",
+    )
+    parser.add_argument(
         "--hrot_ecot_identity_reg",
         "--ecot_identity_reg",
         dest="hrot_ecot_identity_reg",
@@ -2754,6 +2770,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_m2_cost_per_mass_detach_mass",
             "hrot_ecot_m2_use_swts",
             "hrot_ecot_m2_swts_temp",
+            "hrot_ecot_m2_use_aqm",
+            "hrot_ecot_m2_tau_aqm",
             "hrot_ecot_identity_reg",
             "hrot_ecot_policy_entropy_reg",
             "hrot_ecot_consensus_tau_mode",
@@ -3797,6 +3815,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "ec_mrot_response_grid_spacing_loss",
         "ec_mrot_aux_loss",
         "mean_ecot_m2_swts_w_entropy",
+        "mean_aqm_a_entropy",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))

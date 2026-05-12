@@ -1004,6 +1004,57 @@ def test_hrot_fsl_variant_j_ecot_m2_defaults_to_single_base_budget():
     assert model.ecot_base_idx == 0
 
 
+def test_ecot_m2_aqm_marginal_large_tau_matches_uniform():
+    """Large tau_aqm recovers uniform per-row mass rho/Lq (same as AQM off)."""
+    torch.manual_seed(7)
+    nq, pairs, lq, ls = 2, 4, 5, 6
+    d = torch.randn(nq, pairs, lq, ls, dtype=torch.float64)
+    rho_flat = torch.full((nq, pairs), 0.8, dtype=torch.float64)
+    uniform_a = rho_flat.unsqueeze(-1).expand(-1, -1, lq) / float(lq)
+    sim_max = (-d).max(dim=-1).values
+    tau = 1.0e5
+    aqm_a = rho_flat.unsqueeze(-1) * F.softmax(sim_max / tau, dim=-1)
+    torch.testing.assert_close(aqm_a, uniform_a, rtol=1e-5, atol=1e-5)
+
+
+def test_ecot_m2_aqm_sharp_marginal_entropy_strictly_below_log_Lq():
+    torch.manual_seed(9)
+    lq = 6
+    d = torch.full((1, 1, lq, 4), 3.0)
+    d[:, :, 0, :] = 0.0
+    rho_flat = torch.full((1, 1), 0.75, dtype=d.dtype, device=d.device)
+    sim_max = (-d).max(dim=-1).values
+    a = rho_flat.unsqueeze(-1) * F.softmax(sim_max / 0.25, dim=-1)
+    a_norm = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    mean_h = (-(a_norm * a_norm.clamp_min(1e-12).log()).sum(dim=-1)).mean()
+    assert float(mean_h.item()) < math.log(float(lq)) - 1e-3
+
+
+def test_ecot_m2_aqm_large_tau_forward_matches_without_aqm():
+    torch.manual_seed(88)
+    base = _build_model(
+        variant="J_ECOT_M2",
+        care_enable_qesm=False,
+        ecot_uniform_budget_policy=True,
+    )
+    aqm = _build_model(
+        variant="J_ECOT_M2",
+        care_enable_qesm=False,
+        ecot_uniform_budget_policy=True,
+        ecot_m2_use_aqm=True,
+        ecot_m2_tau_aqm=100.0,
+    )
+    aqm.load_state_dict(base.state_dict(), strict=True)
+    base.eval()
+    aqm.eval()
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    with torch.no_grad():
+        ob = base(query, support, return_aux=True)
+        oa = aqm(query, support, return_aux=True)
+    torch.testing.assert_close(oa["ecot_budget_scores"], ob["ecot_budget_scores"], rtol=5e-4, atol=5e-4)
+    torch.testing.assert_close(oa["logits"], ob["logits"], rtol=5e-4, atol=5e-4)
+    assert "mean_aqm_a_entropy" in oa
 def test_ecot_episode_feature_normalize_rejects_non_m2_variant():
     with pytest.raises(ValueError, match="ecot_episode_feature_normalize"):
         _build_model(variant="J_ECOT", ecot_episode_feature_normalize=True)
