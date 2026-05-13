@@ -21,6 +21,7 @@ from net.hyperbolic.poincare_ops import (
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.ccdm_marginal import CrossClassDiscriminativeMarginal
+from net.modules.cata import CATA
 from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -530,6 +531,10 @@ class HROTFSL(BaseConv64FewShotModel):
         care_qesm_tau_e: float = 1.0,
         care_mdr_margin: float = 0.05,
         care_mdr_lambda: float = 0.1,
+        use_cata: bool = False,
+        cata_num_anchors: int = 8,
+        cata_num_heads: int = 4,
+        cata_attn_dropout: float = 0.0,
         eps: float = 1e-6,
     ) -> None:
         super().__init__(
@@ -931,6 +936,17 @@ class HROTFSL(BaseConv64FewShotModel):
                 nn.LayerNorm(hidden_dim),
                 nn.Linear(hidden_dim, token_dim, bias=False),
             )
+        )
+        self.use_cata = bool(use_cata)
+        self.cata = (
+            CATA(
+                token_dim=self.token_dim,
+                num_anchors=int(cata_num_anchors),
+                num_heads=int(cata_num_heads),
+                attn_dropout=float(cata_attn_dropout),
+            )
+            if self.use_cata
+            else None
         )
         if self.hrot_tsw_enable:
             if self.hrot_tsw_share_gate:
@@ -1423,6 +1439,14 @@ class HROTFSL(BaseConv64FewShotModel):
             f"got {tuple(query_targets.shape)}"
         )
 
+    def _apply_cata(self, projected: torch.Tensor) -> torch.Tensor:
+        if self.cata is None:
+            return projected
+        lead_shape = projected.shape[:-2]
+        flat = projected.reshape(-1, projected.shape[-2], projected.shape[-1])
+        aggregated = self.cata(flat)
+        return aggregated.reshape(*lead_shape, aggregated.shape[-2], aggregated.shape[-1])
+
     def _encode_images(
         self,
         images: torch.Tensor,
@@ -1431,6 +1455,7 @@ class HROTFSL(BaseConv64FewShotModel):
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
         projected = self.token_projector(tokens)
+        projected = self._apply_cata(projected)
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
             if self.normalize_euclidean_tokens
@@ -1448,6 +1473,9 @@ class HROTFSL(BaseConv64FewShotModel):
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         prenorm_tokens = feature_map_to_tokens(feature_map)
         projected = self.token_projector(prenorm_tokens)
+        if self.use_cata:
+            projected = self._apply_cata(projected)
+            prenorm_tokens = projected
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
             if self.normalize_euclidean_tokens
@@ -1476,6 +1504,9 @@ class HROTFSL(BaseConv64FewShotModel):
             ln_out = self.token_projector[0](tokens)
             pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
             projected = self.token_projector[1](ln_out)
+        if self.use_cata:
+            projected = self._apply_cata(projected)
+            pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
             if self.normalize_euclidean_tokens
@@ -1516,6 +1547,7 @@ class HROTFSL(BaseConv64FewShotModel):
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
         projected = self.token_projector(tokens)
+        projected = self._apply_cata(projected)
         return projected, spatial_hw
 
     def _project_and_amp_norms_from_images(
@@ -1532,6 +1564,9 @@ class HROTFSL(BaseConv64FewShotModel):
             ln_out = self.token_projector[0](tokens)
             pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
             projected = self.token_projector[1](ln_out)
+        if self.use_cata:
+            projected = self._apply_cata(projected)
+            pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)
         return projected, pre_proj_norms, spatial_hw
 
     @staticmethod

@@ -1080,9 +1080,9 @@ def get_args():
         default="full",
         choices=["full", "balanced_ot", "uniform_evidence", "prototype"],
         help=(
-            "Ours only: contribution ablation selector. full=UOT+AQM+SWTS, "
+            "Ours only: contribution ablation selector. full=CATA+mass-removed UOT with AQM/SWTS off, "
             "balanced_ot=replaces UOT with full balanced OT, "
-            "uniform_evidence removes adaptive evidence calibration, "
+            "uniform_evidence is retained as the AQM/SWTS-off compatibility setting, "
             "prototype replaces token transport with global prototypes."
         ),
     )
@@ -1193,6 +1193,16 @@ def get_args():
         default=1e-6,
         help="Epsilon added to per-dim std for J_ECOT_M2 episode token normalization.",
     )
+    parser.add_argument(
+        "--hrot_use_cata",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Enable Content-Aware Token Aggregator before transport. auto enables it for Ours only.",
+    )
+    parser.add_argument("--hrot_cata_num_anchors", type=int, default=8)
+    parser.add_argument("--hrot_cata_num_heads", type=int, default=4)
+    parser.add_argument("--hrot_cata_attn_dropout", type=float, default=0.0)
     parser.add_argument(
         "--hrot_amp_marginals",
         type=str,
@@ -2433,16 +2443,27 @@ def get_model(args):
         )
         if args.model in OURS_MODEL_NAMES:
             ours_ablation = str(getattr(args, "ours_ablation", "full"))
-            evidence_text = "uniform evidence" if ours_ablation == "uniform_evidence" else "AQM(tau=2)+SWTS(tau=2)"
+            evidence_text = "AQM/SWTS off"
             transport_text = "balanced full OT(rho=1.0)" if ours_ablation == "balanced_ot" else "UOT(rho=0.8)"
+            cata_setting = getattr(args, "hrot_use_cata", "auto")
+            cata_enabled = (
+                True
+                if str(cata_setting).strip().lower() == "auto"
+                else _bool_flag(cata_setting, default=True)
+            )
+            token_text = (
+                f"CATA(N={getattr(args, 'hrot_cata_num_anchors', 8)})"
+                if cata_enabled
+                else "spatial tokens"
+            )
             if ours_ablation == "prototype":
                 transport_text = "global prototype control"
                 evidence_text = "no token transport"
             print(
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
-                f"active_design={transport_text}+{evidence_text}, "
-                "full_defaults=UOT(rho=0.8)+AQM(tau=2)+SWTS(tau=2)"
+                f"active_design={token_text}+{transport_text}+{evidence_text}, "
+                "full_defaults=CATA(N=8)+UOT(rho=0.8)+AQM/SWTS off"
             )
     if args.model == "ec_mrot":
         hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
@@ -2838,6 +2859,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_noise_sink_score_penalty",
             "hrot_ecot_episode_feature_normalize",
             "hrot_ecot_episode_feature_norm_eps",
+            "hrot_use_cata",
+            "hrot_cata_num_anchors",
+            "hrot_cata_num_heads",
+            "hrot_cata_attn_dropout",
             "hrot_amp_marginals",
             "hrot_amp_marginals_tau",
             "hrot_token_center",
@@ -2869,6 +2894,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             and any(key.startswith("ccdm_marginal.") for key in state_dict)
         ):
             overrides["hrot_ecot_enable_ccdm_marginal"] = "true"
+        if "hrot_use_cata" not in overrides and any(key.startswith("cata.") for key in state_dict):
+            overrides["hrot_use_cata"] = "true"
+        cata_anchors = state_dict.get("cata.anchors")
+        if torch.is_tensor(cata_anchors) and cata_anchors.dim() == 2:
+            overrides.setdefault("hrot_cata_num_anchors", int(cata_anchors.shape[0]))
         for ncet_key in (
             "hrot_ncet_mix_init",
             "hrot_ncet_real_penalty_init",
@@ -2901,7 +2931,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
         if torch.is_tensor(projector_weight) and projector_weight.dim() == 2:
             token_dim = int(projector_weight.shape[0])
         else:
+            cata_anchors = state_dict.get("cata.anchors")
+            if torch.is_tensor(cata_anchors) and cata_anchors.dim() == 2:
+                token_dim = int(cata_anchors.shape[1])
             for vector_key in ("query_token_attention_vector", "support_token_attention_vector", "w_q", "w_s"):
+                if token_dim is not None:
+                    break
                 vector = state_dict.get(vector_key)
                 if torch.is_tensor(vector) and vector.dim() == 1:
                     token_dim = int(vector.shape[0])

@@ -2,6 +2,9 @@
 # Project-specific ignores
 # =============================================================================
 
+# Local agent worktrees
+.claude/
+
 # Documentation (LaTeX/temp files)
 docs/
 

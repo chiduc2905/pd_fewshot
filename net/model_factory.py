@@ -11,6 +11,14 @@ def _bool_flag(value, default=False):
     return str(value).lower() == "true"
 
 
+def _auto_bool_flag(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return default
+    return _bool_flag(value, default=default)
+
+
 def _first_attr(args, *names, default=None):
     for name in names:
         if hasattr(args, name):
@@ -413,8 +421,8 @@ MODEL_REGISTRY = {
     "ours": {
         "display_name": "Ours",
         "paper_name": "Ours",
-        "architecture": "Backbone spatial tokens -> single-budget UOT -> adaptive query marginals and self-weighted transport score (tau=2) -> episode-calibrated shot pooling; contribution ablations swap transport relaxation, evidence calibration, or token transport for a prototype control",
-        "metric": "Adaptive Evidence-Calibrated Token UOT",
+        "architecture": "Backbone spatial tokens -> CATA anchor aggregation -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations swap transport relaxation or token transport for a prototype control",
+        "metric": "CATA Single-Budget Token UOT",
     },
     "ec_mrot": {
         "display_name": "EC-MROT",
@@ -2365,15 +2373,15 @@ def build_model_from_args(args):
                 else _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass"), default=False)
             ),
             ecot_m2_use_swts=_bool_flag(
-                getattr(args, "hrot_ecot_m2_use_swts", "true" if is_ours_model else "false"),
-                default=is_ours_model,
+                getattr(args, "hrot_ecot_m2_use_swts", "false"),
+                default=False,
             ),
-            ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 2.0 if is_ours_model else 1.0)),
+            ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 1.0)),
             ecot_m2_use_aqm=_bool_flag(
-                getattr(args, "hrot_ecot_m2_use_aqm", "true" if is_ours_model else "false"),
-                default=is_ours_model,
+                getattr(args, "hrot_ecot_m2_use_aqm", "false"),
+                default=False,
             ),
-            ecot_m2_tau_aqm=float(getattr(args, "hrot_ecot_m2_tau_aqm", 2.0 if is_ours_model else 1.0)),
+            ecot_m2_tau_aqm=float(getattr(args, "hrot_ecot_m2_tau_aqm", 1.0)),
             ecot_identity_reg=float(getattr(args, "hrot_ecot_identity_reg", 1e-4)),
             ecot_policy_entropy_reg=float(getattr(args, "hrot_ecot_policy_entropy_reg", 1e-3)),
             ecot_consensus_tau_mode=str(getattr(args, "hrot_ecot_consensus_tau_mode", "fixed")),
@@ -2499,6 +2507,10 @@ def build_model_from_args(args):
             care_qesm_tau_e=float(getattr(args, "care_qesm_tau_e", 1.0)),
             care_mdr_margin=float(getattr(args, "care_mdr_margin", 0.05)),
             care_mdr_lambda=float(getattr(args, "care_mdr_lambda", 0.1)),
+            use_cata=_auto_bool_flag(getattr(args, "hrot_use_cata", "auto"), default=is_ours_model),
+            cata_num_anchors=int(getattr(args, "hrot_cata_num_anchors", 8)),
+            cata_num_heads=int(getattr(args, "hrot_cata_num_heads", 4)),
+            cata_attn_dropout=float(getattr(args, "hrot_cata_attn_dropout", 0.0)),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
         )
     if args.model == "ec_mrot":

@@ -1,7 +1,7 @@
 """Standalone Ours model and contribution ablations.
 
 The full design is intentionally treated as one coherent model:
-J-ECOT-M2/SB-ECOT with UOT, AQM, and SWTS fixed to the paper-facing defaults.
+J-ECOT-M2/SB-ECOT with CATA and UOT fixed to the paper-facing defaults.
 Contribution ablations swap only high-level design choices while leaving the
 full model path untouched.
 """
@@ -43,23 +43,29 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     """Apply the standalone Ours design contract to HROT/M2 constructor kwargs."""
     kwargs = dict(kwargs)
 
-    # Full Ours: one UOT budget with adaptive evidence-calibrated token transport.
+    # Full Ours: CATA tokens plus one UOT budget, with the M2 mass score removed.
+    kwargs.setdefault("use_cata", True)
+    kwargs.setdefault("cata_num_anchors", 8)
+    kwargs.setdefault("cata_num_heads", 4)
+    kwargs.setdefault("cata_attn_dropout", 0.0)
     kwargs["ecot_rho_bank"] = "0.8"
     kwargs["ecot_base_rho"] = 0.8
     kwargs["ecot_transport_mode"] = "unbalanced"
     kwargs["ecot_m2_ablate_threshold_mass"] = True
     kwargs["ecot_m2_cost_per_mass_score"] = False
     kwargs["ecot_m2_cost_per_mass_detach_mass"] = False
-    kwargs["ecot_m2_use_aqm"] = True
-    kwargs["ecot_m2_tau_aqm"] = 2.0
-    kwargs["ecot_m2_use_swts"] = True
-    kwargs["ecot_m2_swts_temp"] = 2.0
+    kwargs["ecot_m2_use_aqm"] = False
+    kwargs["ecot_m2_tau_aqm"] = 1.0
+    kwargs["ecot_m2_use_swts"] = False
+    kwargs["ecot_m2_swts_temp"] = 1.0
 
     if ablation == "balanced_ot":
         kwargs["ecot_rho_bank"] = "1.0"
         kwargs["ecot_base_rho"] = 1.0
         kwargs["ecot_transport_mode"] = "balanced"
     elif ablation == "uniform_evidence":
+        # Retained for compatibility with older ablation scripts; full Ours
+        # already keeps AQM and SWTS off.
         kwargs["ecot_m2_use_aqm"] = False
         kwargs["ecot_m2_use_swts"] = False
     elif ablation == "prototype":

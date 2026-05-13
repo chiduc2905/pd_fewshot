@@ -307,18 +307,23 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert full.ecot_base_rho == 0.8
     assert full.ecot_transport_mode == "unbalanced"
     assert full.uses_unbalanced_transport
-    assert full.ecot_m2_use_aqm
-    assert full.ecot_m2_tau_aqm == 2.0
-    assert full.ecot_m2_use_swts
-    assert full.ecot_m2_swts_temp == 2.0
+    assert full.use_cata
+    assert full.cata is not None
+    assert full.cata.num_anchors == 8
+    assert not full.uses_learned_mass
+    assert full.ecot_m2_ablate_threshold_mass
+    assert not full.ecot_m2_use_aqm
+    assert full.ecot_m2_tau_aqm == 1.0
+    assert not full.ecot_m2_use_swts
+    assert full.ecot_m2_swts_temp == 1.0
 
     balanced = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="balanced_ot", **base_args))
     assert balanced.ecot_rho_bank == (1.0,)
     assert balanced.ecot_base_rho == 1.0
     assert balanced.ecot_transport_mode == "balanced"
     assert not balanced.uses_unbalanced_transport
-    assert balanced.ecot_m2_use_aqm
-    assert balanced.ecot_m2_use_swts
+    assert not balanced.ecot_m2_use_aqm
+    assert not balanced.ecot_m2_use_swts
 
     uniform = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="uniform_evidence", **base_args))
     assert uniform.ecot_transport_mode == "unbalanced"
