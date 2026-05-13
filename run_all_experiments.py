@@ -973,7 +973,7 @@ def main():
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
             "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
-            "augment=off, masks=off, Ours full=CATA(N=8)+UOT(rho=0.8)+AQM/SWTS off, "
+            "augment=off, masks=off, Ours full=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in), "
             f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
             f"train SFC={DEEPEMD_5SHOT_TRAIN_SFC}, "
             f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "

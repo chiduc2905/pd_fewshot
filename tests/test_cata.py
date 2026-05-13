@@ -63,7 +63,7 @@ def test_m2_can_enable_cata_explicitly():
     assert outputs["support_euclidean_tokens"].shape[-2] == 8
 
 
-def test_ours_defaults_to_cata_without_learned_mass():
+def test_ours_defaults_without_cata_and_learned_mass():
     from net.model_factory import build_model_from_args
 
     model = build_model_from_args(
@@ -87,11 +87,12 @@ def test_ours_defaults_to_cata_without_learned_mass():
     with torch.no_grad():
         outputs = model(query, support, return_aux=True)
 
-    assert model.use_cata
+    assert not model.use_cata
+    assert model.cata is None
     assert not model.uses_learned_mass
     assert model.ecot_m2_ablate_threshold_mass
     assert not model.ecot_m2_use_aqm
     assert not model.ecot_m2_use_swts
     assert outputs["logits"].shape == (2, 2)
-    assert outputs["query_euclidean_tokens"].shape[-2] == 8
-    assert outputs["support_euclidean_tokens"].shape[-2] == 8
+    assert outputs["query_euclidean_tokens"].shape[-2] == 16
+    assert outputs["support_euclidean_tokens"].shape[-2] == 16

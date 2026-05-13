@@ -1,0 +1,46 @@
+# MNCR ablation sweep (reference only — not executed by the training entrypoint).
+# Baseline: no MNCR
+baseline:
+  hrot_use_mncr: false
+
+# MNCR temperature sweep (lambda fixed at 0.5)
+mncr_t01:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.1
+  hrot_mncr_lam: 0.5
+
+mncr_t03:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.3
+  hrot_mncr_lam: 0.5
+
+mncr_t05:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.5
+
+mncr_t07:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.7
+  hrot_mncr_lam: 0.5
+
+mncr_t10:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 1.0
+  hrot_mncr_lam: 0.5
+
+# MNCR lambda sweep (temperature fixed at 0.5)
+mncr_l02:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.2
+
+mncr_l05:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.5
+
+mncr_l08:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.8

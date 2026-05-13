@@ -1,7 +1,8 @@
 """Standalone Ours model and contribution ablations.
 
 The full design is intentionally treated as one coherent model:
-J-ECOT-M2/SB-ECOT with CATA and UOT fixed to the paper-facing defaults.
+J-ECOT-M2/SB-ECOT with UOT fixed to the paper-facing defaults (CATA off by
+default; enable with ``--hrot_use_cata true``).
 Contribution ablations swap only high-level design choices while leaving the
 full model path untouched.
 """
@@ -43,8 +44,8 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     """Apply the standalone Ours design contract to HROT/M2 constructor kwargs."""
     kwargs = dict(kwargs)
 
-    # Full Ours: CATA tokens plus one UOT budget, with the M2 mass score removed.
-    kwargs.setdefault("use_cata", True)
+    # Full Ours: spatial tokens + one UOT budget, with the M2 mass score removed (CATA optional).
+    kwargs.setdefault("use_cata", False)
     kwargs.setdefault("cata_num_anchors", 8)
     kwargs.setdefault("cata_num_heads", 4)
     kwargs.setdefault("cata_attn_dropout", 0.0)

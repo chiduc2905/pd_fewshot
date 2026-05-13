@@ -61,6 +61,15 @@ def _bool_flag(value, default=False):
     return str(value).lower() == "true"
 
 
+def _sanitize_wandb_project(name):
+    """Map characters W&B rejects in project names (see wandb_settings.validate_project)."""
+    raw = str(name or "").strip()
+    if not raw:
+        return raw
+    forbidden = "/\\#?%:"
+    return raw.translate(str.maketrans({c: "-" for c in forbidden}))
+
+
 PAPER_BASELINE_MODELS = {
     "cosine",
     "protonet",
@@ -1075,12 +1084,33 @@ def get_args():
         help="J_ECOT_M2 AQM: softmax temperature; large values recover uniform query marginal (same as AQM off).",
     )
     parser.add_argument(
+        "--hrot_use_mncr",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "J_ECOT_M2 / Ours only: enable Mutual Nearest-Neighbor Cost Refinement on the token cost matrix before UOT."
+        ),
+    )
+    parser.add_argument(
+        "--hrot_mncr_temperature",
+        type=float,
+        default=0.5,
+        help="MNCR softmax temperature (default 0.5).",
+    )
+    parser.add_argument(
+        "--hrot_mncr_lam",
+        type=float,
+        default=0.5,
+        help="MNCR refinement strength lambda (default 0.5).",
+    )
+    parser.add_argument(
         "--ours_ablation",
         type=str,
         default="full",
         choices=["full", "balanced_ot", "uniform_evidence", "prototype"],
         help=(
-            "Ours only: contribution ablation selector. full=CATA+mass-removed UOT with AQM/SWTS off, "
+            "Ours only: contribution ablation selector. full=mass-removed UOT with AQM/SWTS off (CATA optional via --hrot_use_cata), "
             "balanced_ot=replaces UOT with full balanced OT, "
             "uniform_evidence is retained as the AQM/SWTS-off compatibility setting, "
             "prototype replaces token transport with global prototypes."
@@ -1198,7 +1228,7 @@ def get_args():
         type=str,
         default="auto",
         choices=["auto", "true", "false"],
-        help="Enable Content-Aware Token Aggregator before transport. auto enables it for Ours only.",
+        help="Enable Content-Aware Token Aggregator before transport. auto keeps defaults (off unless you pass true).",
     )
     parser.add_argument("--hrot_cata_num_anchors", type=int, default=8)
     parser.add_argument("--hrot_cata_num_heads", type=int, default=4)
@@ -2445,12 +2475,11 @@ def get_model(args):
             ours_ablation = str(getattr(args, "ours_ablation", "full"))
             evidence_text = "AQM/SWTS off"
             transport_text = "balanced full OT(rho=1.0)" if ours_ablation == "balanced_ot" else "UOT(rho=0.8)"
-            cata_setting = getattr(args, "hrot_use_cata", "auto")
-            cata_enabled = (
-                True
-                if str(cata_setting).strip().lower() == "auto"
-                else _bool_flag(cata_setting, default=True)
-            )
+            cata_setting = str(getattr(args, "hrot_use_cata", "auto")).strip().lower()
+            if cata_setting == "auto":
+                cata_enabled = False
+            else:
+                cata_enabled = _bool_flag(cata_setting, default=False)
             token_text = (
                 f"CATA(N={getattr(args, 'hrot_cata_num_anchors', 8)})"
                 if cata_enabled
@@ -2463,7 +2492,7 @@ def get_model(args):
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
                 f"active_design={token_text}+{transport_text}+{evidence_text}, "
-                "full_defaults=CATA(N=8)+UOT(rho=0.8)+AQM/SWTS off"
+                "full_defaults=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in)"
             )
     if args.model == "ec_mrot":
         hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
@@ -5341,8 +5370,12 @@ def main():
     config["selection_split"] = selection_split
     config["merge_val_into_train"] = merge_val_into_train
 
+    wandb_project = _sanitize_wandb_project(args.project)
+    if wandb_project != args.project:
+        print(f"W&B project sanitized: {args.project!r} -> {wandb_project!r}")
+
     wandb.init(
-        project=args.project,
+        project=wandb_project,
         config=config,
         name=run_name,
         group=f"{args.model}_{args.dataset_name}",

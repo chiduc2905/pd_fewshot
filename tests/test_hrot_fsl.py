@@ -307,9 +307,8 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert full.ecot_base_rho == 0.8
     assert full.ecot_transport_mode == "unbalanced"
     assert full.uses_unbalanced_transport
-    assert full.use_cata
-    assert full.cata is not None
-    assert full.cata.num_anchors == 8
+    assert not full.use_cata
+    assert full.cata is None
     assert not full.uses_learned_mass
     assert full.ecot_m2_ablate_threshold_mass
     assert not full.ecot_m2_use_aqm

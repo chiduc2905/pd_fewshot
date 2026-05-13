@@ -390,6 +390,31 @@ class EpisodeBudgetController(nn.Module):
         return outputs
 
 
+def mncr_refine(
+    D_raw: torch.Tensor,
+    temperature: float = 0.5,
+    lam: float = 0.5,
+) -> torch.Tensor:
+    """Mutual Nearest-Neighbor Cost Refinement.
+
+    Refines cost matrix by reducing costs for mutually-agreed matches.
+    Tokens with high bidirectional affinity get lower transport cost;
+    spurious one-sided matches are left unchanged.
+
+    Args:
+        D_raw:       cost matrix, shape [..., Lq, Ls]
+        temperature: softmax temperature for soft nearest-neighbor (default 0.5)
+        lam:         refinement strength in [0, 1] (default 0.5)
+
+    Returns:
+        D_refined:   refined cost matrix, same shape as D_raw
+    """
+    R = (-D_raw / temperature).softmax(dim=-1)
+    C = (-D_raw / temperature).softmax(dim=-2)
+    mutual = R * C
+    return D_raw * (1.0 - lam * mutual)
+
+
 class HROTFSL(BaseConv64FewShotModel):
     """Vectorized HROT few-shot model with ablation variants, ECOT routes, and J_NCET."""
 
@@ -461,6 +486,9 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_m2_swts_temp: float = 1.0,
         ecot_m2_use_aqm: bool = False,
         ecot_m2_tau_aqm: float = 1.0,
+        use_mncr: bool = False,
+        mncr_temperature: float = 0.5,
+        mncr_lam: float = 0.5,
         ecot_identity_reg: float = 1e-4,
         ecot_policy_entropy_reg: float = 1e-3,
         ecot_consensus_tau_mode: str = "fixed",
@@ -878,6 +906,9 @@ class HROTFSL(BaseConv64FewShotModel):
                 raise ValueError("ecot_m2_tau_aqm must be positive when ecot_m2_use_aqm is enabled.")
         self.ecot_m2_use_aqm = bool(ecot_m2_use_aqm) and variant == "J_ECOT_M2"
         self.ecot_m2_tau_aqm = float(ecot_m2_tau_aqm)
+        self.use_mncr = bool(use_mncr) and variant == "J_ECOT_M2"
+        self.mncr_temperature = float(mncr_temperature)
+        self.mncr_lam = float(mncr_lam)
         self.ecot_identity_reg = float(ecot_identity_reg)
         self.ecot_policy_entropy_reg = float(ecot_policy_entropy_reg)
         self.ecot_consensus_tau_mode = ecot_consensus_tau_mode
@@ -2885,6 +2916,13 @@ class HROTFSL(BaseConv64FewShotModel):
             a_norm = a_aqm / a_aqm.sum(dim=-1, keepdim=True).clamp_min(self.eps)
             mean_aqm_a_entropy = -(a_norm * a_norm.clamp_min(self.eps).log()).sum(dim=-1).mean()
 
+        if self.use_mncr:
+            cost_bank = mncr_refine(
+                cost_bank,
+                temperature=self.mncr_temperature,
+                lam=self.mncr_lam,
+            )
+
         noise_query_mass = None
         noise_support_mass = None
         noise_self_mass = None
@@ -2936,9 +2974,7 @@ class HROTFSL(BaseConv64FewShotModel):
         plan_bank = plan_bank.reshape(num_query, way_num, shot_num, budget_count, query_len, support_len)
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
-        D_bank = flat_cost.view(num_query, way_num, shot_num, 1, query_len, support_len).expand(
-            -1, -1, -1, budget_count, -1, -1
-        )
+        D_bank = cost_bank.view(num_query, way_num, shot_num, budget_count, query_len, support_len)
         noise_query_mass_bank = (
             None
             if noise_query_mass is None
