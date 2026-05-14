@@ -2309,7 +2309,18 @@ def build_model_from_args(args):
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
             variant="J_ECOT_M2" if is_m2_like_model else str(getattr(args, "hrot_variant", "E")),
-            **({"ours_ablation": str(getattr(args, "ours_ablation", "full"))} if is_ours_model else {}),
+            **(
+                {
+                    "ours_ablation": str(getattr(args, "ours_ablation", "full")),
+                    "use_differential_mode": _bool_flag(
+                        getattr(args, "use_differential_mode", "false"),
+                        default=False,
+                    ),
+                    "dm_alpha": float(getattr(args, "dm_alpha", 0.0)),
+                }
+                if is_ours_model
+                else {}
+            ),
             eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
             curvature_init=float(getattr(args, "hrot_curvature_init", 1.0)),
             projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),

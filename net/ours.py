@@ -77,17 +77,111 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     return kwargs
 
 
+def _bool_config(value: bool | str) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean value: {value}")
+    return bool(value)
+
+
 class OursM2(JECOTM2):
     """Paper-facing Ours entrypoint plus coarse contribution ablations."""
 
-    def __init__(self, *args, ours_ablation: str = "full", **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        ours_ablation: str = "full",
+        use_differential_mode: bool = False,
+        dm_alpha: float = 0.0,
+        **kwargs,
+    ) -> None:
+        if not 0.0 <= float(dm_alpha) <= 1.0:
+            raise ValueError("dm_alpha must be in [0, 1]")
         self.ours_ablation = normalize_ours_ablation(ours_ablation)
+        self.use_differential_mode = _bool_config(use_differential_mode)
+        self.dm_alpha = float(dm_alpha)
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
-        super().__init__(*args, rho=float(kwargs["ecot_base_rho"]), transport_mode=kwargs["ecot_transport_mode"], **kwargs)
+        super().__init__(
+            *args,
+            rho=float(kwargs["ecot_base_rho"]),
+            transport_mode=kwargs["ecot_transport_mode"],
+            **kwargs,
+        )
+        self.register_buffer("dm_global_template", torch.empty(0), persistent=False)
+        self.register_buffer("dm_template_count", torch.tensor(0.0), persistent=False)
 
     @property
     def uses_ours_prototype_control(self) -> bool:
         return self.ours_ablation == "prototype"
+
+    def _update_differential_mode_template(self, episode_template: torch.Tensor) -> None:
+        if not self.training:
+            return
+        with torch.no_grad():
+            template = episode_template.detach()
+            if tuple(self.dm_global_template.shape) != tuple(template.shape):
+                self.dm_global_template = template.clone()
+                self.dm_template_count = template.new_tensor(1.0)
+                return
+            count = self.dm_template_count.to(device=template.device, dtype=template.dtype)
+            next_count = count + 1.0
+            updated = self.dm_global_template.to(device=template.device, dtype=template.dtype)
+            updated = updated + (template - updated) / next_count
+            self.dm_global_template = updated.detach()
+            self.dm_template_count = next_count.detach()
+
+    def _differential_mode_template(self, support_tokens: torch.Tensor) -> torch.Tensor:
+        episode_template = support_tokens.mean(dim=0)
+        self._update_differential_mode_template(episode_template)
+        if (
+            self.training
+            or self.dm_alpha <= 0.0
+            or self.dm_global_template.numel() == 0
+            or tuple(self.dm_global_template.shape) != tuple(episode_template.shape)
+        ):
+            return episode_template
+        global_template = self.dm_global_template.to(
+            device=episode_template.device,
+            dtype=episode_template.dtype,
+        )
+        alpha = float(self.dm_alpha)
+        return alpha * global_template + (1.0 - alpha) * episode_template
+
+    def _apply_differential_mode_to_cost_tokens(
+        self,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_differential_mode:
+            return query_tokens, support_tokens
+        if query_tokens.dim() != 3 or support_tokens.dim() != 3:
+            raise ValueError(
+                "Ours differential mode expects query/support cost tokens shaped "
+                "(NumQuery, Tokens, Dim) and (NumSupport, Tokens, Dim)"
+            )
+        if query_tokens.shape[-2:] != support_tokens.shape[-2:]:
+            raise ValueError(
+                "Ours differential mode requires aligned spatial token grids, "
+                f"got {tuple(query_tokens.shape[-2:])} vs {tuple(support_tokens.shape[-2:])}"
+            )
+
+        template = self._differential_mode_template(support_tokens)
+        query_diff = query_tokens - template.unsqueeze(0)
+        support_diff = support_tokens - template.unsqueeze(0)
+        torch._assert(query_diff.shape == query_tokens.shape, "DMT changed query token shape")
+        torch._assert(support_diff.shape == support_tokens.shape, "DMT changed support token shape")
+        return query_diff, support_diff
+
+    def _ground_cost(self, query_tokens: torch.Tensor, class_tokens: torch.Tensor) -> torch.Tensor:
+        query_tokens, class_tokens = self._apply_differential_mode_to_cost_tokens(
+            query_tokens,
+            class_tokens,
+        )
+        return super()._ground_cost(query_tokens, class_tokens)
 
     def _forward_prototype_episode(
         self,

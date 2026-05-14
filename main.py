@@ -1117,6 +1117,19 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--use_differential_mode",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Ours only: subtract the episode support common component from cost tokens before UOT.",
+    )
+    parser.add_argument(
+        "--dm_alpha",
+        type=float,
+        default=0.0,
+        help="Ours DMT inference blend alpha for the running global support template; 0 uses episode mean only.",
+    )
+    parser.add_argument(
         "--hrot_ecot_identity_reg",
         "--ecot_identity_reg",
         dest="hrot_ecot_identity_reg",
@@ -2488,10 +2501,16 @@ def get_model(args):
             if ours_ablation == "prototype":
                 transport_text = "global prototype control"
                 evidence_text = "no token transport"
+            dmt_text = (
+                "DMT on"
+                if _bool_flag(getattr(args, "use_differential_mode", "false"), default=False)
+                else "DMT off"
+            )
             print(
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
                 f"active_design={token_text}+{transport_text}+{evidence_text}, "
+                f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 "full_defaults=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in)"
             )
     if args.model == "ec_mrot":
