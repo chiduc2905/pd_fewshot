@@ -2,7 +2,9 @@
 
 The full design is intentionally treated as one coherent model:
 J-ECOT-M2/SB-ECOT with UOT fixed to the paper-facing defaults (CATA off by
-default; enable with ``--hrot_use_cata true``).
+default; enable with ``--hrot_use_cata true``).  Ours ``full`` enables
+Episode-Gated Shrinkage Marginals (EGSM) and turns off MEA/CCDM/CRS for the
+ECOT token priors.
 Contribution ablations swap only high-level design choices while leaving the
 full model path untouched.
 """
@@ -56,13 +58,27 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     kwargs["ecot_rho_bank"] = "0.8"
     kwargs["ecot_base_rho"] = 0.8
     kwargs["ecot_transport_mode"] = "unbalanced"
-    kwargs["ecot_m2_ablate_threshold_mass"] = True
-    kwargs["ecot_m2_cost_per_mass_score"] = False
-    kwargs["ecot_m2_cost_per_mass_detach_mass"] = False
+    # Default Ours score is -cost only. If the caller already enabled cost/mass
+    # (CLI / run_all_experiments --m2_cost_per_mass), do not overwrite it here —
+    # otherwise cost/mass appears to have no effect vs baseline.
+    if kwargs.get("ecot_m2_cost_per_mass_score"):
+        kwargs["ecot_m2_ablate_threshold_mass"] = False
+        kwargs.setdefault("ecot_m2_cost_per_mass_detach_mass", True)
+    elif kwargs.get("ecot_m2_ablate_threshold_mass") is False:
+        kwargs["ecot_m2_cost_per_mass_score"] = False
+    else:
+        kwargs["ecot_m2_ablate_threshold_mass"] = True
+        kwargs["ecot_m2_cost_per_mass_score"] = False
+        kwargs["ecot_m2_cost_per_mass_detach_mass"] = False
     kwargs["ecot_m2_use_aqm"] = False
     kwargs["ecot_m2_tau_aqm"] = 1.0
     kwargs["ecot_m2_use_swts"] = False
     kwargs["ecot_m2_swts_temp"] = 1.0
+    kwargs["ecot_enable_ccdm_marginal"] = False
+    kwargs["ecot_enable_mea_marginal"] = False
+    kwargs["ecot_enable_crs_marginal"] = False
+    if ablation in {"full", "balanced_ot"} and kwargs.get("ecot_enable_egsm", None) is None:
+        kwargs["ecot_enable_egsm"] = True
 
     if ablation == "balanced_ot":
         kwargs["ecot_rho_bank"] = "1.0"
@@ -73,6 +89,10 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
         # already keeps AQM and SWTS off.
         kwargs["ecot_m2_use_aqm"] = False
         kwargs["ecot_m2_use_swts"] = False
+        kwargs["ecot_enable_egsm"] = False
+        kwargs["ecot_enable_ccdm_marginal"] = False
+        kwargs["ecot_enable_mea_marginal"] = False
+        kwargs["ecot_enable_crs_marginal"] = False
     elif ablation == "prototype":
         # The prototype control bypasses the transport forward path, but keeping
         # the same constructor defaults preserves the backbone/projector surface.

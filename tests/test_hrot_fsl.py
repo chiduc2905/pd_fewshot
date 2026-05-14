@@ -330,6 +330,19 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert not uniform.ecot_m2_use_aqm
     assert not uniform.ecot_m2_use_swts
 
+    cpm_like = build_model_from_args(
+        SimpleNamespace(
+            model="ours",
+            ours_ablation="full",
+            hrot_ecot_m2_cost_per_mass_score="true",
+            hrot_ecot_m2_ablate_threshold_mass="false",
+            **base_args,
+        )
+    )
+    assert cpm_like.ecot_m2_cost_per_mass_score
+    assert not cpm_like.ecot_m2_ablate_threshold_mass
+    assert cpm_like.ecot_m2_cost_per_mass_detach_mass
+
 
 def test_ours_prototype_ablation_forward_uses_global_prototype_control():
     torch.manual_seed(390)

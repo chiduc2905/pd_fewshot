@@ -68,11 +68,12 @@ M2_MODEL_NAMES = frozenset(
     {"m2", "m2_uot", "m2_full_ot", "jecot_m2", "jecot_m2_uot", "jecot_m2_full_ot"}
 )
 OURS_MODEL_NAMES = frozenset({"ours"})
-M2_LIKE_MODEL_NAMES = frozenset(set(M2_MODEL_NAMES) | set(OURS_MODEL_NAMES))
+OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
+M2_LIKE_MODEL_NAMES = frozenset(set(M2_MODEL_NAMES) | set(OURS_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES))
 # Registry name for the single canonical SB-ECOT entrypoint (aliases share the same class but different CLI defaults).
 CANONICAL_M2_MODEL_NAME = "m2"
 M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
-HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES))
+HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES))
 
 
 MODEL_REGISTRY = {
@@ -423,6 +424,12 @@ MODEL_REGISTRY = {
         "paper_name": "Ours",
         "architecture": "Backbone spatial tokens -> optional CATA anchor aggregation -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations swap transport relaxation or token transport for a prototype control",
         "metric": "Single-Budget Token UOT",
+    },
+    "ours_cpm": {
+        "display_name": "Ours-CPM",
+        "paper_name": "Ours (Cost-Per-Mass Multi-Budget)",
+        "architecture": "Backbone spatial tokens -> EGSM marginals -> 3-budget UOT (rho=0.7,0.8,0.9) -> cost/mass scoring with detached denominator -> episode budget policy -> shot pooling",
+        "metric": "Multi-Budget Cost-Per-Mass UOT",
     },
     "ec_mrot": {
         "display_name": "EC-MROT",
@@ -2277,7 +2284,11 @@ def build_model_from_args(args):
         is_m2_model = args.model in M2_MODEL_NAMES
         is_m2_like_model = args.model in M2_LIKE_MODEL_NAMES
         is_m2_full_ot = args.model in M2_FULL_OT_MODEL_NAMES
+        is_ours_cpm_model = args.model in OURS_CPM_MODEL_NAMES
         HROTFSL = (
+            _load_symbol("net.ours_cpm", "OursCPM")
+            if is_ours_cpm_model
+            else
             _load_symbol("net.ours", "OursM2")
             if is_ours_model
             else
@@ -2289,13 +2300,18 @@ def build_model_from_args(args):
         m2_default_rho = 1.0 if is_m2_full_ot else 0.80
         ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
         ecot_base_rho = getattr(args, "hrot_ecot_base_rho", None)
-        if is_m2_like_model and ecot_rho_bank is None:
+        if is_m2_like_model and not is_ours_cpm_model and ecot_rho_bank is None:
             ecot_rho_bank = f"{m2_default_rho:.6g}"
-        if is_m2_like_model and ecot_base_rho is None:
+        if is_m2_like_model and not is_ours_cpm_model and ecot_base_rho is None:
             ecot_base_rho = m2_default_rho
         ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
-        if is_m2_like_model and ecot_transport_mode is None:
+        if is_m2_like_model and not is_ours_cpm_model and ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if is_m2_full_ot else "unbalanced"
+        _egsm_cli = str(getattr(args, "hrot_ecot_enable_egsm", "auto")).strip().lower()
+        if _egsm_cli in {"auto", "none", ""}:
+            _hrot_ecot_egsm_kw = {} if (is_ours_model or is_ours_cpm_model) else {"ecot_enable_egsm": False}
+        else:
+            _hrot_ecot_egsm_kw = {"ecot_enable_egsm": _bool_flag(getattr(args, "hrot_ecot_enable_egsm"), default=False)}
         return HROTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,
@@ -2310,6 +2326,13 @@ def build_model_from_args(args):
             resnet12_dropblock_size=5,
             variant="J_ECOT_M2" if is_m2_like_model else str(getattr(args, "hrot_variant", "E")),
             **(
+                {
+                    "cpm_ablation": str(getattr(args, "cpm_ablation", "full")),
+                    "cpm_alpha": float(getattr(args, "cpm_alpha", 1.0)),
+                    "cpm_rho_bank": getattr(args, "cpm_rho_bank", None),
+                }
+                if is_ours_cpm_model
+                else
                 {
                     "ours_ablation": str(getattr(args, "ours_ablation", "full")),
                     "use_differential_mode": _bool_flag(
@@ -2443,6 +2466,17 @@ def build_model_from_args(args):
             ecot_ccdm_tau_b_init=float(getattr(args, "hrot_ecot_ccdm_tau_b_init", 0.50)),
             ecot_ccdm_entropy_reg=float(getattr(args, "hrot_ecot_ccdm_entropy_reg", 0.0)),
             ecot_ccdm_entropy_shot_weight=float(getattr(args, "hrot_ecot_ccdm_entropy_shot_weight", 0.0)),
+            ecot_egsm_hidden_dim=int(getattr(args, "hrot_ecot_egsm_hidden_dim", 32)),
+            ecot_egsm_candidate_tau_q=float(getattr(args, "hrot_ecot_egsm_candidate_tau_q", 0.5)),
+            ecot_egsm_candidate_tau_b=float(getattr(args, "hrot_ecot_egsm_candidate_tau_b", 0.5)),
+            ecot_egsm_kappa_min=float(getattr(args, "hrot_ecot_egsm_kappa_min", 0.05)),
+            ecot_egsm_kappa_max=float(getattr(args, "hrot_ecot_egsm_kappa_max", 0.95)),
+            ecot_egsm_adaptive_rho=_bool_flag(
+                getattr(args, "hrot_ecot_egsm_adaptive_rho", "false"), default=False,
+            ),
+            ecot_egsm_rho_delta_max=float(getattr(args, "hrot_ecot_egsm_rho_delta_max", 0.15)),
+            ecot_egsm_rho_grad_clip=float(getattr(args, "hrot_ecot_egsm_rho_grad_clip", 1.0)),
+            ecot_egsm_rho_reg_lambda=float(getattr(args, "hrot_ecot_egsm_rho_reg_lambda", 0.01)),
             ecot_transport_mode=ecot_transport_mode,
             ecot_enable_noise_sink=_bool_flag(
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
@@ -2529,6 +2563,7 @@ def build_model_from_args(args):
             cata_num_heads=int(getattr(args, "hrot_cata_num_heads", 4)),
             cata_attn_dropout=float(getattr(args, "hrot_cata_attn_dropout", 0.0)),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
+            **_hrot_ecot_egsm_kw,
         )
     if args.model == "ec_mrot":
         ECMROT = _load_symbol("net.ec_mrot", "ECMROT")

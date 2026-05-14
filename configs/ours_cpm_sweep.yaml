@@ -1,0 +1,64 @@
+# Direction A+C combined: Ours-CPM (cost/mass multi-budget) + optional MNCR.
+#
+# Phase 1: CPM-only (find best alpha and rho_bank)
+# Phase 2: CPM + MNCR (if MNCR helped in Direction C sweep)
+#
+# Run with: python main.py --model ours_cpm <flags below>
+
+# --- Phase 1: CPM alpha sweep (3 budgets, no MNCR) ---
+
+cpm_a05:
+  cpm_alpha: 0.5
+
+cpm_a10:
+  cpm_alpha: 1.0
+
+cpm_a20:
+  cpm_alpha: 2.0
+
+cpm_a40:
+  cpm_alpha: 4.0
+
+# --- Phase 1b: CPM rho_bank variants ---
+
+cpm_4bank:
+  cpm_alpha: 1.0
+  cpm_rho_bank: "0.6,0.7,0.8,0.9"
+
+cpm_5bank:
+  cpm_alpha: 1.0
+  cpm_rho_bank: "0.5,0.6,0.7,0.8,0.9"
+
+cpm_narrow:
+  cpm_alpha: 1.0
+  cpm_rho_bank: "0.75,0.80,0.85"
+
+# --- Phase 1c: CPM ablations ---
+
+cpm_single:
+  cpm_ablation: single_budget
+  cpm_alpha: 1.0
+
+cpm_no_egsm:
+  cpm_ablation: no_egsm
+  cpm_alpha: 1.0
+
+# --- Phase 2: CPM + MNCR (best MNCR from Direction C sweep) ---
+
+cpm_mncr_t05_l05:
+  cpm_alpha: 1.0
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.5
+
+cpm_mncr_t03_l05:
+  cpm_alpha: 1.0
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.3
+  hrot_mncr_lam: 0.5
+
+cpm_mncr_t05_l08:
+  cpm_alpha: 1.0
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.8

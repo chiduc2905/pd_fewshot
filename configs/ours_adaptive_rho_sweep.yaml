@@ -1,0 +1,66 @@
+# Direction B: EGSM episode-adaptive rho sweep.
+#
+# EGSM predicts rho_adaptive per query from the same psi ambiguity features
+# used for the kappa gate. rho_adaptive = base_rho + delta_max * tanh(MLP(psi)).
+# Gradient from Sinkhorn is clipped to prevent explosion; a small L2 reg
+# keeps rho near base_rho during early training.
+#
+# Use with Ours: --model ours --hrot_ecot_egsm_adaptive_rho true <flags>
+# Use with CPM:  --model ours_cpm --hrot_ecot_egsm_adaptive_rho true <flags>
+
+# --- Baseline: fixed rho (EGSM but no adaptive) ---
+baseline:
+  hrot_ecot_egsm_adaptive_rho: false
+
+# --- Delta max sweep (how far rho can deviate from 0.8) ---
+adaptive_d010:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.10
+
+adaptive_d015:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+
+adaptive_d020:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.20
+
+# --- Regularization strength sweep ---
+adaptive_reg001:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_ecot_egsm_rho_reg_lambda: 0.001
+
+adaptive_reg01:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_ecot_egsm_rho_reg_lambda: 0.01
+
+adaptive_reg05:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_ecot_egsm_rho_reg_lambda: 0.05
+
+# --- Gradient clip sweep ---
+adaptive_gc05:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_ecot_egsm_rho_grad_clip: 0.5
+
+adaptive_gc10:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_ecot_egsm_rho_grad_clip: 1.0
+
+adaptive_gc20:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_ecot_egsm_rho_grad_clip: 2.0
+
+# --- Combined with MNCR (Direction B+C) ---
+adaptive_mncr:
+  hrot_ecot_egsm_adaptive_rho: true
+  hrot_ecot_egsm_rho_delta_max: 0.15
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.5

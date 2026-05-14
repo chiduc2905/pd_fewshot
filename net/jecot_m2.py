@@ -28,6 +28,7 @@ class JECOTM2(HROTFSL):
         kwargs.setdefault("ecot_base_rho", float(rho))
         kwargs.setdefault("ecot_transport_mode", transport_mode)
         kwargs.setdefault("ecot_enable_ccdm_marginal", True)
+        kwargs.setdefault("ecot_enable_egsm", False)
         kwargs.setdefault("ecot_m2_ablate_threshold_mass", True)
         kwargs.setdefault("ecot_m2_cost_per_mass_score", False)
         kwargs.setdefault("ecot_m2_cost_per_mass_detach_mass", False)

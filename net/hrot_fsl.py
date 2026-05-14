@@ -21,6 +21,7 @@ from net.hyperbolic.poincare_ops import (
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.ccdm_marginal import CrossClassDiscriminativeMarginal
+from net.modules.egsm_marginal import EpisodeGatedShrinkageMarginal
 from net.modules.cata import CATA
 from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
 from net.modules.partial_ot import (
@@ -517,6 +518,16 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_ccdm_tau_b_init: float = 0.50,
         ecot_ccdm_entropy_reg: float = 0.0,
         ecot_ccdm_entropy_shot_weight: float = 0.0,
+        ecot_enable_egsm: bool = False,
+        ecot_egsm_hidden_dim: int = 32,
+        ecot_egsm_candidate_tau_q: float = 0.5,
+        ecot_egsm_candidate_tau_b: float = 0.5,
+        ecot_egsm_kappa_min: float = 0.05,
+        ecot_egsm_kappa_max: float = 0.95,
+        ecot_egsm_adaptive_rho: bool = False,
+        ecot_egsm_rho_delta_max: float = 0.15,
+        ecot_egsm_rho_grad_clip: float = 1.0,
+        ecot_egsm_rho_reg_lambda: float = 0.01,
         ecot_transport_mode: str | None = None,
         ecot_enable_noise_sink: bool = False,
         ecot_noise_sink_cost_init: float = 1.0,
@@ -694,6 +705,12 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_ccdm_entropy_reg must be non-negative")
         if float(ecot_ccdm_entropy_shot_weight) < 0.0:
             raise ValueError("ecot_ccdm_entropy_shot_weight must be non-negative")
+        if not 0.0 <= float(ecot_egsm_kappa_min) < float(ecot_egsm_kappa_max) <= 1.0:
+            raise ValueError("ecot_egsm_kappa_min and ecot_egsm_kappa_max must satisfy 0 <= min < max <= 1")
+        if int(ecot_egsm_hidden_dim) <= 0:
+            raise ValueError("ecot_egsm_hidden_dim must be positive")
+        if float(ecot_egsm_candidate_tau_q) <= 0.0 or float(ecot_egsm_candidate_tau_b) <= 0.0:
+            raise ValueError("ecot_egsm_candidate_tau_q and ecot_egsm_candidate_tau_b must be positive")
         ecot_transport_mode = _normalize_ecot_transport_mode(ecot_transport_mode)
         if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
             raise ValueError("ecot_noise_sink_cost_init must be positive")
@@ -752,6 +769,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_ecot_crs_marginal = bool(ecot_enable_crs_marginal)
         self.uses_ecot_mea_marginal = self.uses_ecot and bool(ecot_enable_mea_marginal)
         self.uses_ecot_ccdm_marginal = self.uses_ecot and bool(ecot_enable_ccdm_marginal)
+        self.uses_ecot_egsm_marginal = self.uses_ecot and bool(ecot_enable_egsm)
         self.uses_ecot_noise_sink = self.uses_ecot and bool(ecot_enable_noise_sink)
         if self.uses_ecot_crs_marginal and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CRS marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
@@ -759,14 +777,26 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("MEA marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if bool(ecot_enable_ccdm_marginal) and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CCDM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
+        if bool(ecot_enable_egsm) and variant not in {"J_ECOT", "J_ECOT_M2"}:
+            raise ValueError("EGSM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if self.uses_ecot_crs_marginal and self.uses_ecot_nncs_marginal:
             raise ValueError("CRS and NNCS support marginals are mutually exclusive")
         if self.uses_ecot_mea_marginal and (self.uses_ecot_crs_marginal or self.uses_ecot_nncs_marginal):
             raise ValueError("MEA, CRS, and NNCS marginals are mutually exclusive")
         if self.uses_ecot_ccdm_marginal and (
-            self.uses_ecot_mea_marginal or self.uses_ecot_crs_marginal or self.uses_ecot_nncs_marginal
+            self.uses_ecot_mea_marginal
+            or self.uses_ecot_crs_marginal
+            or self.uses_ecot_nncs_marginal
+            or self.uses_ecot_egsm_marginal
         ):
-            raise ValueError("CCDM is mutually exclusive with MEA, CRS, and NNCS marginals")
+            raise ValueError("CCDM is mutually exclusive with MEA, CRS, NNCS, and EGSM marginals")
+        if self.uses_ecot_egsm_marginal and (
+            self.uses_ecot_mea_marginal
+            or self.uses_ecot_crs_marginal
+            or self.uses_ecot_nncs_marginal
+            or self.uses_ecot_ccdm_marginal
+        ):
+            raise ValueError("EGSM is mutually exclusive with MEA, CRS, NNCS, and CCDM marginals")
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
@@ -937,6 +967,16 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_ccdm_tau_b_init = float(ecot_ccdm_tau_b_init)
         self.ecot_ccdm_entropy_reg = float(ecot_ccdm_entropy_reg)
         self.ecot_ccdm_entropy_shot_weight = float(ecot_ccdm_entropy_shot_weight)
+        self.ecot_enable_egsm = bool(ecot_enable_egsm)
+        self.ecot_egsm_hidden_dim = int(ecot_egsm_hidden_dim)
+        self.ecot_egsm_candidate_tau_q = float(ecot_egsm_candidate_tau_q)
+        self.ecot_egsm_candidate_tau_b = float(ecot_egsm_candidate_tau_b)
+        self.ecot_egsm_kappa_min = float(ecot_egsm_kappa_min)
+        self.ecot_egsm_kappa_max = float(ecot_egsm_kappa_max)
+        self.ecot_egsm_adaptive_rho = bool(ecot_egsm_adaptive_rho) and self.uses_ecot_egsm_marginal
+        self.ecot_egsm_rho_delta_max = float(ecot_egsm_rho_delta_max)
+        self.ecot_egsm_rho_grad_clip = float(ecot_egsm_rho_grad_clip)
+        self.ecot_egsm_rho_reg_lambda = float(ecot_egsm_rho_reg_lambda)
         self.ecot_transport_mode = ecot_transport_mode
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
@@ -1089,6 +1129,22 @@ class HROTFSL(BaseConv64FewShotModel):
                 eps=self.eps,
             )
             if self.uses_ecot_ccdm_marginal
+            else None
+        )
+        self.egsm_marginal = (
+            EpisodeGatedShrinkageMarginal(
+                hidden_dim=self.ecot_egsm_hidden_dim,
+                candidate_tau_q=self.ecot_egsm_candidate_tau_q,
+                candidate_tau_b=self.ecot_egsm_candidate_tau_b,
+                kappa_min=self.ecot_egsm_kappa_min,
+                kappa_max=self.ecot_egsm_kappa_max,
+                eps=self.eps,
+                enable_adaptive_rho=self.ecot_egsm_adaptive_rho,
+                rho_delta_max=self.ecot_egsm_rho_delta_max,
+                rho_grad_clip=self.ecot_egsm_rho_grad_clip,
+                rho_reg_lambda=self.ecot_egsm_rho_reg_lambda,
+            )
+            if self.uses_ecot_egsm_marginal
             else None
         )
         self.ccdm_entropy_shot_weight = (
@@ -2783,6 +2839,7 @@ class HROTFSL(BaseConv64FewShotModel):
         crs_payload: dict[str, torch.Tensor] = {}
         mea_payload: dict[str, torch.Tensor] = {}
         ccdm_payload: dict[str, torch.Tensor] = {}
+        egsm_payload: dict[str, torch.Tensor] = {}
         if self.mea_marginal is not None:
             if query_weight is not None or support_weight is not None:
                 raise ValueError("MEA marginal cannot be combined with explicit query/support weights")
@@ -2827,6 +2884,38 @@ class HROTFSL(BaseConv64FewShotModel):
                 if torch.is_tensor(value) and value.is_floating_point()
                 else value
                 for key, value in ccdm_aux.items()
+                if torch.is_tensor(value)
+            }
+        elif self.egsm_marginal is not None:
+            if query_weight is not None or support_weight is not None:
+                raise ValueError("EGSM marginal cannot be combined with explicit query/support weights")
+            egsm_query_marginal, egsm_support_marginal, egsm_aux = self.egsm_marginal(
+                flat_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+                rho=self._ecot_base_rho_tensor(flat_cost),
+            )
+            query_prob = egsm_query_marginal / egsm_query_marginal.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            support_prob = egsm_support_marginal / egsm_support_marginal.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            egsm_rho_adaptive = egsm_aux.get("egsm_rho_adaptive")
+            if egsm_rho_adaptive is not None:
+                rho_scale = egsm_rho_adaptive.view(num_query, 1, 1, 1)
+                a_bank = query_prob.unsqueeze(2).expand(
+                    -1, -1, budget_count, -1,
+                ) * rho_scale
+                b_bank = support_prob.unsqueeze(2).expand(
+                    -1, -1, budget_count, -1,
+                ) * rho_scale
+            else:
+                a_bank = query_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+                b_bank = support_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+            transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
+            egsm_payload = {
+                key: value.to(device=flat_cost.device, dtype=flat_cost.dtype)
+                if torch.is_tensor(value) and value.is_floating_point()
+                else value
+                for key, value in egsm_aux.items()
                 if torch.is_tensor(value)
             }
         elif query_weight is not None:
@@ -3126,7 +3215,10 @@ class HROTFSL(BaseConv64FewShotModel):
         crs_aux_loss = crs_payload.get("crs_aux_loss", identity_loss.new_zeros(()))
         mea_aux_loss = mea_payload.get("mea_aux_loss", identity_loss.new_zeros(()))
         ccdm_aux_loss = ccdm_payload.get("ccdm_aux_loss", identity_loss.new_zeros(()))
-        ecot_aux_loss = self.ecot_identity_reg * identity_loss + crs_aux_loss + mea_aux_loss + ccdm_aux_loss
+        egsm_aux_loss = egsm_payload.get("egsm_aux_loss", identity_loss.new_zeros(()))
+        ecot_aux_loss = (
+            self.ecot_identity_reg * identity_loss + crs_aux_loss + mea_aux_loss + ccdm_aux_loss + egsm_aux_loss
+        )
 
         payload: dict[str, torch.Tensor] = {
             "logits": logits,
@@ -3162,6 +3254,7 @@ class HROTFSL(BaseConv64FewShotModel):
         payload.update(crs_payload)
         payload.update(mea_payload)
         payload.update(ccdm_payload)
+        payload.update(egsm_payload)
         payload.update(cp_payload)
         if noise_query_mass_bank is not None:
             payload.update(
@@ -5022,6 +5115,20 @@ class HROTFSL(BaseConv64FewShotModel):
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
+        for key in (
+            "egsm_kappa",
+            "egsm_rho_adaptive",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
+        for key in (
+            "egsm_candidate_tau_q",
+            "egsm_candidate_tau_b",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
+        if "egsm_psi" in batch_outputs[0]:
+            stacked["egsm_psi"] = torch.cat([item["egsm_psi"] for item in batch_outputs], dim=0)
         if "transport_plan" in batch_outputs[0]:
             stacked["transport_plan"] = torch.cat([item["transport_plan"] for item in batch_outputs], dim=0)
             stacked["cost_matrix"] = torch.cat([item["cost_matrix"] for item in batch_outputs], dim=0)

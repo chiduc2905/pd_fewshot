@@ -39,6 +39,7 @@ from net.model_factory import (
     M2_LIKE_MODEL_NAMES,
     M2_FULL_OT_MODEL_NAMES,
     M2_MODEL_NAMES,
+    OURS_CPM_MODEL_NAMES,
     OURS_MODEL_NAMES,
     build_model_from_args,
     get_model_choices,
@@ -1117,6 +1118,29 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--cpm_ablation",
+        type=str,
+        default="full",
+        choices=["full", "single_budget", "no_egsm"],
+        help=(
+            "Ours-CPM only: full=3-budget cost/mass with EGSM, "
+            "single_budget=collapse to rho=0.8 only (ablation control), "
+            "no_egsm=3-budget cost/mass with uniform marginals."
+        ),
+    )
+    parser.add_argument(
+        "--cpm_alpha",
+        type=float,
+        default=1.0,
+        help="Ours-CPM: scaling factor alpha in score = -alpha * cost / (mass + eps).",
+    )
+    parser.add_argument(
+        "--cpm_rho_bank",
+        type=str,
+        default=None,
+        help="Ours-CPM: override rho bank (comma-separated, e.g. '0.6,0.7,0.8,0.9').",
+    )
+    parser.add_argument(
         "--use_differential_mode",
         type=str,
         default="false",
@@ -1227,6 +1251,34 @@ def get_args():
     parser.add_argument("--hrot_ecot_ccdm_tau_b_init", type=float, default=0.50)
     parser.add_argument("--hrot_ecot_ccdm_entropy_reg", type=float, default=0.0)
     parser.add_argument("--hrot_ecot_ccdm_entropy_shot_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--hrot_ecot_enable_egsm",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help=(
+            "J_ECOT_M2 / Ours: EGSM marginals. auto=Ours full/balanced enable EGSM unless kwargs omit (factory); "
+            "explicit true/false overrides. Mutually exclusive with MEA/CCDM/CRS/NNCS."
+        ),
+    )
+    parser.add_argument("--hrot_ecot_egsm_hidden_dim", type=int, default=32)
+    parser.add_argument("--hrot_ecot_egsm_candidate_tau_q", type=float, default=0.5)
+    parser.add_argument("--hrot_ecot_egsm_candidate_tau_b", type=float, default=0.5)
+    parser.add_argument("--hrot_ecot_egsm_kappa_min", type=float, default=0.05)
+    parser.add_argument("--hrot_ecot_egsm_kappa_max", type=float, default=0.95)
+    parser.add_argument(
+        "--hrot_ecot_egsm_adaptive_rho",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="EGSM Direction B: predict per-episode rho from psi ambiguity features.",
+    )
+    parser.add_argument("--hrot_ecot_egsm_rho_delta_max", type=float, default=0.15,
+                        help="EGSM adaptive rho: max offset from base_rho (bounds rho in [base-delta, base+delta]).")
+    parser.add_argument("--hrot_ecot_egsm_rho_grad_clip", type=float, default=1.0,
+                        help="EGSM adaptive rho: gradient clipping max norm to stabilize Sinkhorn backprop.")
+    parser.add_argument("--hrot_ecot_egsm_rho_reg_lambda", type=float, default=0.01,
+                        help="EGSM adaptive rho: L2 regularization strength toward base_rho.")
     parser.add_argument(
         "--hrot_ecot_transport_mode",
         type=str,
@@ -2416,7 +2468,18 @@ def get_model(args):
                 hrot_ecot_rho_bank = "1.0"
                 hrot_ecot_base_rho = 1.0
                 ecot_transport_mode = "balanced"
-        hrot_label = "ours" if args.model in OURS_MODEL_NAMES else ("m2" if args.model in M2_MODEL_NAMES else "hrot_fsl")
+        if args.model in OURS_CPM_MODEL_NAMES:
+            cpm_rho_bank = getattr(args, "cpm_rho_bank", None)
+            if cpm_rho_bank is not None:
+                hrot_ecot_rho_bank = str(cpm_rho_bank)
+            else:
+                hrot_ecot_rho_bank = "0.7,0.8,0.9"
+        hrot_label = (
+            "ours_cpm" if args.model in OURS_CPM_MODEL_NAMES
+            else "ours" if args.model in OURS_MODEL_NAMES
+            else "m2" if args.model in M2_MODEL_NAMES
+            else "hrot_fsl"
+        )
         hrot_path_text = (
             "shot-decomposed single-budget episode-calibrated transport "
             if args.model in M2_LIKE_MODEL_NAMES
@@ -2475,6 +2538,11 @@ def get_model(args):
             f"ecot_ccdm_tau_q={getattr(args, 'hrot_ecot_ccdm_tau_q_init', 0.50)}, "
             f"ecot_ccdm_tau_b={getattr(args, 'hrot_ecot_ccdm_tau_b_init', 0.50)}, "
             f"ecot_ccdm_ew={getattr(args, 'hrot_ecot_ccdm_entropy_shot_weight', 0.0)}, "
+            f"ecot_egsm_enable={getattr(args, 'hrot_ecot_enable_egsm', 'auto')}, "
+            f"ecot_egsm_hidden={getattr(args, 'hrot_ecot_egsm_hidden_dim', 32)}, "
+            f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.95)}), "
+            f"ecot_egsm_adaptive_rho={getattr(args, 'hrot_ecot_egsm_adaptive_rho', 'false')}, "
+            f"ecot_egsm_rho_delta_max={getattr(args, 'hrot_ecot_egsm_rho_delta_max', 0.15)}, "
             f"ecot_transport_mode={ecot_transport_mode}, "
             f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
             f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
@@ -2532,6 +2600,19 @@ def get_model(args):
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
                 "full_defaults=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in)"
+            )
+        if args.model in OURS_CPM_MODEL_NAMES:
+            cpm_ablation = str(getattr(args, "cpm_ablation", "full"))
+            cpm_alpha = float(getattr(args, "cpm_alpha", 1.0))
+            cpm_rho = getattr(args, "cpm_rho_bank", None) or "0.7,0.8,0.9"
+            egsm_text = "EGSM on" if cpm_ablation != "no_egsm" else "EGSM off"
+            budget_text = f"rho_bank=[{cpm_rho}]" if cpm_ablation != "single_budget" else "rho_bank=[0.8]"
+            print(
+                "  ours_cpm_design: "
+                f"ablation={cpm_ablation}, "
+                f"score=-{cpm_alpha}*cost/(mass+eps), "
+                f"{budget_text}, {egsm_text}, "
+                f"detach_mass=True"
             )
     if args.model == "ec_mrot":
         hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
@@ -2922,6 +3003,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_ccdm_tau_b_init",
             "hrot_ecot_ccdm_entropy_reg",
             "hrot_ecot_ccdm_entropy_shot_weight",
+            "hrot_ecot_enable_egsm",
+            "hrot_ecot_egsm_hidden_dim",
+            "hrot_ecot_egsm_candidate_tau_q",
+            "hrot_ecot_egsm_candidate_tau_b",
+            "hrot_ecot_egsm_kappa_min",
+            "hrot_ecot_egsm_kappa_max",
             "hrot_ecot_enable_noise_sink",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
@@ -2962,6 +3049,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             and any(key.startswith("ccdm_marginal.") for key in state_dict)
         ):
             overrides["hrot_ecot_enable_ccdm_marginal"] = "true"
+        if (
+            "hrot_ecot_enable_egsm" not in overrides
+            and any(key.startswith("egsm_marginal.") for key in state_dict)
+        ):
+            overrides["hrot_ecot_enable_egsm"] = "true"
         if "hrot_use_cata" not in overrides and any(key.startswith("cata.") for key in state_dict):
             overrides["hrot_use_cata"] = "true"
         cata_anchors = state_dict.get("cata.anchors")

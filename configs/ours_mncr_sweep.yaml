@@ -1,0 +1,60 @@
+# Direction C: MNCR sweep with Ours (rho=0.8 fixed, EGSM on).
+#
+# MNCR refines the cost matrix before Sinkhorn by reducing cost for mutual
+# nearest-neighbor matches:  D_ref = D * (1 - lam * R * C)
+# This is orthogonal to rho and EGSM — it improves cost matrix quality
+# without changing the mass budget or marginal structure.
+#
+# Sweep grid: tau x lam = {0.3, 0.5, 0.7} x {0.2, 0.5, 0.8}
+# Run with:  --model ours --hrot_use_mncr true --hrot_mncr_temperature <T> --hrot_mncr_lam <L>
+
+baseline:
+  hrot_use_mncr: false
+
+# tau=0.3 (sharper soft-NN, more selective mutual agreement)
+mncr_t03_l02:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.3
+  hrot_mncr_lam: 0.2
+
+mncr_t03_l05:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.3
+  hrot_mncr_lam: 0.5
+
+mncr_t03_l08:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.3
+  hrot_mncr_lam: 0.8
+
+# tau=0.5 (moderate soft-NN, balanced)
+mncr_t05_l02:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.2
+
+mncr_t05_l05:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.5
+
+mncr_t05_l08:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.5
+  hrot_mncr_lam: 0.8
+
+# tau=0.7 (softer nearest-neighbor, more diffuse mutual agreement)
+mncr_t07_l02:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.7
+  hrot_mncr_lam: 0.2
+
+mncr_t07_l05:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.7
+  hrot_mncr_lam: 0.5
+
+mncr_t07_l08:
+  hrot_use_mncr: true
+  hrot_mncr_temperature: 0.7
+  hrot_mncr_lam: 0.8
