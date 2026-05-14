@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from types import SimpleNamespace
 
 import torch
@@ -46,7 +47,7 @@ def test_ours_differential_mode_off_matches_base_ground_cost():
 
 def test_ours_differential_mode_ground_cost_matches_manual_transform():
     torch.manual_seed(412)
-    model = _tiny_ours(use_differential_mode=True, dm_alpha=0.0)
+    model = _tiny_ours(use_differential_mode=True, dm_alpha=0.0, dm_debug=False)
     model.eval()
     query = torch.randn(3, 4, model.token_dim)
     support = torch.randn(10, 4, model.token_dim)
@@ -61,7 +62,7 @@ def test_ours_differential_mode_ground_cost_matches_manual_transform():
 
 def test_ours_differential_mode_updates_and_blends_global_template():
     torch.manual_seed(413)
-    model = _tiny_ours(use_differential_mode=True, dm_alpha=0.25)
+    model = _tiny_ours(use_differential_mode=True, dm_alpha=0.25, dm_debug=False)
     query = torch.randn(2, 4, model.token_dim)
     support_train = torch.randn(6, 4, model.token_dim)
     support_eval = torch.randn(6, 4, model.token_dim)
@@ -83,7 +84,7 @@ def test_ours_differential_mode_updates_and_blends_global_template():
     assert torch.allclose(cost, expected, atol=1e-6, rtol=1e-6)
 
 
-def test_ours_differential_mode_factory_and_forward_train_eval():
+def test_ours_differential_mode_factory_and_forward_train_eval(tmp_path):
     torch.manual_seed(414)
     model = build_model_from_args(
         SimpleNamespace(
@@ -91,6 +92,8 @@ def test_ours_differential_mode_factory_and_forward_train_eval():
             ours_ablation="full",
             use_differential_mode="true",
             dm_alpha=0.5,
+            dm_debug_dir=str(tmp_path / "factory_debug"),
+            dm_debug_max_episodes=2,
             device="cpu",
             image_size=64,
             fewshot_backbone="conv64f",
@@ -101,6 +104,7 @@ def test_ours_differential_mode_factory_and_forward_train_eval():
         )
     )
     assert model.use_differential_mode
+    assert model.dm_debug
     assert model.dm_alpha == 0.5
     assert all(not name.startswith("dm_") for name, _param in model.named_parameters())
 
@@ -114,6 +118,9 @@ def test_ours_differential_mode_factory_and_forward_train_eval():
 
     assert outputs["logits"].shape == (2, 2)
     assert torch.isfinite(outputs["logits"]).all()
+    assert "dm_mu_norm" in outputs
+    assert "dm_residual_ratio" in outputs
+    assert outputs["dm_mu_token_norm"].shape[-1] == outputs["query_euclidean_tokens"].shape[-2]
     assert model.dm_global_template.shape == outputs["query_euclidean_tokens"].shape[-2:]
     assert model.dm_template_count.item() > 0.0
 
@@ -125,6 +132,65 @@ def test_ours_differential_mode_factory_and_forward_train_eval():
     assert eval_outputs["logits"].shape == (2, 2)
     assert torch.isfinite(eval_outputs["logits"]).all()
     assert model.dm_template_count.item() == count_after_train
+
+
+def test_ours_differential_mode_debug_writes_metrics_and_heatmap(tmp_path):
+    torch.manual_seed(415)
+    model = _tiny_ours(
+        use_differential_mode=True,
+        dm_debug_dir=str(tmp_path),
+        dm_debug_max_episodes=1,
+    )
+    model.eval()
+    query = torch.randn(2, 4, model.token_dim)
+    support = torch.randn(6, 4, model.token_dim)
+
+    _ = model._ground_cost(query, support)
+    _ = model._ground_cost(query, support)
+
+    csv_path = tmp_path / "dmt_debug_metrics.csv"
+    heatmap_path = tmp_path / "dmt_mu_heatmap_0001.png"
+    assert csv_path.exists()
+    assert heatmap_path.exists()
+    with csv_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert float(rows[0]["dm_mu_norm"]) > 0.0
+    assert float(rows[0]["dm_residual_ratio"]) > 0.0
+
+
+def test_ours_differential_mode_debug_is_gated_by_dmt(tmp_path):
+    torch.manual_seed(416)
+    model = _tiny_ours(
+        use_differential_mode=False,
+        dm_debug=True,
+        dm_debug_dir=str(tmp_path),
+    )
+    model.eval()
+    query = torch.randn(2, 4, model.token_dim)
+    support = torch.randn(6, 4, model.token_dim)
+
+    _ = model._ground_cost(query, support)
+
+    assert not (tmp_path / "dmt_debug_metrics.csv").exists()
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_ours_differential_mode_debug_can_be_disabled(tmp_path):
+    torch.manual_seed(417)
+    model = _tiny_ours(
+        use_differential_mode=True,
+        dm_debug=False,
+        dm_debug_dir=str(tmp_path),
+    )
+    model.eval()
+    query = torch.randn(2, 4, model.token_dim)
+    support = torch.randn(6, 4, model.token_dim)
+
+    _ = model._ground_cost(query, support)
+
+    assert not (tmp_path / "dmt_debug_metrics.csv").exists()
+    assert not list(tmp_path.glob("*.png"))
 
 
 def test_differential_mode_factory_config_is_ours_only():

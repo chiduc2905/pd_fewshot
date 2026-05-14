@@ -2317,6 +2317,9 @@ def build_model_from_args(args):
                         default=False,
                     ),
                     "dm_alpha": float(getattr(args, "dm_alpha", 0.0)),
+                    "dm_debug": str(getattr(args, "dm_debug", "auto")),
+                    "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
+                    "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                 }
                 if is_ours_model
                 else {}

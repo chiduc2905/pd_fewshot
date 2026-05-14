@@ -1130,6 +1130,25 @@ def get_args():
         help="Ours DMT inference blend alpha for the running global support template; 0 uses episode mean only.",
     )
     parser.add_argument(
+        "--dm_debug",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Ours DMT only: auto writes DMT metrics and mu heatmaps whenever --use_differential_mode true.",
+    )
+    parser.add_argument(
+        "--dm_debug_dir",
+        type=str,
+        default="results/dmt_debug",
+        help="Directory for Ours DMT debug CSV and heatmaps.",
+    )
+    parser.add_argument(
+        "--dm_debug_max_episodes",
+        type=int,
+        default=5,
+        help="Maximum Ours DMT debug episodes to export; 0 means no cap.",
+    )
+    parser.add_argument(
         "--hrot_ecot_identity_reg",
         "--ecot_identity_reg",
         dest="hrot_ecot_identity_reg",
@@ -2511,6 +2530,7 @@ def get_model(args):
                 f"ablation={ours_ablation}, "
                 f"active_design={token_text}+{transport_text}+{evidence_text}, "
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
+                f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
                 "full_defaults=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in)"
             )
     if args.model == "ec_mrot":

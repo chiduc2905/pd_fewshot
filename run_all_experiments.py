@@ -108,6 +108,16 @@ def get_args():
             "Default keeps the previous seed-42 benchmark episodes."
         ),
     )
+    parser.add_argument(
+        "--final_test_seeds",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated final-test episode seeds. The first seed is used for "
+            "the normal post-train final test; remaining seeds run test-only from "
+            "the saved final checkpoint."
+        ),
+    )
     parser.add_argument("--shot_num", type=int, default=None, choices=[1, 5], help="Optional fixed shot number")
     parser.add_argument("--mode_id", type=int, default=None, choices=[1, 2, 3, 4], help="Optional sample mode")
     parser.add_argument(
@@ -559,6 +569,32 @@ def build_ours_ablation_variants():
     ]
 
 
+def build_final_checkpoint_path(dataset_name, model, samples, shot, experiment_tag=None):
+    samples_suffix = f"{samples}samples" if samples is not None else "all"
+    tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
+    return os.path.join(
+        "checkpoints",
+        f"{dataset_name}_{model}_{samples_suffix}_{shot}shot{tag_suffix}_final.pth",
+    )
+
+
+def set_cli_option(cmd, flag, value):
+    updated = []
+    replaced = False
+    i = 0
+    while i < len(cmd):
+        if cmd[i] == flag:
+            updated.extend([flag, str(value)])
+            i += 2
+            replaced = True
+        else:
+            updated.append(cmd[i])
+            i += 1
+    if not replaced:
+        updated.extend([flag, str(value)])
+    return updated
+
+
 def run_experiment(
     model,
     shot,
@@ -583,6 +619,7 @@ def run_experiment(
     variant_args=None,
     experiment_tag=None,
     experiment_label=None,
+    extra_final_test_seeds=None,
 ):
     applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
 
@@ -602,7 +639,11 @@ def run_experiment(
         print(f"Noise Root  : {noise_test_root}")
         print(f"Noise Splits: {', '.join(discover_noise_test_splits(noise_test_root, noise_test_splits))}")
     print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
-    print(f"Test Seed   : final_test_seed={final_test_seed}")
+    if extra_final_test_seeds:
+        seed_text = ",".join(str(seed) for seed in [final_test_seed, *extra_final_test_seeds])
+        print(f"Test Seeds  : final_test_seeds={seed_text}")
+    else:
+        print(f"Test Seed   : final_test_seed={final_test_seed}")
     if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
         print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
     if model.startswith("spif"):
@@ -763,10 +804,44 @@ def run_experiment(
 
     try:
         subprocess.run(cmd, check=True)
-        return True
     except subprocess.CalledProcessError as exc:
         print(f"Error: {exc}")
         return False
+
+    if extra_final_test_seeds:
+        if use_external_smnet:
+            print("Warning: extra final-test seeds are not implemented for external smnet models; skipping.")
+            return True
+
+        checkpoint_path = build_final_checkpoint_path(
+            dataset_name=dataset_name,
+            model=model,
+            samples=samples,
+            shot=shot,
+            experiment_tag=experiment_tag,
+        )
+        if not os.path.exists(checkpoint_path):
+            print(f"Error: trained checkpoint not found for extra seed tests: {checkpoint_path}")
+            return False
+
+        for extra_seed in extra_final_test_seeds:
+            seed_tag = f"testseed{extra_seed}"
+            if experiment_tag:
+                seed_tag = f"{experiment_tag}_{seed_tag}"
+            test_cmd = list(cmd)
+            test_cmd = set_cli_option(test_cmd, "--mode", "test")
+            test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_path)
+            test_cmd = set_cli_option(test_cmd, "--final_test_seed", str(extra_seed))
+            test_cmd = set_cli_option(test_cmd, "--experiment_tag", seed_tag)
+
+            print(f"\nExtra final test: seed={extra_seed}, checkpoint={checkpoint_path}")
+            try:
+                subprocess.run(test_cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"Error: {exc}")
+                return False
+
+    return True
 
 
 def generate_comparison_charts(dataset_name, shots, models, test_protocol="clean", test_split_names=None):
@@ -872,8 +947,35 @@ def parse_mode_ids(mode_ids_str):
     return parsed
 
 
+def parse_final_test_seeds(seed_list_str):
+    if seed_list_str is None or not str(seed_list_str).strip():
+        return None
+    parsed = []
+    for token in str(seed_list_str).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        parsed.append(int(token))
+    if not parsed:
+        return None
+    return parsed
+
+
+def format_final_test_seed_line(args):
+    extra_seeds = list(getattr(args, "extra_final_test_seeds", []) or [])
+    if extra_seeds:
+        seeds = [int(args.final_test_seed), *[int(seed) for seed in extra_seeds]]
+        return f"Test Seeds  : final_test_seeds={','.join(str(seed) for seed in seeds)}"
+    return f"Test Seed   : final_test_seed={args.final_test_seed}"
+
+
 def main():
     args = get_args()
+    final_test_seeds = parse_final_test_seeds(getattr(args, "final_test_seeds", None))
+    if final_test_seeds is None:
+        final_test_seeds = [int(args.final_test_seed)]
+    args.final_test_seed = int(final_test_seeds[0])
+    args.extra_final_test_seeds = [int(seed) for seed in final_test_seeds[1:]]
     parsed_mode_ids = parse_mode_ids(getattr(args, "mode_ids", None))
     if args.mode_id is not None and parsed_mode_ids is not None:
         raise ValueError("Use either --mode_id or --mode_ids, not both.")
@@ -961,7 +1063,7 @@ def main():
             print(f"  - {variant['tag']}: {variant['label']}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
-        print(f"Test Seed   : final_test_seed={args.final_test_seed}")
+        print(format_final_test_seed_line(args))
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1081,7 +1183,7 @@ def main():
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
-        print(f"Test Seed   : final_test_seed={args.final_test_seed}")
+        print(format_final_test_seed_line(args))
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1132,7 +1234,7 @@ def main():
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
-        print(f"Test Seed   : final_test_seed={args.final_test_seed}")
+        print(format_final_test_seed_line(args))
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1243,6 +1345,7 @@ def main():
             variant_args=experiment["variant_args"],
             experiment_tag=experiment["experiment_tag"],
             experiment_label=experiment["experiment_label"],
+            extra_final_test_seeds=args.extra_final_test_seeds,
         )
         if success:
             success_count += 1

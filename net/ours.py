@@ -9,6 +9,10 @@ full model path untouched.
 
 from __future__ import annotations
 
+import csv
+import math
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -88,6 +92,29 @@ def _bool_config(value: bool | str) -> bool:
     return bool(value)
 
 
+def _resolve_dm_debug(value: bool | str, use_differential_mode: bool) -> bool:
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return bool(use_differential_mode)
+    return _bool_config(value) and bool(use_differential_mode)
+
+
+def _infer_token_hw(num_tokens: int) -> tuple[int, int]:
+    if num_tokens <= 0:
+        raise ValueError("num_tokens must be positive")
+    root = int(math.sqrt(num_tokens))
+    best = (1, num_tokens)
+    best_gap = num_tokens - 1
+    for height in range(1, root + 1):
+        if num_tokens % height != 0:
+            continue
+        width = num_tokens // height
+        gap = abs(width - height)
+        if gap < best_gap:
+            best = (height, width)
+            best_gap = gap
+    return best
+
+
 class OursM2(JECOTM2):
     """Paper-facing Ours entrypoint plus coarse contribution ablations."""
 
@@ -97,13 +124,23 @@ class OursM2(JECOTM2):
         ours_ablation: str = "full",
         use_differential_mode: bool = False,
         dm_alpha: float = 0.0,
+        dm_debug: bool | str = "auto",
+        dm_debug_dir: str = "results/dmt_debug",
+        dm_debug_max_episodes: int = 5,
         **kwargs,
     ) -> None:
         if not 0.0 <= float(dm_alpha) <= 1.0:
             raise ValueError("dm_alpha must be in [0, 1]")
+        if int(dm_debug_max_episodes) < 0:
+            raise ValueError("dm_debug_max_episodes must be non-negative")
         self.ours_ablation = normalize_ours_ablation(ours_ablation)
         self.use_differential_mode = _bool_config(use_differential_mode)
         self.dm_alpha = float(dm_alpha)
+        self.dm_debug = _resolve_dm_debug(dm_debug, self.use_differential_mode)
+        self.dm_debug_dir = str(dm_debug_dir)
+        self.dm_debug_max_episodes = int(dm_debug_max_episodes)
+        self._dm_debug_count = 0
+        self._last_dm_diagnostics: dict[str, torch.Tensor] | None = None
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
         super().__init__(
             *args,
@@ -174,7 +211,119 @@ class OursM2(JECOTM2):
         support_diff = support_tokens - template.unsqueeze(0)
         torch._assert(query_diff.shape == query_tokens.shape, "DMT changed query token shape")
         torch._assert(support_diff.shape == support_tokens.shape, "DMT changed support token shape")
+        self._last_dm_diagnostics = self._build_differential_mode_diagnostics(
+            template,
+            query_tokens,
+            support_tokens,
+            query_diff,
+            support_diff,
+        )
+        self._maybe_export_differential_mode_debug(template, self._last_dm_diagnostics)
         return query_diff, support_diff
+
+    def _build_differential_mode_diagnostics(
+        self,
+        template: torch.Tensor,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        query_diff: torch.Tensor,
+        support_diff: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        eps = float(self.eps)
+        query_residual_ratio = query_diff.norm() / query_tokens.norm().clamp_min(eps)
+        support_residual_ratio = support_diff.norm() / support_tokens.norm().clamp_min(eps)
+        residual_ratio = 0.5 * (query_residual_ratio + support_residual_ratio)
+        token_norm = template.norm(dim=-1)
+        return {
+            "dm_mu_norm": token_norm.mean(),
+            "dm_mu_max_norm": token_norm.max(),
+            "dm_mu_support_ratio": template.norm() / support_tokens.norm().clamp_min(eps),
+            "dm_query_residual_ratio": query_residual_ratio,
+            "dm_support_residual_ratio": support_residual_ratio,
+            "dm_residual_ratio": residual_ratio,
+            "dm_alpha": template.new_tensor(float(self.dm_alpha)),
+            "dm_template_count": self.dm_template_count.to(device=template.device, dtype=template.dtype),
+            "dm_mu_token_norm": token_norm.detach(),
+        }
+
+    def _maybe_export_differential_mode_debug(
+        self,
+        template: torch.Tensor,
+        diagnostics: dict[str, torch.Tensor],
+    ) -> None:
+        if not self.dm_debug:
+            return
+        if self.dm_debug_max_episodes > 0 and self._dm_debug_count >= self.dm_debug_max_episodes:
+            return
+        self._dm_debug_count += 1
+        debug_idx = self._dm_debug_count
+        try:
+            os.makedirs(self.dm_debug_dir, exist_ok=True)
+        except OSError as exc:  # pragma: no cover - depends on filesystem permissions
+            print(f"[Ours-DMT] debug disabled: cannot create {self.dm_debug_dir}: {exc}")
+            return
+
+        token_norm = diagnostics["dm_mu_token_norm"].detach().float().cpu()
+        token_hw = _infer_token_hw(int(token_norm.numel()))
+        heatmap_path = os.path.join(self.dm_debug_dir, f"dmt_mu_heatmap_{debug_idx:04d}.png")
+
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+
+            heatmap = token_norm.reshape(*token_hw).numpy()
+            fig, ax = plt.subplots(figsize=(5.0, 4.2))
+            image = ax.imshow(heatmap, cmap="magma")
+            ax.set_title(
+                "Ours DMT common component | "
+                f"mu_norm={float(diagnostics['dm_mu_norm'].detach().cpu()):.4f}"
+            )
+            ax.set_xlabel("token x")
+            ax.set_ylabel("token y")
+            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+            fig.tight_layout()
+            fig.savefig(heatmap_path, dpi=180, bbox_inches="tight")
+            plt.close(fig)
+        except Exception as exc:  # pragma: no cover - defensive debug path
+            heatmap_path = f"failed: {exc}"
+
+        csv_path = os.path.join(self.dm_debug_dir, "dmt_debug_metrics.csv")
+        write_header = not os.path.exists(csv_path)
+        row = {
+            "episode": debug_idx,
+            "training": int(self.training),
+            "dm_alpha": float(diagnostics["dm_alpha"].detach().cpu()),
+            "dm_template_count": float(diagnostics["dm_template_count"].detach().cpu()),
+            "dm_mu_norm": float(diagnostics["dm_mu_norm"].detach().cpu()),
+            "dm_mu_max_norm": float(diagnostics["dm_mu_max_norm"].detach().cpu()),
+            "dm_mu_support_ratio": float(diagnostics["dm_mu_support_ratio"].detach().cpu()),
+            "dm_query_residual_ratio": float(diagnostics["dm_query_residual_ratio"].detach().cpu()),
+            "dm_support_residual_ratio": float(diagnostics["dm_support_residual_ratio"].detach().cpu()),
+            "dm_residual_ratio": float(diagnostics["dm_residual_ratio"].detach().cpu()),
+            "heatmap_path": heatmap_path,
+        }
+        try:
+            with open(csv_path, "a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
+        except OSError as exc:  # pragma: no cover - depends on filesystem permissions
+            print(f"[Ours-DMT] debug metrics skipped: cannot write {csv_path}: {exc}")
+            return
+
+        print(
+            "[Ours-DMT] "
+            f"episode={debug_idx} "
+            f"mu_norm={row['dm_mu_norm']:.6f} "
+            f"mu_support_ratio={row['dm_mu_support_ratio']:.6f} "
+            f"residual_ratio={row['dm_residual_ratio']:.6f} "
+            f"q_residual={row['dm_query_residual_ratio']:.6f} "
+            f"s_residual={row['dm_support_residual_ratio']:.6f} "
+            f"heatmap={heatmap_path}"
+        )
 
     def _ground_cost(self, query_tokens: torch.Tensor, class_tokens: torch.Tensor) -> torch.Tensor:
         query_tokens, class_tokens = self._apply_differential_mode_to_cost_tokens(
@@ -182,6 +331,34 @@ class OursM2(JECOTM2):
             class_tokens,
         )
         return super()._ground_cost(query_tokens, class_tokens)
+
+    def _forward_episode(self, *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
+        self._last_dm_diagnostics = None
+        outputs = super()._forward_episode(*args, **kwargs)
+        if isinstance(outputs, dict) and self._last_dm_diagnostics is not None:
+            outputs.update(self._last_dm_diagnostics)
+        return outputs
+
+    def _stack_outputs(self, batch_outputs: list[dict[str, torch.Tensor]]) -> HROTFSLResult:
+        stacked = super()._stack_outputs(batch_outputs)
+        for key in (
+            "dm_mu_norm",
+            "dm_mu_max_norm",
+            "dm_mu_support_ratio",
+            "dm_query_residual_ratio",
+            "dm_support_residual_ratio",
+            "dm_residual_ratio",
+            "dm_alpha",
+            "dm_template_count",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
+        if "dm_mu_token_norm" in batch_outputs[0]:
+            stacked["dm_mu_token_norm"] = torch.stack(
+                [item["dm_mu_token_norm"] for item in batch_outputs],
+                dim=0,
+            )
+        return stacked
 
     def _forward_prototype_episode(
         self,
