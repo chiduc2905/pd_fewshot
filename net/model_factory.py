@@ -76,6 +76,32 @@ M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
 HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES))
 
 
+def resolve_hrot_ecot_enable_egsm(args) -> str:
+    """Resolve ``--hrot_ecot_enable_egsm`` to ``'true'`` or ``'false'`` (no auto).
+
+    If the flag is omitted, defaults to ``true`` for ``ours`` / ``ours_cpm`` and
+    ``false`` for other J_ECOT_M2-style models (e.g. ``m2``).
+    """
+    raw = getattr(args, "hrot_ecot_enable_egsm", None)
+    if raw is not None and str(raw).strip() != "":
+        resolved = str(raw).strip().lower()
+        if resolved in {"auto", "none"}:
+            raise ValueError(
+                "hrot_ecot_enable_egsm no longer accepts 'auto' or 'none'; "
+                "use true or false, or omit the flag for model defaults."
+            )
+        if resolved not in {"true", "false"}:
+            raise ValueError(
+                "hrot_ecot_enable_egsm must be 'true' or 'false' "
+                f"(got {raw!r}; legacy 'auto' is no longer supported)."
+            )
+        return resolved
+    model = str(getattr(args, "model", "")).strip().lower()
+    if model in OURS_MODEL_NAMES or model in OURS_CPM_MODEL_NAMES:
+        return "true"
+    return "false"
+
+
 MODEL_REGISTRY = {
     "cosine": {
         "display_name": "Cosine Classifier",
@@ -422,8 +448,8 @@ MODEL_REGISTRY = {
     "ours": {
         "display_name": "Ours",
         "paper_name": "Ours",
-        "architecture": "Backbone spatial tokens -> optional CATA anchor aggregation -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations swap transport relaxation or token transport for a prototype control",
-        "metric": "Single-Budget Token UOT",
+        "architecture": "Backbone local descriptors -> EGSM marginals -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations test full OT, no EGSM, and GAP descriptor cost + UOT",
+        "metric": "EGSM-Calibrated Single-Budget Token UOT",
     },
     "ours_cpm": {
         "display_name": "Ours-CPM",
@@ -2307,11 +2333,7 @@ def build_model_from_args(args):
         ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
         if is_m2_like_model and not is_ours_cpm_model and ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if is_m2_full_ot else "unbalanced"
-        _egsm_cli = str(getattr(args, "hrot_ecot_enable_egsm", "auto")).strip().lower()
-        if _egsm_cli in {"auto", "none", ""}:
-            _hrot_ecot_egsm_kw = {} if (is_ours_model or is_ours_cpm_model) else {"ecot_enable_egsm": False}
-        else:
-            _hrot_ecot_egsm_kw = {"ecot_enable_egsm": _bool_flag(getattr(args, "hrot_ecot_enable_egsm"), default=False)}
+        ecot_enable_egsm_flag = _bool_flag(resolve_hrot_ecot_enable_egsm(args), default=False)
         return HROTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,
@@ -2466,6 +2488,7 @@ def build_model_from_args(args):
             ecot_ccdm_tau_b_init=float(getattr(args, "hrot_ecot_ccdm_tau_b_init", 0.50)),
             ecot_ccdm_entropy_reg=float(getattr(args, "hrot_ecot_ccdm_entropy_reg", 0.0)),
             ecot_ccdm_entropy_shot_weight=float(getattr(args, "hrot_ecot_ccdm_entropy_shot_weight", 0.0)),
+            ecot_enable_egsm=ecot_enable_egsm_flag,
             ecot_egsm_hidden_dim=int(getattr(args, "hrot_ecot_egsm_hidden_dim", 32)),
             ecot_egsm_candidate_tau_q=float(getattr(args, "hrot_ecot_egsm_candidate_tau_q", 0.5)),
             ecot_egsm_candidate_tau_b=float(getattr(args, "hrot_ecot_egsm_candidate_tau_b", 0.5)),
@@ -2563,7 +2586,6 @@ def build_model_from_args(args):
             cata_num_heads=int(getattr(args, "hrot_cata_num_heads", 4)),
             cata_attn_dropout=float(getattr(args, "hrot_cata_attn_dropout", 0.0)),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
-            **_hrot_ecot_egsm_kw,
         )
     if args.model == "ec_mrot":
         ECMROT = _load_symbol("net.ec_mrot", "ECMROT")

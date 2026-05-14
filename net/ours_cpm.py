@@ -75,13 +75,13 @@ def apply_ours_cpm_defaults(kwargs: dict, ablation: str) -> dict:
     kwargs["ecot_enable_mea_marginal"] = False
     kwargs["ecot_enable_crs_marginal"] = False
 
-    if kwargs.get("ecot_enable_egsm") is None:
-        kwargs["ecot_enable_egsm"] = ablation != "no_egsm"
+    if ablation == "no_egsm":
+        kwargs["ecot_enable_egsm"] = False
+    else:
+        kwargs.setdefault("ecot_enable_egsm", True)
 
     if ablation == "single_budget":
         kwargs["ecot_rho_bank"] = "0.8"
-    elif ablation == "no_egsm":
-        kwargs["ecot_enable_egsm"] = False
 
     return kwargs
 

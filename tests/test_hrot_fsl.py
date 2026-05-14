@@ -315,20 +315,26 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert full.ecot_m2_tau_aqm == 1.0
     assert not full.ecot_m2_use_swts
     assert full.ecot_m2_swts_temp == 1.0
+    assert full.uses_ecot_egsm_marginal
 
-    balanced = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="balanced_ot", **base_args))
-    assert balanced.ecot_rho_bank == (1.0,)
-    assert balanced.ecot_base_rho == 1.0
-    assert balanced.ecot_transport_mode == "balanced"
-    assert not balanced.uses_unbalanced_transport
-    assert not balanced.ecot_m2_use_aqm
-    assert not balanced.ecot_m2_use_swts
+    full_ot = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="full_ot", **base_args))
+    assert full_ot.ours_ablation == "full_ot"
+    assert full_ot.ecot_rho_bank == (1.0,)
+    assert full_ot.ecot_base_rho == 1.0
+    assert full_ot.ecot_transport_mode == "balanced"
+    assert not full_ot.uses_unbalanced_transport
+    assert full_ot.uses_ecot_egsm_marginal
+    assert not full_ot.ecot_m2_use_aqm
+    assert not full_ot.ecot_m2_use_swts
 
-    uniform = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="uniform_evidence", **base_args))
-    assert uniform.ecot_transport_mode == "unbalanced"
-    assert uniform.uses_unbalanced_transport
-    assert not uniform.ecot_m2_use_aqm
-    assert not uniform.ecot_m2_use_swts
+    no_egsm = build_model_from_args(SimpleNamespace(model="ours", ours_ablation="no_egsm", **base_args))
+    assert no_egsm.ours_ablation == "no_egsm"
+    assert no_egsm.ecot_transport_mode == "unbalanced"
+    assert no_egsm.uses_unbalanced_transport
+    assert not no_egsm.uses_ecot_egsm_marginal
+    assert no_egsm.egsm_marginal is None
+    assert not no_egsm.ecot_m2_use_aqm
+    assert not no_egsm.ecot_m2_use_swts
 
     cpm_like = build_model_from_args(
         SimpleNamespace(
@@ -344,12 +350,12 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert cpm_like.ecot_m2_cost_per_mass_detach_mass
 
 
-def test_ours_prototype_ablation_forward_uses_global_prototype_control():
+def test_ours_gap_ablation_forward_uses_gap_descriptor_cost_and_uot():
     torch.manual_seed(390)
     model = build_model_from_args(
         SimpleNamespace(
             model="ours",
-            ours_ablation="prototype",
+            ours_ablation="gap",
             device="cpu",
             image_size=64,
             fewshot_backbone="conv64f",
@@ -368,9 +374,11 @@ def test_ours_prototype_ablation_forward_uses_global_prototype_control():
         outputs = model(query, support, return_aux=True)
 
     assert outputs["logits"].shape == (2, 3)
-    assert outputs["prototype_distance"].shape == (2, 3)
-    assert outputs["prototype_control"].item() == 1.0
-    assert "transport_plan" not in outputs
+    assert outputs["cost_matrix"].shape[-2:] == (1, 1)
+    assert outputs["transport_plan"].shape[-2:] == (1, 1)
+    assert outputs["query_euclidean_tokens"].shape[-2] == 1
+    assert outputs["support_euclidean_tokens"].shape[-2] == 1
+    assert not model.uses_ecot_egsm_marginal
 
 
 def test_m2_full_ot_forward_uses_balanced_full_mass_transport():

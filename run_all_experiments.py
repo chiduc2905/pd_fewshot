@@ -548,23 +548,23 @@ def build_ours_ablation_variants():
     return [
         {
             "tag": "ours_full",
-            "label": "Full Ours",
+            "label": "Full Ours: local descriptors + UOT + EGSM",
             "extra_args": ["--ours_ablation", "full"],
         },
         {
-            "tag": "ours_balanced_ot",
+            "tag": "ours_full_ot",
             "label": "Balanced full OT instead of UOT",
-            "extra_args": ["--ours_ablation", "balanced_ot"],
+            "extra_args": ["--ours_ablation", "full_ot"],
         },
         {
-            "tag": "ours_uniform_evidence",
-            "label": "Compatibility control with AQM/SWTS off",
-            "extra_args": ["--ours_ablation", "uniform_evidence"],
+            "tag": "ours_no_egsm",
+            "label": "Ours without EGSM marginals",
+            "extra_args": ["--ours_ablation", "no_egsm"],
         },
         {
-            "tag": "ours_prototype",
-            "label": "Global prototype control instead of token transport",
-            "extra_args": ["--ours_ablation", "prototype"],
+            "tag": "ours_gap",
+            "label": "GAP descriptor cost + UOT instead of local-descriptor cost",
+            "extra_args": ["--ours_ablation", "gap"],
         },
     ]
 
@@ -1075,7 +1075,7 @@ def main():
             "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
             "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
-            "augment=off, masks=off, Ours full=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in), "
+            "augment=off, masks=off, Ours full=local_descriptors+UOT(rho=0.8)+EGSM, "
             f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
             f"train SFC={DEEPEMD_5SHOT_TRAIN_SFC}, "
             f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "

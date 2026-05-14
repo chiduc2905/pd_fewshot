@@ -45,6 +45,7 @@ from net.model_factory import (
     get_model_choices,
     get_model_metadata,
     resolve_fewshot_backbone,
+    resolve_hrot_ecot_enable_egsm,
 )
 from visualization import (
     compute_support_episode_distribution,
@@ -1109,12 +1110,12 @@ def get_args():
         "--ours_ablation",
         type=str,
         default="full",
-        choices=["full", "balanced_ot", "uniform_evidence", "prototype"],
+        choices=["full", "full_ot", "no_egsm", "gap", "balanced_ot", "uniform_evidence", "prototype"],
         help=(
-            "Ours only: contribution ablation selector. full=mass-removed UOT with AQM/SWTS off (CATA optional via --hrot_use_cata), "
-            "balanced_ot=replaces UOT with full balanced OT, "
-            "uniform_evidence is retained as the AQM/SWTS-off compatibility setting, "
-            "prototype replaces token transport with global prototypes."
+            "Ours only: contribution ablation selector. full=local descriptors + UOT + EGSM, "
+            "full_ot=replaces UOT with balanced full OT, "
+            "no_egsm disables EGSM marginals, "
+            "gap uses global-average-pooled image descriptors to build the UOT cost."
         ),
     )
     parser.add_argument(
@@ -1254,11 +1255,11 @@ def get_args():
     parser.add_argument(
         "--hrot_ecot_enable_egsm",
         type=str,
-        default="auto",
-        choices=["auto", "true", "false"],
+        default=None,
         help=(
-            "J_ECOT_M2 / Ours: EGSM marginals. auto=Ours full/balanced enable EGSM unless kwargs omit (factory); "
-            "explicit true/false overrides. Mutually exclusive with MEA/CCDM/CRS/NNCS."
+            "Episode-Gated Shrinkage Marginals (EGSM) for J_ECOT_M2 family: true or false only. "
+            "If omitted, defaults to true for models ours / ours_cpm and false for other J_ECOT_M2 "
+            "(e.g. m2). Mutually exclusive with MEA/CCDM/CRS/NNCS."
         ),
     )
     parser.add_argument("--hrot_ecot_egsm_hidden_dim", type=int, default=32)
@@ -2464,7 +2465,7 @@ def get_model(args):
             ecot_transport_mode = "balanced" if args.model in M2_FULL_OT_MODEL_NAMES else "unbalanced"
         if args.model in OURS_MODEL_NAMES:
             ours_ablation = str(getattr(args, "ours_ablation", "full"))
-            if ours_ablation == "balanced_ot":
+            if ours_ablation in {"full_ot", "balanced_ot"}:
                 hrot_ecot_rho_bank = "1.0"
                 hrot_ecot_base_rho = 1.0
                 ecot_transport_mode = "balanced"
@@ -2538,7 +2539,7 @@ def get_model(args):
             f"ecot_ccdm_tau_q={getattr(args, 'hrot_ecot_ccdm_tau_q_init', 0.50)}, "
             f"ecot_ccdm_tau_b={getattr(args, 'hrot_ecot_ccdm_tau_b_init', 0.50)}, "
             f"ecot_ccdm_ew={getattr(args, 'hrot_ecot_ccdm_entropy_shot_weight', 0.0)}, "
-            f"ecot_egsm_enable={getattr(args, 'hrot_ecot_enable_egsm', 'auto')}, "
+            f"ecot_egsm_enable={resolve_hrot_ecot_enable_egsm(args)}, "
             f"ecot_egsm_hidden={getattr(args, 'hrot_ecot_egsm_hidden_dim', 32)}, "
             f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.95)}), "
             f"ecot_egsm_adaptive_rho={getattr(args, 'hrot_ecot_egsm_adaptive_rho', 'false')}, "
@@ -2573,21 +2574,16 @@ def get_model(args):
         )
         if args.model in OURS_MODEL_NAMES:
             ours_ablation = str(getattr(args, "ours_ablation", "full"))
-            evidence_text = "AQM/SWTS off"
-            transport_text = "balanced full OT(rho=1.0)" if ours_ablation == "balanced_ot" else "UOT(rho=0.8)"
-            cata_setting = str(getattr(args, "hrot_use_cata", "auto")).strip().lower()
-            if cata_setting == "auto":
-                cata_enabled = False
-            else:
-                cata_enabled = _bool_flag(cata_setting, default=False)
-            token_text = (
-                f"CATA(N={getattr(args, 'hrot_cata_num_anchors', 8)})"
-                if cata_enabled
-                else "spatial tokens"
-            )
-            if ours_ablation == "prototype":
-                transport_text = "global prototype control"
-                evidence_text = "no token transport"
+            normalized_ours_ablation = {
+                "balanced_ot": "full_ot",
+                "uniform_evidence": "no_egsm",
+                "prototype": "gap",
+            }.get(ours_ablation, ours_ablation)
+            evidence_text = "EGSM off" if normalized_ours_ablation in {"no_egsm", "gap"} else "EGSM on"
+            transport_text = "balanced full OT(rho=1.0)" if normalized_ours_ablation == "full_ot" else "UOT(rho=0.8)"
+            token_text = "local descriptors"
+            if normalized_ours_ablation == "gap":
+                token_text = "GAP descriptors"
             dmt_text = (
                 "DMT on"
                 if _bool_flag(getattr(args, "use_differential_mode", "false"), default=False)
@@ -2599,7 +2595,7 @@ def get_model(args):
                 f"active_design={token_text}+{transport_text}+{evidence_text}, "
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
-                "full_defaults=spatial_tokens+UOT(rho=0.8)+AQM/SWTS off (CATA opt-in)"
+                "full_defaults=local_descriptors+UOT(rho=0.8)+EGSM"
             )
         if args.model in OURS_CPM_MODEL_NAMES:
             cpm_ablation = str(getattr(args, "cpm_ablation", "full"))
