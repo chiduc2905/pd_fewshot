@@ -98,6 +98,16 @@ def get_args():
         default="auto",
         help="Comma-separated SNR split folders to test, or auto to use all test_snr* folders.",
     )
+    parser.add_argument(
+        "--extra_test_protocols",
+        type=str,
+        default="none",
+        help=(
+            "Comma-separated extra final-test protocols to run test-only from the "
+            "trained checkpoint after the primary protocol. Extra protocols use "
+            "--final_test_seed only; --final_test_seeds applies to the primary protocol."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--final_test_seed",
@@ -595,6 +605,18 @@ def set_cli_option(cmd, flag, value):
     return updated
 
 
+def remove_cli_option(cmd, flag):
+    updated = []
+    i = 0
+    while i < len(cmd):
+        if cmd[i] == flag:
+            i += 2
+        else:
+            updated.append(cmd[i])
+            i += 1
+    return updated
+
+
 def run_experiment(
     model,
     shot,
@@ -620,6 +642,7 @@ def run_experiment(
     experiment_tag=None,
     experiment_label=None,
     extra_final_test_seeds=None,
+    extra_test_protocols=None,
 ):
     applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
 
@@ -639,6 +662,9 @@ def run_experiment(
         print(f"Noise Root  : {noise_test_root}")
         print(f"Noise Splits: {', '.join(discover_noise_test_splits(noise_test_root, noise_test_splits))}")
     print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
+    extra_test_protocols = list(extra_test_protocols or [])
+    if extra_test_protocols:
+        print(f"Extra Tests : {', '.join(extra_test_protocols)} (seed={final_test_seed})")
     if extra_final_test_seeds:
         seed_text = ",".join(str(seed) for seed in [final_test_seed, *extra_final_test_seeds])
         print(f"Test Seeds  : final_test_seeds={seed_text}")
@@ -808,9 +834,9 @@ def run_experiment(
         print(f"Error: {exc}")
         return False
 
-    if extra_final_test_seeds:
+    if extra_final_test_seeds or extra_test_protocols:
         if use_external_smnet:
-            print("Warning: extra final-test seeds are not implemented for external smnet models; skipping.")
+            print("Warning: extra final tests are not implemented for external smnet models; skipping.")
             return True
 
         checkpoint_path = build_final_checkpoint_path(
@@ -821,7 +847,7 @@ def run_experiment(
             experiment_tag=experiment_tag,
         )
         if not os.path.exists(checkpoint_path):
-            print(f"Error: trained checkpoint not found for extra seed tests: {checkpoint_path}")
+            print(f"Error: trained checkpoint not found for extra tests: {checkpoint_path}")
             return False
 
         for extra_seed in extra_final_test_seeds:
@@ -835,6 +861,33 @@ def run_experiment(
             test_cmd = set_cli_option(test_cmd, "--experiment_tag", seed_tag)
 
             print(f"\nExtra final test: seed={extra_seed}, checkpoint={checkpoint_path}")
+            try:
+                subprocess.run(test_cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"Error: {exc}")
+                return False
+
+        for extra_protocol in extra_test_protocols:
+            protocol_tag = f"{sanitize_result_tag(extra_protocol)}_testseed{final_test_seed}"
+            if experiment_tag:
+                protocol_tag = f"{experiment_tag}_{protocol_tag}"
+            test_cmd = list(cmd)
+            test_cmd = set_cli_option(test_cmd, "--mode", "test")
+            test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_path)
+            test_cmd = set_cli_option(test_cmd, "--final_test_seed", str(final_test_seed))
+            test_cmd = set_cli_option(test_cmd, "--test_protocol", extra_protocol)
+            test_cmd = set_cli_option(test_cmd, "--experiment_tag", protocol_tag)
+            if str(extra_protocol).lower() == "noise":
+                test_cmd = set_cli_option(test_cmd, "--noise_test_root", noise_test_root)
+                test_cmd = set_cli_option(test_cmd, "--noise_test_splits", noise_test_splits)
+            else:
+                test_cmd = remove_cli_option(test_cmd, "--noise_test_root")
+                test_cmd = remove_cli_option(test_cmd, "--noise_test_splits")
+
+            print(
+                f"\nExtra {extra_protocol} final test: "
+                f"seed={final_test_seed}, checkpoint={checkpoint_path}"
+            )
             try:
                 subprocess.run(test_cmd, check=True)
             except subprocess.CalledProcessError as exc:
@@ -961,12 +1014,38 @@ def parse_final_test_seeds(seed_list_str):
     return parsed
 
 
+def parse_extra_test_protocols(protocols_str):
+    if protocols_str is None or not str(protocols_str).strip():
+        return []
+    parsed = []
+    for token in str(protocols_str).split(","):
+        protocol = token.strip().lower()
+        if not protocol or protocol == "none":
+            continue
+        if protocol == "auto":
+            raise ValueError("--extra_test_protocols accepts concrete protocols: clean or noise.")
+        if protocol not in {"clean", "noise"}:
+            raise ValueError(
+                f"Invalid extra test protocol '{protocol}' in --extra_test_protocols "
+                "(expected clean or noise)."
+            )
+        if protocol not in parsed:
+            parsed.append(protocol)
+    return parsed
+
+
 def format_final_test_seed_line(args):
     extra_seeds = list(getattr(args, "extra_final_test_seeds", []) or [])
     if extra_seeds:
         seeds = [int(args.final_test_seed), *[int(seed) for seed in extra_seeds]]
         return f"Test Seeds  : final_test_seeds={','.join(str(seed) for seed in seeds)}"
     return f"Test Seed   : final_test_seed={args.final_test_seed}"
+
+
+def print_extra_test_protocol_line(args):
+    protocols = list(getattr(args, "extra_test_protocols", []) or [])
+    if protocols:
+        print(f"Extra Tests : {','.join(protocols)} with final_test_seed={args.final_test_seed}")
 
 
 def main():
@@ -976,6 +1055,7 @@ def main():
         final_test_seeds = [int(args.final_test_seed)]
     args.final_test_seed = int(final_test_seeds[0])
     args.extra_final_test_seeds = [int(seed) for seed in final_test_seeds[1:]]
+    requested_extra_test_protocols = parse_extra_test_protocols(getattr(args, "extra_test_protocols", None))
     parsed_mode_ids = parse_mode_ids(getattr(args, "mode_ids", None))
     if args.mode_id is not None and parsed_mode_ids is not None:
         raise ValueError("Use either --mode_id or --mode_ids, not both.")
@@ -1005,6 +1085,18 @@ def main():
         if effective_test_protocol == "noise"
         else []
     )
+    extra_test_protocols = [
+        protocol for protocol in requested_extra_test_protocols if protocol != effective_test_protocol
+    ]
+    if "noise" in extra_test_protocols:
+        extra_noise_splits = discover_noise_test_splits(args.noise_test_root, args.noise_test_splits)
+        if not extra_noise_splits:
+            raise ValueError(
+                "--extra_test_protocols noise requires --noise_test_root with at least one SNR test folder."
+            )
+        if not noise_test_split_names:
+            noise_test_split_names = extra_noise_splits
+    args.extra_test_protocols = extra_test_protocols
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
     requested_models = [model.strip() for model in args.models.split(",") if model.strip()]
     valid_models = set(get_model_choices())
@@ -1064,6 +1156,7 @@ def main():
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
         print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1153,6 +1246,8 @@ def main():
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
         print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
@@ -1184,6 +1279,7 @@ def main():
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
         print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1235,6 +1331,7 @@ def main():
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
         print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1287,6 +1384,8 @@ def main():
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -1346,6 +1445,7 @@ def main():
             experiment_tag=experiment["experiment_tag"],
             experiment_label=experiment["experiment_label"],
             extra_final_test_seeds=args.extra_final_test_seeds,
+            extra_test_protocols=args.extra_test_protocols,
         )
         if success:
             success_count += 1
