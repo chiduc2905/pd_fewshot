@@ -548,6 +548,17 @@ def fewshot_backbone_output_dim(backbone_name, fsl_mamba_output_dim=320):
     return 64
 
 
+def resolve_hrot_token_dim(args, default: int = 128) -> int:
+    """Resolve transport token width; explicit ``hrot_token_dim`` wins over wide flag."""
+    explicit = getattr(args, "hrot_token_dim", None)
+    if explicit is not None:
+        return int(explicit)
+    if _bool_flag(getattr(args, "hrot_projector_wide", "false"), default=False):
+        return int(getattr(args, "hrot_projector_wide_dim", 192))
+    fallback = getattr(args, "token_dim", None)
+    return int(fallback) if fallback is not None else int(default)
+
+
 def resolve_fewshot_backbone(args):
     backbone = str(getattr(args, "fewshot_backbone", "resnet12")).lower()
     if backbone == "default":
@@ -2337,7 +2348,7 @@ def build_model_from_args(args):
         return HROTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,
-            token_dim=int(getattr(args, "hrot_token_dim", getattr(args, "token_dim", 128)) or 128),
+            token_dim=resolve_hrot_token_dim(args, default=128),
             use_raw_backbone_tokens=_bool_flag(
                 getattr(args, "hrot_use_raw_backbone_tokens", "false"),
                 default=False,
@@ -2585,6 +2596,12 @@ def build_model_from_args(args):
             cata_num_anchors=int(getattr(args, "hrot_cata_num_anchors", 8)),
             cata_num_heads=int(getattr(args, "hrot_cata_num_heads", 4)),
             cata_attn_dropout=float(getattr(args, "hrot_cata_attn_dropout", 0.0)),
+            projector_use_mlp=_bool_flag(getattr(args, "hrot_projector_mlp", "false"), default=False),
+            projector_mlp_hidden_dim=getattr(args, "hrot_projector_mlp_hidden_dim", None),
+            projector_use_residual=_bool_flag(
+                getattr(args, "hrot_projector_residual", "false"),
+                default=False,
+            ),
             eps=float(getattr(args, "hrot_eps", 1e-6)),
         )
     if args.model == "ec_mrot":

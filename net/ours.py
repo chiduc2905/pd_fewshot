@@ -181,7 +181,7 @@ class OursM2(JECOTM2):
 
         feature_map = self.encode(images)
         gap = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1).unsqueeze(1)
-        projected = self.token_projector(gap)
+        projected = self._project_backbone_tokens(gap)
         euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
         return euclidean_tokens, hyperbolic_tokens, (1, 1)
 

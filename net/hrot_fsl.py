@@ -23,6 +23,7 @@ from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.ccdm_marginal import CrossClassDiscriminativeMarginal
 from net.modules.egsm_marginal import EpisodeGatedShrinkageMarginal
 from net.modules.cata import CATA
+from net.modules.hrot_transport_projector import HROTTransportProjector, build_hrot_transport_projector
 from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -574,6 +575,9 @@ class HROTFSL(BaseConv64FewShotModel):
         cata_num_anchors: int = 8,
         cata_num_heads: int = 4,
         cata_attn_dropout: float = 0.0,
+        projector_use_mlp: bool = False,
+        projector_mlp_hidden_dim: int | None = None,
+        projector_use_residual: bool = False,
         eps: float = 1e-6,
     ) -> None:
         super().__init__(
@@ -588,6 +592,18 @@ class HROTFSL(BaseConv64FewShotModel):
         if variant not in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "JE", "J_ECOT", "J_ECOT_M2", "J_ECOT_NNCS", "J_ECOT_CARE", "CP_ECOT", "J_NCET", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"}:
             raise ValueError(f"Unsupported HROT variant: {variant}")
         self.use_raw_backbone_tokens = bool(use_raw_backbone_tokens)
+        self.projector_use_mlp = bool(projector_use_mlp)
+        self.projector_use_residual = bool(projector_use_residual)
+        self.projector_mlp_hidden_dim = (
+            None if projector_mlp_hidden_dim is None else int(projector_mlp_hidden_dim)
+        )
+        if self.use_raw_backbone_tokens and (self.projector_use_mlp or self.projector_use_residual):
+            raise ValueError(
+                "projector_use_mlp and projector_use_residual require a learned projector; "
+                "disable hrot_use_raw_backbone_tokens"
+            )
+        if self.projector_mlp_hidden_dim is not None and self.projector_mlp_hidden_dim <= 0:
+            raise ValueError("projector_mlp_hidden_dim must be positive when set")
         if self.use_raw_backbone_tokens:
             token_dim = int(hidden_dim)
         if token_dim <= 0:
@@ -1003,9 +1019,12 @@ class HROTFSL(BaseConv64FewShotModel):
         self.token_projector = (
             nn.Identity()
             if self.use_raw_backbone_tokens
-            else nn.Sequential(
-                nn.LayerNorm(hidden_dim),
-                nn.Linear(hidden_dim, token_dim, bias=False),
+            else build_hrot_transport_projector(
+                int(hidden_dim),
+                self.token_dim,
+                use_mlp=self.projector_use_mlp,
+                use_residual=self.projector_use_residual,
+                mlp_hidden_dim=self.projector_mlp_hidden_dim,
             )
         )
         self.use_cata = bool(use_cata)
@@ -1534,6 +1553,25 @@ class HROTFSL(BaseConv64FewShotModel):
         aggregated = self.cata(flat)
         return aggregated.reshape(*lead_shape, aggregated.shape[-2], aggregated.shape[-1])
 
+    def _project_backbone_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.token_projector, HROTTransportProjector):
+            return self.token_projector(tokens)
+        return self.token_projector(tokens)
+
+    def _project_backbone_tokens_with_prenorm(
+        self,
+        tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(self.token_projector, HROTTransportProjector):
+            return self.token_projector.forward_with_prenorm(tokens)
+        if isinstance(self.token_projector, nn.Identity):
+            pre_proj_norms = tokens.norm(p=2, dim=-1).clamp(min=1e-6)
+            return self.token_projector(tokens), pre_proj_norms
+        ln_out = self.token_projector[0](tokens)
+        pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
+        projected = self.token_projector[1](ln_out)
+        return projected, pre_proj_norms
+
     def _encode_images(
         self,
         images: torch.Tensor,
@@ -1541,7 +1579,7 @@ class HROTFSL(BaseConv64FewShotModel):
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
-        projected = self.token_projector(tokens)
+        projected = self._project_backbone_tokens(tokens)
         projected = self._apply_cata(projected)
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
@@ -1559,7 +1597,7 @@ class HROTFSL(BaseConv64FewShotModel):
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         prenorm_tokens = feature_map_to_tokens(feature_map)
-        projected = self.token_projector(prenorm_tokens)
+        projected = self._project_backbone_tokens(prenorm_tokens)
         if self.use_cata:
             projected = self._apply_cata(projected)
             prenorm_tokens = projected
@@ -1584,13 +1622,7 @@ class HROTFSL(BaseConv64FewShotModel):
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
-        if self.use_raw_backbone_tokens:
-            pre_proj_norms = tokens.norm(p=2, dim=-1).clamp(min=1e-6)
-            projected = self.token_projector(tokens)
-        else:
-            ln_out = self.token_projector[0](tokens)
-            pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
-            projected = self.token_projector[1](ln_out)
+        projected, pre_proj_norms = self._project_backbone_tokens_with_prenorm(tokens)
         if self.use_cata:
             projected = self._apply_cata(projected)
             pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)
@@ -1633,7 +1665,7 @@ class HROTFSL(BaseConv64FewShotModel):
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
-        projected = self.token_projector(tokens)
+        projected = self._project_backbone_tokens(tokens)
         projected = self._apply_cata(projected)
         return projected, spatial_hw
 
@@ -1644,13 +1676,7 @@ class HROTFSL(BaseConv64FewShotModel):
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
-        if self.use_raw_backbone_tokens:
-            pre_proj_norms = tokens.norm(p=2, dim=-1).clamp(min=1e-6)
-            projected = self.token_projector(tokens)
-        else:
-            ln_out = self.token_projector[0](tokens)
-            pre_proj_norms = ln_out.norm(p=2, dim=-1).clamp(min=1e-6)
-            projected = self.token_projector[1](ln_out)
+        projected, pre_proj_norms = self._project_backbone_tokens_with_prenorm(tokens)
         if self.use_cata:
             projected = self._apply_cata(projected)
             pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)

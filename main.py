@@ -46,6 +46,7 @@ from net.model_factory import (
     get_model_metadata,
     resolve_fewshot_backbone,
     resolve_hrot_ecot_enable_egsm,
+    resolve_hrot_token_dim,
 )
 from visualization import (
     compute_support_episode_distribution,
@@ -913,6 +914,39 @@ def get_args():
     parser.add_argument("--warn_diversity_weight", type=float, default=0.0)
     parser.add_argument("--warn_recon_lambda_init", type=float, default=0.1)
     parser.add_argument("--hrot_token_dim", type=int, default=None)
+    parser.add_argument(
+        "--hrot_projector_mlp",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Tier-1A: 2-layer GELU MLP projector (640->hidden->token_dim) after LayerNorm.",
+    )
+    parser.add_argument(
+        "--hrot_projector_mlp_hidden_dim",
+        type=int,
+        default=256,
+        help="Hidden width for --hrot_projector_mlp (default 256).",
+    )
+    parser.add_argument(
+        "--hrot_projector_residual",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Tier-1B: add a linear skip from LayerNorm tokens to transport dim.",
+    )
+    parser.add_argument(
+        "--hrot_projector_wide",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Tier-1D: set token_dim to --hrot_projector_wide_dim unless --hrot_token_dim is set.",
+    )
+    parser.add_argument(
+        "--hrot_projector_wide_dim",
+        type=int,
+        default=192,
+        help="Transport token dim when --hrot_projector_wide true (default 192).",
+    )
     parser.add_argument("--hrot_use_raw_backbone_tokens", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
         "--hrot_variant",
@@ -2459,9 +2493,7 @@ def get_model(args):
         )
     if args.model in HROT_FSL_MODEL_NAMES:
         hrot_raw_tokens = _bool_flag(getattr(args, "hrot_use_raw_backbone_tokens", "false"), default=False)
-        hrot_token_dim = "raw_backbone" if hrot_raw_tokens else (
-            getattr(args, "hrot_token_dim", None) or getattr(args, "token_dim", 128)
-        )
+        hrot_token_dim = "raw_backbone" if hrot_raw_tokens else resolve_hrot_token_dim(args, default=128)
         hrot_variant = "J_ECOT_M2" if args.model in M2_LIKE_MODEL_NAMES else getattr(args, "hrot_variant", "E")
         hrot_ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
         if args.model in M2_LIKE_MODEL_NAMES and hrot_ecot_rho_bank is None:
@@ -2517,6 +2549,9 @@ def get_model(args):
             f"{hrot_path_text}"
             f"(variant={hrot_variant}, "
             f"token_dim={hrot_token_dim}, "
+            f"projector_mlp={getattr(args, 'hrot_projector_mlp', 'false')}, "
+            f"projector_residual={getattr(args, 'hrot_projector_residual', 'false')}, "
+            f"projector_wide={getattr(args, 'hrot_projector_wide', 'false')}, "
             f"raw_backbone_tokens={getattr(args, 'hrot_use_raw_backbone_tokens', 'false')}, "
             f"eam_hidden={getattr(args, 'hrot_eam_hidden_dim', 256)}, "
             f"curvature_init={getattr(args, 'hrot_curvature_init', 1.0)}, "
@@ -3040,6 +3075,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_cata_num_anchors",
             "hrot_cata_num_heads",
             "hrot_cata_attn_dropout",
+            "hrot_projector_mlp",
+            "hrot_projector_mlp_hidden_dim",
+            "hrot_projector_residual",
+            "hrot_projector_wide",
+            "hrot_projector_wide_dim",
             "hrot_amp_marginals",
             "hrot_amp_marginals_tau",
             "hrot_token_center",
@@ -3110,6 +3150,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
         token_dim = int(checkpoint_args["token_dim"])
     else:
         projector_weight = state_dict.get("token_projector.1.weight")
+        if projector_weight is None:
+            projector_weight = state_dict.get("token_projector.fc2.weight")
+        if projector_weight is None:
+            projector_weight = state_dict.get("token_projector.fc.weight")
         if torch.is_tensor(projector_weight) and projector_weight.dim() == 2:
             token_dim = int(projector_weight.shape[0])
         else:
@@ -3131,6 +3175,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
                         token_dim = (in_dim - 3) // 2
     if token_dim is not None:
         overrides["hrot_token_dim"] = int(token_dim)
+
+    if state_dict.get("token_projector.fc1.weight") is not None:
+        overrides["hrot_projector_mlp"] = "true"
+    if state_dict.get("token_projector.skip.weight") is not None:
+        overrides["hrot_projector_residual"] = "true"
 
     eam_hidden = None
     if checkpoint_args.get("hrot_eam_hidden_dim") is not None:
