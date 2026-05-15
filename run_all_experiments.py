@@ -13,6 +13,8 @@ from net.model_factory import get_model_choices, get_model_metadata
 
 
 SAMPLES_LIST = [60, 160, 240, None]
+# Ours contribution ablations: only these training-set sizes (ignores --mode_id / --mode_ids).
+OURS_ABLATION_SAMPLE_COUNTS = [60, 240]
 SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
@@ -173,9 +175,9 @@ def get_args():
         default="none",
         choices=["none", "contrib", "no_egsm_gap"],
         help=(
-            "Expand Ours contribution ablations with tagged runs. "
-            "contrib=all four (full, full_ot, no_egsm, gap); "
-            "no_egsm_gap=only no_egsm and gap."
+            "Expand Ours contribution ablations with tagged runs (training samples: 60 and 240 only). "
+            "EGSM-off variant runs first. Child runs use --quiet_run (no W&B, no console spam). "
+            "contrib=no_egsm, full, full_ot, gap; no_egsm_gap=no_egsm and gap only."
         ),
     )
     parser.add_argument(
@@ -561,21 +563,19 @@ def build_spifce_ablation_variants(suite_name):
 def build_ours_ablation_variants():
     return [
         {
+            "tag": "ours_no_egsm",
+            "label": "Ours without EGSM marginals",
+            "extra_args": ["--ours_ablation", "no_egsm"],
+        },
+        {
             "tag": "ours_full",
             "label": "Full Ours: local descriptors + UOT + EGSM",
-            # Intentionally no extra_args: matches plain `--model ours` (main.py default
-            # --ours_ablation full). Only --experiment_tag differs vs non-suite runs.
             "extra_args": [],
         },
         {
             "tag": "ours_full_ot",
             "label": "Balanced full OT instead of UOT",
             "extra_args": ["--ours_ablation", "full_ot"],
-        },
-        {
-            "tag": "ours_no_egsm",
-            "label": "Ours without EGSM marginals",
-            "extra_args": ["--ours_ablation", "no_egsm"],
         },
         {
             "tag": "ours_gap",
@@ -630,6 +630,31 @@ def remove_cli_option(cmd, flag):
     return updated
 
 
+def _run_main_subprocess(cmd, *, quiet_child: bool) -> bool:
+    """Launch main.py; when quiet_child, swallow stdout and disable W&B / tqdm noise in the child."""
+    env = os.environ.copy()
+    if quiet_child:
+        env.setdefault("TQDM_DISABLE", "1")
+        env.setdefault("WANDB_SILENT", "true")
+        env.setdefault("WANDB_MODE", "disabled")
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()
+            if err:
+                print(err[-8000:], file=sys.stderr)
+            return False
+        return True
+    subprocess.run(cmd, check=True, env=env)
+    return True
+
+
 def run_experiment(
     model,
     shot,
@@ -656,43 +681,47 @@ def run_experiment(
     experiment_label=None,
     extra_final_test_seeds=None,
     extra_test_protocols=None,
+    quiet_child=False,
 ):
     applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
 
-    print(f"\n{'=' * 72}")
-    print("Experiment")
-    print('=' * 72)
-    print(f"Model       : {model}")
-    if experiment_label:
-        print(f"Variant     : {experiment_label}")
-    if experiment_tag:
-        print(f"Tag         : {experiment_tag}")
-    print(f"Shot        : {shot}")
-    print(f"Samples     : {samples if samples else 'All'}")
-    print(f"Backbone    : {applied_backbone}")
-    print(f"Test Proto  : {test_protocol}")
-    if str(test_protocol).lower() == "noise":
-        print(f"Noise Root  : {noise_test_root}")
-        print(f"Noise Splits: {', '.join(discover_noise_test_splits(noise_test_root, noise_test_splits))}")
-    print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
-    extra_test_protocols = list(extra_test_protocols or [])
-    if extra_test_protocols:
-        print(f"Extra Tests : {', '.join(extra_test_protocols)} (seed={final_test_seed})")
-    if extra_final_test_seeds:
-        seed_text = ",".join(str(seed) for seed in [final_test_seed, *extra_final_test_seeds])
-        print(f"Test Seeds  : final_test_seeds={seed_text}")
+    if not quiet_child:
+        print(f"\n{'=' * 72}")
+        print("Experiment")
+        print('=' * 72)
+        print(f"Model       : {model}")
+        if experiment_label:
+            print(f"Variant     : {experiment_label}")
+        if experiment_tag:
+            print(f"Tag         : {experiment_tag}")
+        print(f"Shot        : {shot}")
+        print(f"Samples     : {samples if samples else 'All'}")
+        print(f"Backbone    : {applied_backbone}")
+        print(f"Test Proto  : {test_protocol}")
+        if str(test_protocol).lower() == "noise":
+            print(f"Noise Root  : {noise_test_root}")
+            print(f"Noise Splits: {', '.join(discover_noise_test_splits(noise_test_root, noise_test_splits))}")
+        print("Protocol    : selection=val, merge_val_into_train=false, episodes(train/val/test)=130/150/150")
+        extra_test_protocols = list(extra_test_protocols or [])
+        if extra_test_protocols:
+            print(f"Extra Tests : {', '.join(extra_test_protocols)} (seed={final_test_seed})")
+        if extra_final_test_seeds:
+            seed_text = ",".join(str(seed) for seed in [final_test_seed, *extra_final_test_seeds])
+            print(f"Test Seeds  : final_test_seeds={seed_text}")
+        else:
+            print(f"Test Seed   : final_test_seed={final_test_seed}")
+        if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
+            print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
+        if model.startswith("spif"):
+            print(f"SPIF Ablate : global_only={spif_global_only}, local_only={spif_local_only}")
+        print(
+            f"Runtime     : workers={num_workers}, pin_memory={pin_memory}, "
+            f"persistent_workers={persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print("=" * 72)
     else:
-        print(f"Test Seed   : final_test_seed={final_test_seed}")
-    if applied_backbone != fewshot_backbone and fewshot_backbone != "default":
-        print(f"Backbone Req: {fewshot_backbone} (skipped for this model)")
-    if model.startswith("spif"):
-        print(f"SPIF Ablate : global_only={spif_global_only}, local_only={spif_local_only}")
-    print(
-        f"Runtime     : workers={num_workers}, pin_memory={pin_memory}, "
-        f"persistent_workers={persistent_workers}, "
-        f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
-    )
-    print("=" * 72)
+        extra_test_protocols = list(extra_test_protocols or [])
 
     use_external_smnet = model in EXTERNAL_SMNET_MODELS
     grad_clip = "0.0"
@@ -840,19 +869,21 @@ def run_experiment(
         cmd.extend(variant_args)
     if experiment_tag:
         cmd.extend(["--experiment_tag", experiment_tag])
+    if quiet_child:
+        cmd = set_cli_option(cmd, "--quiet_run", "true")
 
-    if os.environ.get("PULSE_FEWSHOT_PRINT_TRAIN_CMD", "").lower() in {"1", "true", "yes"}:
+    if os.environ.get("PULSE_FEWSHOT_PRINT_TRAIN_CMD", "").lower() in {"1", "true", "yes"} and not quiet_child:
         print(f"[pulse_fewshot child CLI] {shlex.join(cmd)}")
 
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"Error: {exc}")
+    if not _run_main_subprocess(cmd, quiet_child=quiet_child):
+        if not quiet_child:
+            print("Error: training subprocess failed", file=sys.stderr)
         return False
 
     if extra_final_test_seeds or extra_test_protocols:
         if use_external_smnet:
-            print("Warning: extra final tests are not implemented for external smnet models; skipping.")
+            if not quiet_child:
+                print("Warning: extra final tests are not implemented for external smnet models; skipping.")
             return True
 
         checkpoint_path = build_final_checkpoint_path(
@@ -863,7 +894,8 @@ def run_experiment(
             experiment_tag=experiment_tag,
         )
         if not os.path.exists(checkpoint_path):
-            print(f"Error: trained checkpoint not found for extra tests: {checkpoint_path}")
+            if not quiet_child:
+                print(f"Error: trained checkpoint not found for extra tests: {checkpoint_path}")
             return False
 
         for extra_seed in extra_final_test_seeds:
@@ -876,11 +908,9 @@ def run_experiment(
             test_cmd = set_cli_option(test_cmd, "--final_test_seed", str(extra_seed))
             test_cmd = set_cli_option(test_cmd, "--experiment_tag", seed_tag)
 
-            print(f"\nExtra final test: seed={extra_seed}, checkpoint={checkpoint_path}")
-            try:
-                subprocess.run(test_cmd, check=True)
-            except subprocess.CalledProcessError as exc:
-                print(f"Error: {exc}")
+            if not quiet_child:
+                print(f"\nExtra final test: seed={extra_seed}, checkpoint={checkpoint_path}")
+            if not _run_main_subprocess(test_cmd, quiet_child=quiet_child):
                 return False
 
         for extra_protocol in extra_test_protocols:
@@ -900,14 +930,12 @@ def run_experiment(
                 test_cmd = remove_cli_option(test_cmd, "--noise_test_root")
                 test_cmd = remove_cli_option(test_cmd, "--noise_test_splits")
 
-            print(
-                f"\nExtra {extra_protocol} final test: "
-                f"seed={final_test_seed}, checkpoint={checkpoint_path}"
-            )
-            try:
-                subprocess.run(test_cmd, check=True)
-            except subprocess.CalledProcessError as exc:
-                print(f"Error: {exc}")
+            if not quiet_child:
+                print(
+                    f"\nExtra {extra_protocol} final test: "
+                    f"seed={final_test_seed}, checkpoint={checkpoint_path}"
+                )
+            if not _run_main_subprocess(test_cmd, quiet_child=quiet_child):
                 return False
 
     return True
@@ -1122,7 +1150,9 @@ def main():
 
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("results", exist_ok=True)
-    log_cli_command(args)
+    ours_ablation_active = args.ours_ablation_suite != "none"
+    if not ours_ablation_active:
+        log_cli_command(args)
 
     if args.spifce_ablation_suite != "none" and args.ours_ablation_suite != "none":
         raise ValueError("Use only one ablation suite at a time: --spifce_ablation_suite or --ours_ablation_suite.")
@@ -1138,11 +1168,7 @@ def main():
             if args.ours_ablation_suite == "no_egsm_gap"
             else build_ours_ablation_variants()
         )
-        samples_list = (
-            [EXPERIMENT_MODES[args.mode_id]]
-            if args.mode_id is not None
-            else ([EXPERIMENT_MODES[mid] for mid in parsed_mode_ids] if parsed_mode_ids else SAMPLES_LIST)
-        )
+        samples_list = list(OURS_ABLATION_SAMPLE_COUNTS)
         experiments = [
             {
                 "model": "ours",
@@ -1156,52 +1182,6 @@ def main():
             for samples in samples_list
             for shot in shots
         ]
-        print("=" * 72)
-        print("pulse_fewshot - Ours Contribution Ablation Suite")
-        print("=" * 72)
-        if args.mode_id is None:
-            print("Mode Mapping:")
-            for mode_id, sample_count in EXPERIMENT_MODES.items():
-                print(f"  Mode {mode_id}: {sample_count if sample_count else 'All'} samples")
-        else:
-            samples = EXPERIMENT_MODES[args.mode_id]
-            print(f"Mode        : {args.mode_id} ({samples if samples else 'All'} samples)")
-        print(f"Models      : {', '.join(requested_models)}")
-        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
-        print(f"Backbone    : {args.fewshot_backbone}")
-        print(f"Ablation    : {args.ours_ablation_suite}")
-        print("Variants    :")
-        for variant in ablation_variants:
-            print(f"  - {variant['tag']}: {variant['label']}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
-        print(f"Test Proto  : {effective_test_protocol}")
-        print(format_final_test_seed_line(args))
-        print_extra_test_protocol_line(args)
-        print(f"GPU         : {args.gpu_id}")
-        print(
-            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
-            f"persistent_workers={args.persistent_workers}, "
-            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
-        )
-        print(
-            "Overrides   : "
-            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
-            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
-            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
-            "augment=off, masks=off, Ours full=local_descriptors+UOT(rho=0.8)+EGSM, "
-            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
-            f"train SFC={DEEPEMD_5SHOT_TRAIN_SFC}, "
-            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
-            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, "
-            f"test exact={DEEPEMD_5SHOT_TEST_EXACT}, test SFC={DEEPEMD_5SHOT_TEST_SFC}"
-        )
-        if args.passthrough_args:
-            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
-        if effective_test_protocol == "noise":
-            print(f"Noise Root  : {args.noise_test_root}")
-            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
-        print("=" * 72)
     elif args.spifce_ablation_suite != "none":
         if requested_models != ["spifce"]:
             raise ValueError(
@@ -1439,7 +1419,8 @@ def main():
         model = experiment["model"]
         samples = experiment["samples"]
         shot = experiment["shot"]
-        print(f"\n[{idx}/{len(experiments)}]", end=" ")
+        if not ours_ablation_active:
+            print(f"\n[{idx}/{len(experiments)}]", end=" ")
         success = run_experiment(
             model=model,
             shot=shot,
@@ -1466,6 +1447,7 @@ def main():
             experiment_label=experiment["experiment_label"],
             extra_final_test_seeds=args.extra_final_test_seeds,
             extra_test_protocols=args.extra_test_protocols,
+            quiet_child=ours_ablation_active,
         )
         if success:
             success_count += 1
@@ -1473,16 +1455,21 @@ def main():
             tag_suffix = f"_{experiment['experiment_tag']}" if experiment["experiment_tag"] else ""
             failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples{tag_suffix}")
 
-    print("\n" + "=" * 60)
-    print("EXPERIMENT SUMMARY")
-    print("=" * 60)
-    print(f"Total: {len(experiments)}")
-    print(f"Success: {success_count}")
-    print(f"Failed: {len(failed_experiments)}")
-    if failed_experiments:
-        print("\nFailed experiments:")
+    if not ours_ablation_active:
+        print("\n" + "=" * 60)
+        print("EXPERIMENT SUMMARY")
+        print("=" * 60)
+        print(f"Total: {len(experiments)}")
+        print(f"Success: {success_count}")
+        print(f"Failed: {len(failed_experiments)}")
+        if failed_experiments:
+            print("\nFailed experiments:")
+            for experiment in failed_experiments:
+                print(f"  - {experiment}")
+    elif failed_experiments:
+        print("\n[ours ablation] Some runs failed:", file=sys.stderr)
         for experiment in failed_experiments:
-            print(f"  - {experiment}")
+            print(f"  - {experiment}", file=sys.stderr)
 
     if args.spifce_ablation_suite == "none" and args.ours_ablation_suite == "none":
         print("\n" + "=" * 60)
@@ -1495,11 +1482,12 @@ def main():
             effective_test_protocol,
             noise_test_split_names if effective_test_protocol == "noise" else None,
         )
-    else:
+    elif args.spifce_ablation_suite != "none":
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")
         print("=" * 60)
-    print("\nAll experiments completed!")
+    if not ours_ablation_active:
+        print("\nAll experiments completed!")
 
 
 if __name__ == "__main__":
