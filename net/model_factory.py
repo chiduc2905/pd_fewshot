@@ -448,7 +448,7 @@ MODEL_REGISTRY = {
     "ours": {
         "display_name": "Ours",
         "paper_name": "Ours",
-        "architecture": "Backbone local descriptors -> EGSM marginals -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations test full OT, no EGSM, and GAP descriptor cost + UOT",
+        "architecture": "Backbone local descriptors -> EGSM marginals -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations test full OT, no EGSM, and GAP descriptor cost + UOT + EGSM",
         "metric": "EGSM-Calibrated Single-Budget Token UOT",
     },
     "ours_cpm": {

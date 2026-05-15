@@ -378,7 +378,7 @@ def test_ours_gap_ablation_forward_uses_gap_descriptor_cost_and_uot():
     assert outputs["transport_plan"].shape[-2:] == (1, 1)
     assert outputs["query_euclidean_tokens"].shape[-2] == 1
     assert outputs["support_euclidean_tokens"].shape[-2] == 1
-    assert not model.uses_ecot_egsm_marginal
+    assert model.uses_ecot_egsm_marginal
 
 
 def test_m2_full_ot_forward_uses_balanced_full_mass_transport():

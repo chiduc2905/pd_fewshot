@@ -171,8 +171,12 @@ def get_args():
         "--ours_ablation_suite",
         type=str,
         default="none",
-        choices=["none", "contrib"],
-        help="Expand Ours contribution ablations with tagged runs",
+        choices=["none", "contrib", "no_egsm_gap"],
+        help=(
+            "Expand Ours contribution ablations with tagged runs. "
+            "contrib=all four (full, full_ot, no_egsm, gap); "
+            "no_egsm_gap=only no_egsm and gap."
+        ),
     )
     parser.add_argument(
         "--m2_ablate_T",
@@ -573,10 +577,17 @@ def build_ours_ablation_variants():
         },
         {
             "tag": "ours_gap",
-            "label": "GAP descriptor cost + UOT instead of local-descriptor cost",
+            "label": "GAP descriptor cost + UOT + EGSM instead of local-descriptor cost",
             "extra_args": ["--ours_ablation", "gap"],
         },
     ]
+
+
+def build_ours_no_egsm_gap_variants():
+    """Subset: EGSM-off control and GAP-descriptor control (both tagged)."""
+    all_variants = build_ours_ablation_variants()
+    keep = {"ours_no_egsm", "ours_gap"}
+    return [v for v in all_variants if v["tag"] in keep]
 
 
 def build_final_checkpoint_path(dataset_name, model, samples, shot, experiment_tag=None):
@@ -1117,7 +1128,11 @@ def main():
                 "`--ours_ablation_suite` currently supports only `--models ours` "
                 f"(got {requested_models})"
             )
-        ablation_variants = build_ours_ablation_variants()
+        ablation_variants = (
+            build_ours_no_egsm_gap_variants()
+            if args.ours_ablation_suite == "no_egsm_gap"
+            else build_ours_ablation_variants()
+        )
         samples_list = (
             [EXPERIMENT_MODES[args.mode_id]]
             if args.mode_id is not None

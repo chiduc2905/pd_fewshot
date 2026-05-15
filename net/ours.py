@@ -5,7 +5,8 @@ J-ECOT-M2/SB-ECOT with UOT fixed to the paper-facing defaults.  Ours
 ``full`` enables Episode-Gated Shrinkage Marginals (EGSM) and turns off
 MEA/CCDM/CRS for the ECOT token priors.
 Contribution ablations swap only high-level design choices while leaving the
-full model path untouched.
+full model path untouched.  The ``gap`` control uses global-average-pooled
+tokens for the cost while keeping the same EGSM + UOT stack as ``full``.
 """
 
 from __future__ import annotations
@@ -79,7 +80,7 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     kwargs["ecot_enable_ccdm_marginal"] = False
     kwargs["ecot_enable_mea_marginal"] = False
     kwargs["ecot_enable_crs_marginal"] = False
-    if ablation in {"full", "full_ot"}:
+    if ablation in {"full", "full_ot", "gap"}:
         kwargs.setdefault("ecot_enable_egsm", True)
 
     if ablation == "full_ot":
@@ -94,12 +95,6 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
         kwargs["ecot_enable_ccdm_marginal"] = False
         kwargs["ecot_enable_mea_marginal"] = False
         kwargs["ecot_enable_crs_marginal"] = False
-    elif ablation == "gap":
-        # GAP replaces the local descriptor grid with one global token per
-        # image; EGSM is vacuous on a one-token measure, so keep this control
-        # focused on local-vs-global evidence.
-        kwargs["ecot_enable_egsm"] = False
-
     return kwargs
 
 

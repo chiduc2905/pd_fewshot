@@ -1115,7 +1115,7 @@ def get_args():
             "Ours only: contribution ablation selector. full=local descriptors + UOT + EGSM, "
             "full_ot=replaces UOT with balanced full OT, "
             "no_egsm disables EGSM marginals, "
-            "gap uses global-average-pooled image descriptors to build the UOT cost."
+            "gap=GAP-pooled descriptors + UOT + EGSM (local-vs-global evidence control)."
         ),
     )
     parser.add_argument(
@@ -2579,7 +2579,7 @@ def get_model(args):
                 "uniform_evidence": "no_egsm",
                 "prototype": "gap",
             }.get(ours_ablation, ours_ablation)
-            evidence_text = "EGSM off" if normalized_ours_ablation in {"no_egsm", "gap"} else "EGSM on"
+            evidence_text = "EGSM off" if normalized_ours_ablation == "no_egsm" else "EGSM on"
             transport_text = "balanced full OT(rho=1.0)" if normalized_ours_ablation == "full_ot" else "UOT(rho=0.8)"
             token_text = "local descriptors"
             if normalized_ours_ablation == "gap":
