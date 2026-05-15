@@ -563,7 +563,9 @@ def build_ours_ablation_variants():
         {
             "tag": "ours_full",
             "label": "Full Ours: local descriptors + UOT + EGSM",
-            "extra_args": ["--ours_ablation", "full"],
+            # Intentionally no extra_args: matches plain `--model ours` (main.py default
+            # --ours_ablation full). Only --experiment_tag differs vs non-suite runs.
+            "extra_args": [],
         },
         {
             "tag": "ours_full_ot",
@@ -838,6 +840,9 @@ def run_experiment(
         cmd.extend(variant_args)
     if experiment_tag:
         cmd.extend(["--experiment_tag", experiment_tag])
+
+    if os.environ.get("PULSE_FEWSHOT_PRINT_TRAIN_CMD", "").lower() in {"1", "true", "yes"}:
+        print(f"[pulse_fewshot child CLI] {shlex.join(cmd)}")
 
     try:
         subprocess.run(cmd, check=True)
@@ -1479,7 +1484,7 @@ def main():
         for experiment in failed_experiments:
             print(f"  - {experiment}")
 
-    if args.spifce_ablation_suite == "none":
+    if args.spifce_ablation_suite == "none" and args.ours_ablation_suite == "none":
         print("\n" + "=" * 60)
         print("Generating comparison charts...")
         print("=" * 60)
