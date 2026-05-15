@@ -72,6 +72,32 @@ def _sanitize_wandb_project(name):
     return raw.translate(str.maketrans({c: "-" for c in forbidden}))
 
 
+def _wandb_arg_key_irrelevant_for_ours(key: str) -> bool:
+    """True for SPIF/AEB/RADA flags that are not used by ``ours`` / ``ours_cpm`` (W&B clutter only)."""
+    lk = str(key).lower()
+    if "aeb" in lk:
+        return True
+    if lk.startswith("spifaeb"):
+        return True
+    if lk.startswith("rada_"):
+        return True
+    if lk.startswith("spif_"):
+        return True
+    return False
+
+
+def build_wandb_init_config(args, model_meta, selection_split, merge_val_into_train):
+    """Build the dict passed to ``wandb.init(config=...)`` (trim unrelated SPIF/AEB keys for Ours models)."""
+    cfg = vars(args).copy()
+    if args.model in OURS_MODEL_NAMES or args.model in OURS_CPM_MODEL_NAMES:
+        cfg = {k: v for k, v in cfg.items() if not _wandb_arg_key_irrelevant_for_ours(k)}
+    cfg["architecture"] = model_meta["architecture"]
+    cfg["distance_metric"] = model_meta["metric"]
+    cfg["selection_split"] = selection_split
+    cfg["merge_val_into_train"] = merge_val_into_train
+    return cfg
+
+
 PAPER_BASELINE_MODELS = {
     "cosine",
     "protonet",
@@ -1861,16 +1887,6 @@ def get_args():
     )
 
     parser.add_argument("--project", type=str, default="pulse_fewshot")
-    parser.add_argument(
-        "--quiet_run",
-        type=str,
-        default="false",
-        choices=["true", "false"],
-        help=(
-            "When true: disable Weights & Biases, set TQDM_DISABLE / WANDB_MODE=disabled; "
-            "use with run_all_experiments Ours ablation (parent may suppress child stdout)."
-        ),
-    )
     parser.add_argument("--experiment_tag", type=str, default="")
 
     return parser.parse_args()
@@ -5501,31 +5517,19 @@ def main():
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
     run_name = f"{args.model}_{args.dataset_name}_{samples_str}_{args.shot_num}shot{tag_suffix}"
-    config = vars(args).copy()
-    config["architecture"] = model_meta["architecture"]
-    config["distance_metric"] = model_meta["metric"]
-    config["selection_split"] = selection_split
-    config["merge_val_into_train"] = merge_val_into_train
+    config = build_wandb_init_config(args, model_meta, selection_split, merge_val_into_train)
 
     wandb_project = _sanitize_wandb_project(args.project)
-    quiet_main = _bool_flag(getattr(args, "quiet_run", "false"), default=False)
-    if quiet_main:
-        os.environ.setdefault("TQDM_DISABLE", "1")
-        os.environ.setdefault("WANDB_SILENT", "true")
-        os.environ.setdefault("WANDB_MODE", "disabled")
-    if wandb_project != args.project and not quiet_main:
+    if wandb_project != args.project:
         print(f"W&B project sanitized: {args.project!r} -> {wandb_project!r}")
 
-    if quiet_main:
-        wandb.init(mode="disabled")
-    else:
-        wandb.init(
-            project=wandb_project,
-            config=config,
-            name=run_name,
-            group=f"{args.model}_{args.dataset_name}",
-            job_type=args.mode,
-        )
+    wandb.init(
+        project=wandb_project,
+        config=config,
+        name=run_name,
+        group=f"{args.model}_{args.dataset_name}",
+        job_type=args.mode,
+    )
 
     seed_func(args.seed)
     configure_cudnn_runtime(args)
@@ -5666,21 +5670,20 @@ def main():
         print(f"Saved dataset profile figure: {profile_payload['figure_path']}")
         print(f"Saved dataset profile summary: {profile_payload['summary_csv_path']}")
 
-    if not quiet_main:
-        wandb.config.update(
-            {
-                "way_num": args.way_num,
-                "query_num_train": args.query_num_train,
-                "query_num_val": args.query_num_val,
-                "query_num_test": args.query_num_test,
-                "test_protocol": args.effective_test_protocol,
-                "noise_test_root": getattr(args, "noise_test_root", None),
-                "noise_test_splits": list(noise_pools.keys()),
-                "selection_split": selection_split,
-                "merge_val_into_train": merge_val_into_train,
-            },
-            allow_val_change=True,
-        )
+    wandb.config.update(
+        {
+            "way_num": args.way_num,
+            "query_num_train": args.query_num_train,
+            "query_num_val": args.query_num_val,
+            "query_num_test": args.query_num_test,
+            "test_protocol": args.effective_test_protocol,
+            "noise_test_root": getattr(args, "noise_test_root", None),
+            "noise_test_splits": list(noise_pools.keys()),
+            "selection_split": selection_split,
+            "merge_val_into_train": merge_val_into_train,
+        },
+        allow_val_change=True,
+    )
 
     if merge_val_into_train:
         train_X, train_y = concat_split_tensors(train_X, train_y, val_X, val_y)
