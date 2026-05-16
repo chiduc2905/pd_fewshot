@@ -68,8 +68,12 @@ M2_MODEL_NAMES = frozenset(
     {"m2", "m2_uot", "m2_full_ot", "jecot_m2", "jecot_m2_uot", "jecot_m2_full_ot"}
 )
 OURS_MODEL_NAMES = frozenset({"ours"})
+OURS_FINAL_MODEL_NAMES = frozenset({"ours_final"})
+OURS_ENTRYPOINT_MODEL_NAMES = frozenset(set(OURS_MODEL_NAMES) | set(OURS_FINAL_MODEL_NAMES))
 OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
-M2_LIKE_MODEL_NAMES = frozenset(set(M2_MODEL_NAMES) | set(OURS_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES))
+M2_LIKE_MODEL_NAMES = frozenset(
+    set(M2_MODEL_NAMES) | set(OURS_ENTRYPOINT_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES)
+)
 # Registry name for the single canonical SB-ECOT entrypoint (aliases share the same class but different CLI defaults).
 CANONICAL_M2_MODEL_NAME = "m2"
 M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
@@ -79,8 +83,9 @@ HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES) | set(O
 def resolve_hrot_ecot_enable_egsm(args) -> str:
     """Resolve ``--hrot_ecot_enable_egsm`` to ``'true'`` or ``'false'`` (no auto).
 
-    If the flag is omitted, defaults to ``true`` for ``ours`` / ``ours_cpm`` and
-    ``false`` for other J_ECOT_M2-style models (e.g. ``m2``).
+    If the flag is omitted, defaults to ``true`` for legacy ``ours`` /
+    ``ours_cpm`` and ``false`` for ``ours_final`` and other J_ECOT_M2-style
+    models (e.g. ``m2``).
     """
     raw = getattr(args, "hrot_ecot_enable_egsm", None)
     if raw is not None and str(raw).strip() != "":
@@ -450,6 +455,12 @@ MODEL_REGISTRY = {
         "paper_name": "Ours",
         "architecture": "Backbone local descriptors -> EGSM marginals -> single-budget mass-removed UOT -> episode-calibrated shot pooling; contribution ablations test full OT, no EGSM, and GAP descriptor cost + UOT + EGSM",
         "metric": "EGSM-Calibrated Single-Budget Token UOT",
+    },
+    "ours_final": {
+        "display_name": "Ours-Final",
+        "paper_name": "Ours-Final",
+        "architecture": "Backbone local descriptors -> single-budget rho=0.8 UOT -> threshold-mass score T*M-C -> episode-calibrated shot pooling; EGSM is disabled by default",
+        "metric": "Single-Budget Threshold-Mass Token UOT",
     },
     "ours_cpm": {
         "display_name": "Ours-CPM",
@@ -2317,7 +2328,8 @@ def build_model_from_args(args):
             crj_clip_logit=float(getattr(args, "crj_clip_logit", 0.0)),
         )
     if args.model in HROT_FSL_MODEL_NAMES:
-        is_ours_model = args.model in OURS_MODEL_NAMES
+        is_ours_final_model = args.model in OURS_FINAL_MODEL_NAMES
+        is_ours_entrypoint_model = args.model in OURS_ENTRYPOINT_MODEL_NAMES
         is_m2_model = args.model in M2_MODEL_NAMES
         is_m2_like_model = args.model in M2_LIKE_MODEL_NAMES
         is_m2_full_ot = args.model in M2_FULL_OT_MODEL_NAMES
@@ -2327,7 +2339,7 @@ def build_model_from_args(args):
             if is_ours_cpm_model
             else
             _load_symbol("net.ours", "OursM2")
-            if is_ours_model
+            if is_ours_entrypoint_model
             else
             _load_symbol("net.jecot_m2", "JECOTM2")
             if is_m2_model
@@ -2345,6 +2357,9 @@ def build_model_from_args(args):
         if is_m2_like_model and not is_ours_cpm_model and ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if is_m2_full_ot else "unbalanced"
         ecot_enable_egsm_flag = _bool_flag(resolve_hrot_ecot_enable_egsm(args), default=False)
+        default_m2_ablate_threshold_mass = "false" if is_ours_final_model else (
+            "true" if is_m2_like_model else "false"
+        )
         return HROTFSL(
             in_channels=3,
             hidden_dim=hidden_dim,
@@ -2377,7 +2392,7 @@ def build_model_from_args(args):
                     "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                 }
-                if is_ours_model
+                if is_ours_entrypoint_model
                 else {}
             ),
             eam_hidden_dim=int(getattr(args, "hrot_eam_hidden_dim", 256)),
@@ -2429,8 +2444,8 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_ablate_threshold_mass=_bool_flag(
-                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "true" if is_m2_like_model else "false"),
-                default=is_m2_like_model,
+                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", default_m2_ablate_threshold_mass),
+                default=(not is_ours_final_model and is_m2_like_model),
             ),
             ecot_m2_cost_per_mass_score=_bool_flag(
                 getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"),

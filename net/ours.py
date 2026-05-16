@@ -4,6 +4,8 @@ The full design is intentionally treated as one coherent model:
 J-ECOT-M2/SB-ECOT with UOT fixed to the paper-facing defaults.  Ours
 ``full`` enables Episode-Gated Shrinkage Marginals (EGSM) and turns off
 MEA/CCDM/CRS for the ECOT token priors.
+The ``ours_final`` registry entry reuses this class with factory-level defaults
+for the final paper setup: EGSM off and threshold-mass scoring on.
 Contribution ablations swap only high-level design choices while leaving the
 full model path untouched.  The ``gap`` control uses global-average-pooled
 tokens for the cost while keeping the same EGSM + UOT stack as ``full``.
@@ -53,7 +55,9 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     """Apply the standalone Ours design contract to HROT/M2 constructor kwargs."""
     kwargs = dict(kwargs)
 
-    # Full Ours: local descriptors + one UOT budget, with the M2 mass score removed.
+    # Legacy Ours: local descriptors + one UOT budget, with the M2 mass score removed.
+    # The ours_final registry entry passes ecot_m2_ablate_threshold_mass=False to
+    # keep the threshold-mass score on.
     kwargs.setdefault("use_cata", False)
     kwargs.setdefault("cata_num_anchors", 8)
     kwargs.setdefault("cata_num_heads", 4)

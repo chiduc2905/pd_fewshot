@@ -40,7 +40,8 @@ from net.model_factory import (
     M2_FULL_OT_MODEL_NAMES,
     M2_MODEL_NAMES,
     OURS_CPM_MODEL_NAMES,
-    OURS_MODEL_NAMES,
+    OURS_ENTRYPOINT_MODEL_NAMES,
+    OURS_FINAL_MODEL_NAMES,
     build_model_from_args,
     get_model_choices,
     get_model_metadata,
@@ -90,7 +91,7 @@ def _wandb_arg_key_irrelevant_for_ours(key: str) -> bool:
 def build_wandb_init_config(args, model_meta, selection_split, merge_val_into_train):
     """Build the dict passed to ``wandb.init(config=...)`` (trim unrelated SPIF/AEB keys for Ours models)."""
     cfg = vars(args).copy()
-    if args.model in OURS_MODEL_NAMES or args.model in OURS_CPM_MODEL_NAMES:
+    if args.model in OURS_ENTRYPOINT_MODEL_NAMES or args.model in OURS_CPM_MODEL_NAMES:
         cfg = {k: v for k, v in cfg.items() if not _wandb_arg_key_irrelevant_for_ours(k)}
     cfg["architecture"] = model_meta["architecture"]
     cfg["distance_metric"] = model_meta["metric"]
@@ -1081,9 +1082,12 @@ def get_args():
         "--hrot_ecot_m2_ablate_threshold_mass",
         "--m2_ablate_T",
         type=str,
-        default="true",
+        default=argparse.SUPPRESS,
         choices=["true", "false"],
-        help="J_ECOT_M2 only: score uses -transport_cost only (zeros the T * mass term); default on.",
+        help=(
+            "J_ECOT_M2 only: score uses -transport_cost only (zeros the T * mass term). "
+            "If omitted, the default is model-dependent: on for m2/legacy ours, off for ours_final."
+        ),
     )
     parser.add_argument(
         "--hrot_ecot_m2_cost_per_mass_score",
@@ -1469,7 +1473,7 @@ def get_args():
         metavar="T0",
         help=(
             "Initial learned transport cost threshold T (positive). Used by HROT variants with cost-threshold "
-            "scoring, including J-ECOT-M2 (default: T*m term ablated unless --hrot_ecot_m2_ablate_threshold_mass false; "
+            "scoring, including J-ECOT-M2 (default is model-dependent; ours_final keeps T*m on; "
             "cost/mass score via --hrot_ecot_m2_cost_per_mass_score true). "
             "Stored as softplus(raw). "
             "If omitted, T0 = hrot_mass_bonus_init / hrot_score_scale (defaults 1.0/16 ≈ 0.0625)."
@@ -2521,7 +2525,7 @@ def get_model(args):
         ecot_transport_mode = getattr(args, "hrot_ecot_transport_mode", None)
         if ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if args.model in M2_FULL_OT_MODEL_NAMES else "unbalanced"
-        if args.model in OURS_MODEL_NAMES:
+        if args.model in OURS_ENTRYPOINT_MODEL_NAMES:
             ours_ablation = str(getattr(args, "ours_ablation", "full"))
             if ours_ablation in {"full_ot", "balanced_ot"}:
                 hrot_ecot_rho_bank = "1.0"
@@ -2535,7 +2539,7 @@ def get_model(args):
                 hrot_ecot_rho_bank = "0.7,0.8,0.9"
         hrot_label = (
             "ours_cpm" if args.model in OURS_CPM_MODEL_NAMES
-            else "ours" if args.model in OURS_MODEL_NAMES
+            else args.model if args.model in OURS_ENTRYPOINT_MODEL_NAMES
             else "m2" if args.model in M2_MODEL_NAMES
             else "hrot_fsl"
         )
@@ -2633,18 +2637,45 @@ def get_model(args):
             f"compact_eam_prior_mix={getattr(args, 'hrot_compact_eam_prior_mix', 0.5)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
         )
-        if args.model in OURS_MODEL_NAMES:
+        if args.model in OURS_ENTRYPOINT_MODEL_NAMES:
             ours_ablation = str(getattr(args, "ours_ablation", "full"))
             normalized_ours_ablation = {
                 "balanced_ot": "full_ot",
                 "uniform_evidence": "no_egsm",
                 "prototype": "gap",
             }.get(ours_ablation, ours_ablation)
-            evidence_text = "EGSM off" if normalized_ours_ablation == "no_egsm" else "EGSM on"
-            transport_text = "balanced full OT(rho=1.0)" if normalized_ours_ablation == "full_ot" else "UOT(rho=0.8)"
+            egsm_enabled = (
+                False
+                if normalized_ours_ablation == "no_egsm"
+                else resolve_hrot_ecot_enable_egsm(args) == "true"
+            )
+            evidence_text = "EGSM on" if egsm_enabled else "EGSM off"
+            base_rho_text = getattr(args, "hrot_ecot_base_rho", None) or 0.8
+            transport_text = (
+                "balanced full OT(rho=1.0)"
+                if normalized_ours_ablation == "full_ot"
+                else f"UOT(rho={base_rho_text})"
+            )
             token_text = "local descriptors"
             if normalized_ours_ablation == "gap":
                 token_text = "GAP descriptors"
+            default_ablate_mass = "false" if args.model in OURS_FINAL_MODEL_NAMES else "true"
+            ablate_mass = _bool_flag(
+                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", default_ablate_mass),
+                default=(args.model not in OURS_FINAL_MODEL_NAMES),
+            )
+            cost_per_mass = _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"), default=False)
+            if cost_per_mass:
+                score_text = "cost-per-mass score"
+            elif ablate_mass:
+                score_text = "cost-only score(-C)"
+            else:
+                score_text = "threshold-mass score(T*M-C)"
+            default_text = (
+                "local_descriptors+UOT(rho=0.8)+EGSM_off+T*M-C"
+                if args.model in OURS_FINAL_MODEL_NAMES
+                else "local_descriptors+UOT(rho=0.8)+EGSM"
+            )
             dmt_text = (
                 "DMT on"
                 if _bool_flag(getattr(args, "use_differential_mode", "false"), default=False)
@@ -2653,10 +2684,10 @@ def get_model(args):
             print(
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
-                f"active_design={token_text}+{transport_text}+{evidence_text}, "
+                f"active_design={token_text}+{transport_text}+{evidence_text}+{score_text}, "
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
-                "full_defaults=local_descriptors+UOT(rho=0.8)+EGSM"
+                f"full_defaults={default_text}"
             )
         if args.model in OURS_CPM_MODEL_NAMES:
             cpm_ablation = str(getattr(args, "cpm_ablation", "full"))

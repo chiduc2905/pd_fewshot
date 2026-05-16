@@ -350,6 +350,50 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert cpm_like.ecot_m2_cost_per_mass_detach_mass
 
 
+def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
+    base_args = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=16,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=6,
+        hrot_sinkhorn_tolerance=1e-5,
+    )
+
+    full = build_model_from_args(SimpleNamespace(model="ours_final", ours_ablation="full", **base_args))
+    assert full.variant == "J_ECOT_M2"
+    assert full.ours_ablation == "full"
+    assert full.ecot_rho_bank == (0.8,)
+    assert full.ecot_base_rho == 0.8
+    assert full.ecot_transport_mode == "unbalanced"
+    assert full.uses_unbalanced_transport
+    assert not full.ecot_m2_ablate_threshold_mass
+    assert not full.ecot_m2_cost_per_mass_score
+    assert not full.uses_ecot_egsm_marginal
+    assert full.egsm_marginal is None
+
+    full_ot = build_model_from_args(SimpleNamespace(model="ours_final", ours_ablation="full_ot", **base_args))
+    assert full_ot.ours_ablation == "full_ot"
+    assert full_ot.ecot_rho_bank == (1.0,)
+    assert full_ot.ecot_base_rho == 1.0
+    assert full_ot.ecot_transport_mode == "balanced"
+    assert not full_ot.uses_unbalanced_transport
+    assert not full_ot.ecot_m2_ablate_threshold_mass
+    assert not full_ot.uses_ecot_egsm_marginal
+
+    mass_off = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            hrot_ecot_m2_ablate_threshold_mass="true",
+            **base_args,
+        )
+    )
+    assert mass_off.ecot_m2_ablate_threshold_mass
+    assert not mass_off.uses_ecot_egsm_marginal
+
+
 def test_ours_gap_ablation_forward_uses_gap_descriptor_cost_and_uot():
     torch.manual_seed(390)
     model = build_model_from_args(

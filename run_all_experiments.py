@@ -181,11 +181,25 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--ours_final_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "contrib", "rho_grid"],
+        help=(
+            "Expand Ours-Final runs with tagged variants. "
+            "contrib=full, full_ot, gap, mass_off; "
+            "rho_grid=rho 0.6,0.7,0.8,0.9 as separate single-budget runs."
+        ),
+    )
+    parser.add_argument(
         "--m2_ablate_T",
         type=str,
-        default="true",
-        choices=["true", "false"],
-        help="M2 only: forwards --hrot_ecot_m2_ablate_threshold_mass (drops T * mass); default true.",
+        default="auto",
+        choices=["auto", "true", "false"],
+        help=(
+            "M2-family only: forwards --hrot_ecot_m2_ablate_threshold_mass when explicitly true/false. "
+            "auto leaves the model default in main.py (ours_final keeps T * mass on)."
+        ),
     )
     parser.add_argument(
         "--m2_cost_per_mass",
@@ -196,7 +210,7 @@ def get_args():
     )
     args, passthrough_args = parser.parse_known_args()
     extra = list(passthrough_args)
-    ablate_t = str(getattr(args, "m2_ablate_T", "true")).lower() == "true"
+    ablate_t_raw = str(getattr(args, "m2_ablate_T", "auto")).lower()
     cost_pm = str(getattr(args, "m2_cost_per_mass", "false")).lower() == "true"
     if cost_pm:
         extra += [
@@ -205,14 +219,14 @@ def get_args():
             "--hrot_ecot_m2_ablate_threshold_mass",
             "false",
         ]
-    elif ablate_t:
+    elif ablate_t_raw == "true":
         extra += [
             "--hrot_ecot_m2_ablate_threshold_mass",
             "true",
             "--hrot_ecot_m2_cost_per_mass_score",
             "false",
         ]
-    else:
+    elif ablate_t_raw == "false":
         extra += [
             "--hrot_ecot_m2_ablate_threshold_mass",
             "false",
@@ -255,6 +269,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "hrot_fsl",
     "m2",
     "ours",
+    "ours_final",
     "m2_uot",
     "m2_full_ot",
     "jecot_m2",
@@ -380,6 +395,70 @@ def result_protocol_suffix(test_protocol, test_split_name=None):
     if test_protocol in {"auto", "clean", ""}:
         return ""
     return f"_{sanitize_result_tag(test_protocol)}"
+
+
+def build_expected_result_path(
+    dataset_name,
+    model,
+    samples,
+    shot,
+    experiment_tag=None,
+    test_protocol="clean",
+    test_split_name=None,
+):
+    samples_str = f"{samples}samples" if samples is not None else "allsamples"
+    tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
+    protocol_suffix = result_protocol_suffix(test_protocol, test_split_name)
+    return os.path.join(
+        "results",
+        f"results_{dataset_name}_{model}_{samples_str}_{shot}shot{tag_suffix}{protocol_suffix}.txt",
+    )
+
+
+def expected_result_paths(
+    dataset_name,
+    model,
+    samples,
+    shot,
+    experiment_tag=None,
+    test_protocol="clean",
+    noise_test_root=None,
+    noise_test_splits="auto",
+):
+    if str(test_protocol).lower() == "noise":
+        split_names = discover_noise_test_splits(noise_test_root, noise_test_splits)
+        return [
+            build_expected_result_path(
+                dataset_name,
+                model,
+                samples,
+                shot,
+                experiment_tag=experiment_tag,
+                test_protocol=test_protocol,
+                test_split_name=split_name,
+            )
+            for split_name in split_names
+        ]
+    return [
+        build_expected_result_path(
+            dataset_name,
+            model,
+            samples,
+            shot,
+            experiment_tag=experiment_tag,
+            test_protocol=test_protocol,
+        )
+    ]
+
+
+def merge_extra_test_protocols(*protocol_lists):
+    merged = []
+    for protocols in protocol_lists:
+        for protocol in protocols or []:
+            normalized = str(protocol).strip().lower()
+            if normalized and normalized not in merged:
+                merged.append(normalized)
+    return merged
 
 
 def build_spifce_ablation_variants(suite_name):
@@ -592,6 +671,73 @@ def build_ours_no_egsm_gap_variants():
     return [v for v in all_variants if v["tag"] in keep]
 
 
+def _ours_final_base_args(
+    rho="0.8",
+    ablation="full",
+    transport_mode="unbalanced",
+    ablate_threshold_mass="false",
+):
+    """Explicit Ours-Final defaults; variant args are appended after passthrough args."""
+    return [
+        "--ours_ablation",
+        str(ablation),
+        "--hrot_ecot_enable_egsm",
+        "false",
+        "--hrot_ecot_m2_ablate_threshold_mass",
+        str(ablate_threshold_mass),
+        "--hrot_ecot_m2_cost_per_mass_score",
+        "false",
+        "--hrot_ecot_rho_bank",
+        str(rho),
+        "--hrot_ecot_base_rho",
+        str(rho),
+        "--hrot_fixed_mass",
+        str(rho),
+        "--hrot_ecot_transport_mode",
+        str(transport_mode),
+    ]
+
+
+def build_ours_final_ablation_variants():
+    base = _ours_final_base_args()
+    return [
+        {
+            "tag": "ours_final_full",
+            "label": "Ours-Final: local descriptors + UOT rho=0.8 + threshold-mass score, EGSM off",
+            "extra_args": base,
+        },
+        {
+            "tag": "ours_final_full_ot",
+            "label": "Ours-Final ablation: balanced full OT replaces UOT",
+            "extra_args": _ours_final_base_args("1.0", ablation="full_ot", transport_mode="balanced"),
+            "mode1_noise": True,
+        },
+        {
+            "tag": "ours_final_gap",
+            "label": "Ours-Final ablation: GAP feature-map descriptors replace local tokens",
+            "extra_args": _ours_final_base_args(ablation="gap"),
+            "mode1_noise": True,
+        },
+        {
+            "tag": "ours_final_mass_off",
+            "label": "Ours-Final ablation: cost-only score removes threshold-mass reward",
+            "extra_args": _ours_final_base_args(ablate_threshold_mass="true"),
+            "mode1_noise": True,
+        },
+    ]
+
+
+def build_ours_final_rho_grid_variants():
+    return [
+        {
+            "tag": f"ours_final_rho_{str(rho).replace('.', 'p')}",
+            "label": f"Ours-Final rho={rho} single-budget UOT",
+            "extra_args": _ours_final_base_args(str(rho)),
+        }
+        for rho in ("0.6", "0.7", "0.8", "0.9")
+    ]
+
+
 def build_final_checkpoint_path(dataset_name, model, samples, shot, experiment_tag=None):
     samples_suffix = f"{samples}samples" if samples is not None else "all"
     tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
@@ -671,6 +817,30 @@ def run_experiment(
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
     print(f"Test Proto  : {test_protocol}")
+    checkpoint_path = build_final_checkpoint_path(
+        dataset_name=dataset_name,
+        model=model,
+        samples=samples,
+        shot=shot,
+        experiment_tag=experiment_tag,
+    )
+    primary_result_paths = expected_result_paths(
+        dataset_name=dataset_name,
+        model=model,
+        samples=samples,
+        shot=shot,
+        experiment_tag=experiment_tag,
+        test_protocol=test_protocol,
+        noise_test_root=noise_test_root,
+        noise_test_splits=noise_test_splits,
+    )
+    print(f"Checkpoint  : {checkpoint_path}")
+    if len(primary_result_paths) == 1:
+        print(f"Result File : {primary_result_paths[0]}")
+    else:
+        print("Result Files:")
+        for result_path in primary_result_paths:
+            print(f"  - {result_path}")
     if str(test_protocol).lower() == "noise":
         print(f"Noise Root  : {noise_test_root}")
         print(f"Noise Splits: {', '.join(discover_noise_test_splits(noise_test_root, noise_test_splits))}")
@@ -851,13 +1021,6 @@ def run_experiment(
             print("Warning: extra final tests are not implemented for external smnet models; skipping.")
             return True
 
-        checkpoint_path = build_final_checkpoint_path(
-            dataset_name=dataset_name,
-            model=model,
-            samples=samples,
-            shot=shot,
-            experiment_tag=experiment_tag,
-        )
         if not os.path.exists(checkpoint_path):
             print(f"Error: trained checkpoint not found for extra tests: {checkpoint_path}")
             return False
@@ -891,11 +1054,27 @@ def run_experiment(
             else:
                 test_cmd = remove_cli_option(test_cmd, "--noise_test_root")
                 test_cmd = remove_cli_option(test_cmd, "--noise_test_splits")
+            extra_result_paths = expected_result_paths(
+                dataset_name=dataset_name,
+                model=model,
+                samples=samples,
+                shot=shot,
+                experiment_tag=protocol_tag,
+                test_protocol=extra_protocol,
+                noise_test_root=noise_test_root,
+                noise_test_splits=noise_test_splits,
+            )
 
             print(
                 f"\nExtra {extra_protocol} final test: "
                 f"seed={final_test_seed}, checkpoint={checkpoint_path}"
             )
+            if len(extra_result_paths) == 1:
+                print(f"Extra result file: {extra_result_paths[0]}")
+            else:
+                print("Extra result files:")
+                for result_path in extra_result_paths:
+                    print(f"  - {result_path}")
             subprocess.run(test_cmd, check=True)
 
     return True
@@ -1112,8 +1291,17 @@ def main():
     os.makedirs("results", exist_ok=True)
     log_cli_command(args)
 
-    if args.spifce_ablation_suite != "none" and args.ours_ablation_suite != "none":
-        raise ValueError("Use only one ablation suite at a time: --spifce_ablation_suite or --ours_ablation_suite.")
+    active_ablation_suites = [
+        name
+        for name, value in (
+            ("--spifce_ablation_suite", args.spifce_ablation_suite),
+            ("--ours_ablation_suite", args.ours_ablation_suite),
+            ("--ours_final_ablation_suite", args.ours_final_ablation_suite),
+        )
+        if value != "none"
+    ]
+    if len(active_ablation_suites) > 1:
+        raise ValueError(f"Use only one ablation suite at a time: {', '.join(active_ablation_suites)}.")
 
     if args.ours_ablation_suite != "none":
         if requested_models != ["ours"]:
@@ -1151,6 +1339,108 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
+        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
+            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
+            "augment=off, masks=off, "
+            f"DeepEMD 5-shot=train solver={DEEPEMD_5SHOT_TRAIN_SOLVER}, "
+            f"train SFC={DEEPEMD_5SHOT_TRAIN_SFC}, "
+            f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
+            f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, "
+            f"test exact={DEEPEMD_5SHOT_TEST_EXACT}, test SFC={DEEPEMD_5SHOT_TEST_SFC}"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print("=" * 72)
+    elif args.ours_final_ablation_suite != "none":
+        if requested_models != ["ours_final"]:
+            raise ValueError(
+                "`--ours_final_ablation_suite` currently supports only `--models ours_final` "
+                f"(got {requested_models})"
+            )
+        ablation_variants = (
+            build_ours_final_rho_grid_variants()
+            if args.ours_final_ablation_suite == "rho_grid"
+            else build_ours_final_ablation_variants()
+        )
+        samples_list = list(OURS_ABLATION_SAMPLE_COUNTS)
+        mode1_sample_count = EXPERIMENT_MODES[1]
+        enable_mode1_noise_tests = (
+            args.ours_final_ablation_suite == "contrib"
+            and effective_test_protocol != "noise"
+        )
+        if enable_mode1_noise_tests and not discover_noise_test_splits(args.noise_test_root, args.noise_test_splits):
+            raise ValueError(
+                "--ours_final_ablation_suite contrib adds mode-1 noise test-only runs; "
+                "provide --noise_test_root with at least one SNR test folder, or set --noise_test_splits correctly."
+            )
+        experiments = [
+            {
+                "model": "ours_final",
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "experiment_label": variant["label"],
+                "extra_test_protocols": merge_extra_test_protocols(
+                    args.extra_test_protocols,
+                    ["noise"]
+                    if (
+                        enable_mode1_noise_tests
+                        and samples == mode1_sample_count
+                        and variant.get("mode1_noise", False)
+                    )
+                    else [],
+                ),
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - Ours-Final Ablation Suite")
+        print("=" * 72)
+        print("Samples     : 60 and 240 only (see OURS_ABLATION_SAMPLE_COUNTS)")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.ours_final_ablation_suite}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            print(f"  - {variant['tag']}: {variant['label']}")
+        if enable_mode1_noise_tests:
+            mode1_noise_tags = [
+                variant["tag"]
+                for variant in ablation_variants
+                if variant.get("mode1_noise", False)
+            ]
+            mode1_noise_run_count = len(mode1_noise_tags) * len(shots)
+            print(
+                "Mode-1 Noise : test-only after clean training for "
+                f"{', '.join(mode1_noise_tags)} at {mode1_sample_count} samples "
+                f"({mode1_noise_run_count} run(s); 3 ablations x requested shot count)"
+            )
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(
+                "Noise Splits: "
+                f"{', '.join(discover_noise_test_splits(args.noise_test_root, args.noise_test_splits))}"
+            )
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"GPU         : {args.gpu_id}")
         print(
@@ -1443,7 +1733,7 @@ def main():
             experiment_tag=experiment["experiment_tag"],
             experiment_label=experiment["experiment_label"],
             extra_final_test_seeds=args.extra_final_test_seeds,
-            extra_test_protocols=args.extra_test_protocols,
+            extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
         )
         if success:
             success_count += 1
@@ -1462,7 +1752,11 @@ def main():
         for experiment in failed_experiments:
             print(f"  - {experiment}")
 
-    if args.spifce_ablation_suite == "none" and args.ours_ablation_suite == "none":
+    if (
+        args.spifce_ablation_suite == "none"
+        and args.ours_ablation_suite == "none"
+        and args.ours_final_ablation_suite == "none"
+    ):
         print("\n" + "=" * 60)
         print("Generating comparison charts...")
         print("=" * 60)
@@ -1473,7 +1767,11 @@ def main():
             effective_test_protocol,
             noise_test_split_names if effective_test_protocol == "noise" else None,
         )
-    elif args.spifce_ablation_suite != "none" or args.ours_ablation_suite != "none":
+    elif (
+        args.spifce_ablation_suite != "none"
+        or args.ours_ablation_suite != "none"
+        or args.ours_final_ablation_suite != "none"
+    ):
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")
         print("=" * 60)
