@@ -318,6 +318,15 @@ def snr_sort_key(split_name):
     return (0, value, name)
 
 
+def split_snr_db(split_name):
+    name = str(split_name).lower()
+    match = re.search(r"snr(?:_minus)?(\d+)db", name)
+    if not match:
+        return None
+    value = int(match.group(1))
+    return -value if "snr_minus" in name else value
+
+
 def split_has_class_dirs(split_path):
     expected = {"surface", "internal", "corona", "notpd", "nopd", "not_pd"}
     if not Path(split_path).is_dir():
@@ -354,6 +363,33 @@ def discover_noise_test_splits(noise_test_root, requested_splits="auto"):
             ]
         return sorted(names, key=snr_sort_key)
     return [name.strip() for name in requested.split(",") if name.strip()]
+
+
+def select_noise_snr_splits(noise_test_root, requested_splits="auto", snr_values=(15, 10, 5)):
+    available = discover_noise_test_splits(noise_test_root, requested_splits)
+    by_snr = {}
+    for split_name in available:
+        snr = split_snr_db(split_name)
+        if snr is None:
+            continue
+        by_snr.setdefault(snr, []).append(split_name)
+
+    selected = []
+    missing = []
+    for snr in snr_values:
+        candidates = sorted(by_snr.get(int(snr), []), key=snr_sort_key)
+        if not candidates:
+            missing.append(int(snr))
+            continue
+        selected.append(candidates[0])
+
+    if missing:
+        raise ValueError(
+            "Required noise SNR split(s) not found for "
+            f"{', '.join(f'{snr}db' for snr in missing)}. "
+            f"Available splits: {', '.join(available) if available else '(none)'}"
+        )
+    return selected
 
 
 def dataset_has_training_layout(dataset_path):
@@ -802,6 +838,7 @@ def run_experiment(
     experiment_label=None,
     extra_final_test_seeds=None,
     extra_test_protocols=None,
+    extra_noise_test_splits=None,
 ):
     applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
 
@@ -1050,7 +1087,8 @@ def run_experiment(
             test_cmd = set_cli_option(test_cmd, "--experiment_tag", protocol_tag)
             if str(extra_protocol).lower() == "noise":
                 test_cmd = set_cli_option(test_cmd, "--noise_test_root", noise_test_root)
-                test_cmd = set_cli_option(test_cmd, "--noise_test_splits", noise_test_splits)
+                protocol_noise_splits = extra_noise_test_splits or noise_test_splits
+                test_cmd = set_cli_option(test_cmd, "--noise_test_splits", protocol_noise_splits)
             else:
                 test_cmd = remove_cli_option(test_cmd, "--noise_test_root")
                 test_cmd = remove_cli_option(test_cmd, "--noise_test_splits")
@@ -1062,7 +1100,7 @@ def run_experiment(
                 experiment_tag=protocol_tag,
                 test_protocol=extra_protocol,
                 noise_test_root=noise_test_root,
-                noise_test_splits=noise_test_splits,
+                noise_test_splits=extra_noise_test_splits or noise_test_splits,
             )
 
             print(
@@ -1385,11 +1423,15 @@ def main():
             args.ours_final_ablation_suite == "contrib"
             and effective_test_protocol != "noise"
         )
-        if enable_mode1_noise_tests and not discover_noise_test_splits(args.noise_test_root, args.noise_test_splits):
-            raise ValueError(
-                "--ours_final_ablation_suite contrib adds mode-1 noise test-only runs; "
-                "provide --noise_test_root with at least one SNR test folder, or set --noise_test_splits correctly."
+        mode1_noise_splits = []
+        mode1_noise_splits_arg = None
+        if enable_mode1_noise_tests:
+            mode1_noise_splits = select_noise_snr_splits(
+                args.noise_test_root,
+                args.noise_test_splits,
+                snr_values=(15, 10, 5),
             )
+            mode1_noise_splits_arg = ",".join(mode1_noise_splits)
         experiments = [
             {
                 "model": "ours_final",
@@ -1407,6 +1449,15 @@ def main():
                         and variant.get("mode1_noise", False)
                     )
                     else [],
+                ),
+                "extra_noise_test_splits": (
+                    mode1_noise_splits_arg
+                    if (
+                        enable_mode1_noise_tests
+                        and samples == mode1_sample_count
+                        and variant.get("mode1_noise", False)
+                    )
+                    else None
                 ),
             }
             for variant in ablation_variants
@@ -1439,7 +1490,7 @@ def main():
             print(f"Noise Root  : {args.noise_test_root}")
             print(
                 "Noise Splits: "
-                f"{', '.join(discover_noise_test_splits(args.noise_test_root, args.noise_test_splits))}"
+                f"{', '.join(mode1_noise_splits)}"
             )
         print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
         print(f"GPU         : {args.gpu_id}")
@@ -1734,6 +1785,7 @@ def main():
             experiment_label=experiment["experiment_label"],
             extra_final_test_seeds=args.extra_final_test_seeds,
             extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
+            extra_noise_test_splits=experiment.get("extra_noise_test_splits"),
         )
         if success:
             success_count += 1
