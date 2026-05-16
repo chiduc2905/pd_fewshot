@@ -161,6 +161,17 @@ def get_args():
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--cudnn_deterministic", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--cudnn_benchmark", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--skip_existing",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Skip an experiment/test when all expected result files already exist. "
+            "If primary clean results exist but requested extra tests are missing, "
+            "reuse the tagged final checkpoint for test-only runs."
+        ),
+    )
     parser.add_argument("--spif_global_only", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--spif_local_only", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
@@ -813,6 +824,10 @@ def remove_cli_option(cmd, flag):
     return updated
 
 
+def all_paths_exist(paths):
+    return bool(paths) and all(os.path.exists(path) for path in paths)
+
+
 def run_experiment(
     model,
     shot,
@@ -840,6 +855,7 @@ def run_experiment(
     extra_final_test_seeds=None,
     extra_test_protocols=None,
     extra_noise_test_splits=None,
+    skip_existing=False,
 ):
     applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
 
@@ -1052,7 +1068,11 @@ def run_experiment(
     if os.environ.get("PULSE_FEWSHOT_PRINT_TRAIN_CMD", "").lower() in {"1", "true", "yes"}:
         print(f"[pulse_fewshot child CLI] {shlex.join(cmd)}")
 
-    subprocess.run(cmd, check=True)
+    primary_complete = all_paths_exist(primary_result_paths)
+    if skip_existing and primary_complete:
+        print("Skip        : primary result file(s) already exist; not training this experiment.")
+    else:
+        subprocess.run(cmd, check=True)
 
     if extra_final_test_seeds or extra_test_protocols:
         if use_external_smnet:
@@ -1067,6 +1087,19 @@ def run_experiment(
             seed_tag = f"testseed{extra_seed}"
             if experiment_tag:
                 seed_tag = f"{experiment_tag}_{seed_tag}"
+            seed_result_paths = expected_result_paths(
+                dataset_name=dataset_name,
+                model=model,
+                samples=samples,
+                shot=shot,
+                experiment_tag=seed_tag,
+                test_protocol=test_protocol,
+                noise_test_root=noise_test_root,
+                noise_test_splits=noise_test_splits,
+            )
+            if skip_existing and all_paths_exist(seed_result_paths):
+                print(f"\nSkip extra final test seed={extra_seed}: result file(s) already exist.")
+                continue
             test_cmd = list(cmd)
             test_cmd = set_cli_option(test_cmd, "--mode", "test")
             test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_path)
@@ -1103,6 +1136,9 @@ def run_experiment(
                 noise_test_root=noise_test_root,
                 noise_test_splits=extra_noise_test_splits or noise_test_splits,
             )
+            if skip_existing and all_paths_exist(extra_result_paths):
+                print(f"\nSkip extra {extra_protocol} final test: result file(s) already exist.")
+                continue
 
             print(
                 f"\nExtra {extra_protocol} final test: "
@@ -1794,6 +1830,7 @@ def main():
             extra_final_test_seeds=args.extra_final_test_seeds,
             extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
             extra_noise_test_splits=experiment.get("extra_noise_test_splits"),
+            skip_existing=str(getattr(args, "skip_existing", "false")).lower() == "true",
         )
         if success:
             success_count += 1
