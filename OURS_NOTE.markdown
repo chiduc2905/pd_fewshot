@@ -28,7 +28,11 @@ b = rho * pi_support
 `kappa` in `[kappa_min, kappa_max]` is produced by a small MLP on **psi**
 ambiguity statistics of the episode cost tensor, so the model commits more mass
 to the candidate prior when costs look discriminative, and stays closer to
-uniform when ambiguity is high.
+uniform when ambiguity is high. The current default is deliberately
+conservative (`kappa_max=0.35`, `tau_q=tau_b=1.0`): candidate priors are built
+from stop-gradient, episode-normalized costs so EGSM acts as a bounded
+episode-conditioned residual over uniform marginals rather than replacing the
+transport prior wholesale.
 
 Optional **adaptive rho** (`--hrot_ecot_egsm_adaptive_rho true`): a second head
 predicts a per-query offset to the transport mass budget, bounded around

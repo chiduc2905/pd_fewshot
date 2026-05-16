@@ -2,8 +2,8 @@
 
 Blends a maximum-entropy (uniform) token prior with a cost-derived candidate
 prior.  A per-query gate kappa in [kappa_min, kappa_max] is produced by a small
-MLP on ambiguity statistics of the episode cost tensor, so transport commits
-strongly to the candidate only when observed costs appear discriminative.
+MLP on ambiguity statistics of the episode cost tensor, so transport can move
+away from uniform only when observed costs appear discriminative.
 
 When ``enable_adaptive_rho`` is True, a second MLP head predicts a per-query
 rho offset from the same psi features, producing rho_adaptive in
@@ -33,6 +33,9 @@ class EpisodeGatedShrinkageMarginal(nn.Module):
     Candidate marginals follow the same cost-only construction as CCDM
     (cross-class margin on the query axis; min-cost attractiveness on support),
     but temperature values are fixed scalars (no extra learnable taus here).
+    Candidate statistics are computed from stop-gradient, episode-normalized
+    costs so the backbone learns the transport match instead of learning to
+    game the marginal prior.
     """
 
     def __init__(
@@ -40,10 +43,10 @@ class EpisodeGatedShrinkageMarginal(nn.Module):
         *,
         psi_dim: int = 5,
         hidden_dim: int = 32,
-        candidate_tau_q: float = 0.5,
-        candidate_tau_b: float = 0.5,
+        candidate_tau_q: float = 1.0,
+        candidate_tau_b: float = 1.0,
         kappa_min: float = 0.05,
-        kappa_max: float = 0.95,
+        kappa_max: float = 0.35,
         eps: float = 1e-8,
         enable_adaptive_rho: bool = False,
         rho_delta_max: float = 0.15,
@@ -79,10 +82,10 @@ class EpisodeGatedShrinkageMarginal(nn.Module):
             nn.ReLU(),
             nn.Linear(self.hidden_dim, 1),
         )
-        nn.init.zeros_(self.gate_mlp[0].weight)
+        nn.init.xavier_uniform_(self.gate_mlp[0].weight, gain=0.1)
         nn.init.zeros_(self.gate_mlp[0].bias)
-        nn.init.zeros_(self.gate_mlp[2].weight)
-        nn.init.constant_(self.gate_mlp[2].bias, -1.5)
+        nn.init.xavier_uniform_(self.gate_mlp[2].weight, gain=0.1)
+        nn.init.constant_(self.gate_mlp[2].bias, -3.0)
 
         if self.enable_adaptive_rho:
             self.rho_head = nn.Sequential(
@@ -90,7 +93,7 @@ class EpisodeGatedShrinkageMarginal(nn.Module):
                 nn.ReLU(),
                 nn.Linear(self.hidden_dim, 1),
             )
-            nn.init.zeros_(self.rho_head[0].weight)
+            nn.init.xavier_uniform_(self.rho_head[0].weight, gain=0.1)
             nn.init.zeros_(self.rho_head[0].bias)
             nn.init.zeros_(self.rho_head[2].weight)
             nn.init.zeros_(self.rho_head[2].bias)
@@ -195,25 +198,27 @@ class EpisodeGatedShrinkageMarginal(nn.Module):
         tau_q = self.candidate_tau_q.to(device=flat_cost.device, dtype=flat_cost.dtype)
         tau_b = self.candidate_tau_b.to(device=flat_cost.device, dtype=flat_cost.dtype)
 
-        cost_5d = flat_cost.reshape(num_query, w, k, query_len, support_len)
+        prior_cost = flat_cost.detach()
+        cost_5d = prior_cost.reshape(num_query, w, k, query_len, support_len)
         best_per_class = cost_5d.amin(dim=(2, 4))
 
         if w >= 2:
             top2, _ = best_per_class.topk(2, dim=1, largest=False)
             margin = top2[:, 1, :] - top2[:, 0, :]
-            query_pi = torch.softmax(margin / tau_q.clamp_min(self.eps), dim=-1)
+            margin_scale = margin.std(dim=-1, keepdim=True, unbiased=False).clamp_min(self.eps)
+            query_pi = torch.softmax((margin / margin_scale) / tau_q.clamp_min(self.eps), dim=-1)
         else:
             query_pi = flat_cost.new_full((num_query, query_len), 1.0 / float(query_len))
 
-        query_pi_flat = query_pi.unsqueeze(1).expand(num_query, num_pairs, query_len)
-
-        attract = flat_cost.amin(dim=-2)
-        support_pi = torch.softmax(-attract / tau_b.clamp_min(self.eps), dim=-1)
+        attract = prior_cost.amin(dim=-2)
+        attract_centered = attract - attract.mean(dim=-1, keepdim=True)
+        attract_scale = attract_centered.std(dim=-1, keepdim=True, unbiased=False).clamp_min(self.eps)
+        support_pi = torch.softmax(-(attract_centered / attract_scale) / tau_b.clamp_min(self.eps), dim=-1)
 
         uq = 1.0 / float(query_len)
         us = 1.0 / float(support_len)
 
-        psi = self._episode_psi(flat_cost, way_num=w, shot_num=k, eps=self.eps)
+        psi = self._episode_psi(prior_cost, way_num=w, shot_num=k, eps=self.eps)
         gate_dtype = self.gate_mlp[0].weight.dtype
         logit = self.gate_mlp(psi.to(dtype=gate_dtype)).squeeze(-1).to(
             dtype=flat_cost.dtype,

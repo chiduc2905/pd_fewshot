@@ -36,3 +36,18 @@ def test_egsm_kappa_near_uniform_when_costs_flat():
     mod = EpisodeGatedShrinkageMarginal(hidden_dim=8)
     _, _, aux = mod(flat, way_num=way, shot_num=shot, rho=0.8)
     assert float(aux["egsm_kappa"].detach().mean()) < 0.5
+
+
+def test_egsm_gate_mlp_receives_episode_gradients():
+    torch.manual_seed(2)
+    nq, way, shot, lq, ls = 2, 4, 1, 5, 5
+    flat = torch.rand(nq, way * shot, lq, ls)
+    mod = EpisodeGatedShrinkageMarginal(hidden_dim=8)
+    _, _, aux = mod(flat, way_num=way, shot_num=shot, rho=0.8)
+
+    aux["egsm_kappa"].sum().backward()
+
+    first_weight_grad = mod.gate_mlp[0].weight.grad
+    final_weight_grad = mod.gate_mlp[2].weight.grad
+    assert first_weight_grad is not None and first_weight_grad.abs().sum() > 0
+    assert final_weight_grad is not None and final_weight_grad.abs().sum() > 0

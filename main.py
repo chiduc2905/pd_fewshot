@@ -1327,10 +1327,10 @@ def get_args():
         ),
     )
     parser.add_argument("--hrot_ecot_egsm_hidden_dim", type=int, default=32)
-    parser.add_argument("--hrot_ecot_egsm_candidate_tau_q", type=float, default=0.5)
-    parser.add_argument("--hrot_ecot_egsm_candidate_tau_b", type=float, default=0.5)
+    parser.add_argument("--hrot_ecot_egsm_candidate_tau_q", type=float, default=1.0)
+    parser.add_argument("--hrot_ecot_egsm_candidate_tau_b", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_egsm_kappa_min", type=float, default=0.05)
-    parser.add_argument("--hrot_ecot_egsm_kappa_max", type=float, default=0.95)
+    parser.add_argument("--hrot_ecot_egsm_kappa_max", type=float, default=0.35)
     parser.add_argument(
         "--hrot_ecot_egsm_adaptive_rho",
         type=str,
@@ -2606,7 +2606,7 @@ def get_model(args):
             f"ecot_ccdm_ew={getattr(args, 'hrot_ecot_ccdm_entropy_shot_weight', 0.0)}, "
             f"ecot_egsm_enable={resolve_hrot_ecot_enable_egsm(args)}, "
             f"ecot_egsm_hidden={getattr(args, 'hrot_ecot_egsm_hidden_dim', 32)}, "
-            f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.95)}), "
+            f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.35)}), "
             f"ecot_egsm_adaptive_rho={getattr(args, 'hrot_ecot_egsm_adaptive_rho', 'false')}, "
             f"ecot_egsm_rho_delta_max={getattr(args, 'hrot_ecot_egsm_rho_delta_max', 0.15)}, "
             f"ecot_transport_mode={ecot_transport_mode}, "
@@ -4146,6 +4146,10 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "ec_mrot_aux_loss",
         "mean_ecot_m2_swts_w_entropy",
         "mean_aqm_a_entropy",
+        "egsm_kappa",
+        "egsm_candidate_tau_q",
+        "egsm_candidate_tau_b",
+        "egsm_rho_adaptive",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -4538,6 +4542,10 @@ def format_diagnostic_summary(metrics):
         "mean_gamma_entropy",
         "mean_consistency_penalty",
         "mean_redundancy_penalty",
+        "egsm_kappa",
+        "egsm_candidate_tau_q",
+        "egsm_candidate_tau_b",
+        "egsm_rho_adaptive",
         "logit_scale",
     ]
     chunks = []
@@ -5123,7 +5131,21 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     test_diag_sums = defaultdict(float)
     test_diag_total = 0.0
     exported_q1 = 0
-    collect_test_diagnostics = q1_enabled or args.model == "crj_fsl"
+    egsm_test_diagnostics = resolve_hrot_ecot_enable_egsm(args) == "true"
+    model_name = str(getattr(args, "model", "")).strip().lower()
+    if model_name in {"ours", "ours_final"}:
+        ours_ablation = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
+        if ours_ablation in {"no_egsm", "uniform", "uniform_evidence", "no_evidence", "no_adaptive_evidence"}:
+            egsm_test_diagnostics = False
+    elif model_name == "ours_cpm":
+        cpm_ablation = str(getattr(args, "cpm_ablation", "full")).strip().lower().replace("-", "_")
+        if cpm_ablation == "no_egsm":
+            egsm_test_diagnostics = False
+    collect_test_diagnostics = (
+        q1_enabled
+        or args.model == "crj_fsl"
+        or egsm_test_diagnostics
+    )
 
     with torch.no_grad():
         for episode_idx, batch in enumerate(tqdm(loader, desc="Testing")):

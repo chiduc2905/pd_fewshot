@@ -393,6 +393,19 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     assert mass_off.ecot_m2_ablate_threshold_mass
     assert not mass_off.uses_ecot_egsm_marginal
 
+    egsm_on = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            hrot_ecot_enable_egsm="true",
+            **base_args,
+        )
+    )
+    assert not egsm_on.ecot_m2_ablate_threshold_mass
+    assert egsm_on.uses_ecot_egsm_marginal
+    assert egsm_on.egsm_marginal is not None
+    assert egsm_on.egsm_marginal.kappa_max == 0.35
+
 
 def test_ours_gap_ablation_forward_uses_gap_descriptor_cost_and_uot():
     torch.manual_seed(390)

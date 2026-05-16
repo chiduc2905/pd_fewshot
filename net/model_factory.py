@@ -2516,10 +2516,10 @@ def build_model_from_args(args):
             ecot_ccdm_entropy_shot_weight=float(getattr(args, "hrot_ecot_ccdm_entropy_shot_weight", 0.0)),
             ecot_enable_egsm=ecot_enable_egsm_flag,
             ecot_egsm_hidden_dim=int(getattr(args, "hrot_ecot_egsm_hidden_dim", 32)),
-            ecot_egsm_candidate_tau_q=float(getattr(args, "hrot_ecot_egsm_candidate_tau_q", 0.5)),
-            ecot_egsm_candidate_tau_b=float(getattr(args, "hrot_ecot_egsm_candidate_tau_b", 0.5)),
+            ecot_egsm_candidate_tau_q=float(getattr(args, "hrot_ecot_egsm_candidate_tau_q", 1.0)),
+            ecot_egsm_candidate_tau_b=float(getattr(args, "hrot_ecot_egsm_candidate_tau_b", 1.0)),
             ecot_egsm_kappa_min=float(getattr(args, "hrot_ecot_egsm_kappa_min", 0.05)),
-            ecot_egsm_kappa_max=float(getattr(args, "hrot_ecot_egsm_kappa_max", 0.95)),
+            ecot_egsm_kappa_max=float(getattr(args, "hrot_ecot_egsm_kappa_max", 0.35)),
             ecot_egsm_adaptive_rho=_bool_flag(
                 getattr(args, "hrot_ecot_egsm_adaptive_rho", "false"), default=False,
             ),

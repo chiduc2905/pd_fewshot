@@ -724,8 +724,10 @@ def _ours_final_base_args(
     ablation="full",
     transport_mode="unbalanced",
     ablate_threshold_mass="false",
+    fixed_mass=None,
 ):
     """Explicit Ours-Final defaults; variant args are appended after passthrough args."""
+    fixed_mass = str(rho) if fixed_mass is None else str(fixed_mass)
     return [
         "--ours_ablation",
         str(ablation),
@@ -740,7 +742,7 @@ def _ours_final_base_args(
         "--hrot_ecot_base_rho",
         str(rho),
         "--hrot_fixed_mass",
-        str(rho),
+        fixed_mass,
         "--hrot_ecot_transport_mode",
         str(transport_mode),
     ]
@@ -757,7 +759,12 @@ def build_ours_final_ablation_variants():
         {
             "tag": "ours_final_full_ot",
             "label": "Ours-Final ablation: balanced full OT replaces UOT",
-            "extra_args": _ours_final_base_args("1.0", ablation="full_ot", transport_mode="balanced"),
+            "extra_args": _ours_final_base_args(
+                "1.0",
+                ablation="full_ot",
+                transport_mode="balanced",
+                fixed_mass="0.8",
+            ),
             "mode1_noise": True,
         },
         {
