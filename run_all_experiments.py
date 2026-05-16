@@ -15,6 +15,7 @@ from net.model_factory import get_model_choices, get_model_metadata
 SAMPLES_LIST = [60, 160, 240, None]
 # Ours contribution ablations: only these training-set sizes (ignores --mode_id / --mode_ids).
 OURS_ABLATION_SAMPLE_COUNTS = [60, 240]
+OURS_FINAL_SAMPLE_COUNTS = SAMPLES_LIST
 SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
@@ -1352,7 +1353,7 @@ def main():
             if args.ours_ablation_suite == "no_egsm_gap"
             else build_ours_ablation_variants()
         )
-        samples_list = list(OURS_ABLATION_SAMPLE_COUNTS)
+        samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
         experiments = [
             {
                 "model": "ours",
@@ -1417,11 +1418,17 @@ def main():
             if args.ours_final_ablation_suite == "rho_grid"
             else build_ours_final_ablation_variants()
         )
-        samples_list = list(OURS_ABLATION_SAMPLE_COUNTS)
+        if args.mode_id is not None:
+            samples_list = [EXPERIMENT_MODES[args.mode_id]]
+        elif parsed_mode_ids is not None:
+            samples_list = [EXPERIMENT_MODES[mode_id] for mode_id in parsed_mode_ids]
+        else:
+            samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
         mode1_sample_count = EXPERIMENT_MODES[1]
         enable_mode1_noise_tests = (
             args.ours_final_ablation_suite == "contrib"
             and effective_test_protocol != "noise"
+            and mode1_sample_count in samples_list
         )
         mode1_noise_splits = []
         mode1_noise_splits_arg = None
@@ -1467,7 +1474,8 @@ def main():
         print("=" * 72)
         print("pulse_fewshot - Ours-Final Ablation Suite")
         print("=" * 72)
-        print("Samples     : 60 and 240 only (see OURS_ABLATION_SAMPLE_COUNTS)")
+        sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
+        print(f"Samples     : {sample_text}")
         print(f"Models      : {', '.join(requested_models)}")
         print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
