@@ -128,7 +128,7 @@ def get_args():
         help=(
             "Comma-separated final-test episode seeds. The first seed is used for "
             "the normal post-train final test; remaining seeds run test-only from "
-            "the saved final checkpoint."
+            "the saved best checkpoint."
         ),
     )
     parser.add_argument("--shot_num", type=int, default=None, choices=[1, 5], help="Optional fixed shot number")
@@ -169,8 +169,22 @@ def get_args():
         help=(
             "Skip an experiment/test when all expected result files already exist. "
             "If primary clean results exist but requested extra tests are missing, "
-            "reuse the tagged final checkpoint for test-only runs."
+            "reuse the tagged best checkpoint for test-only runs."
         ),
+    )
+    parser.add_argument(
+        "--result_artifacts",
+        type=str,
+        default="figures_only",
+        choices=["figures_only", "all"],
+        help="Forwarded to main.py. figures_only keeps results_*.txt and only saves confusion matrix + t-SNE figures.",
+    )
+    parser.add_argument(
+        "--log_cli_command",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Append this launcher CLI to results/cli_commands.log.",
     )
     parser.add_argument("--spif_global_only", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--spif_local_only", type=str, default="false", choices=["true", "false"])
@@ -196,11 +210,12 @@ def get_args():
         "--ours_final_ablation_suite",
         type=str,
         default="none",
-        choices=["none", "contrib", "rho_grid"],
+        choices=["none", "contrib", "rho_grid", "complete"],
         help=(
             "Expand Ours-Final runs with tagged variants. "
             "contrib=full, full_ot, gap, mass_off; "
-            "rho_grid=rho 0.6,0.7,0.8,0.9 as separate single-budget runs."
+            "rho_grid=rho 0.6,0.7,0.8,0.9 at 60/5-shot and 240/1-shot; "
+            "complete=contrib over all modes/shots plus restricted rho_grid."
         ),
     )
     parser.add_argument(
@@ -245,6 +260,13 @@ def get_args():
             "--hrot_ecot_m2_cost_per_mass_score",
             "false",
         ]
+    if "--result_artifacts" not in extra:
+        extra += ["--result_artifacts", args.result_artifacts]
+    if args.result_artifacts == "figures_only":
+        if "--save_last_checkpoint" not in extra:
+            extra += ["--save_last_checkpoint", "false"]
+        if "--jecot_m2_val_save_hist_fig" not in extra:
+            extra += ["--jecot_m2_val_save_hist_fig", "false"]
     args.passthrough_args = extra
     return args
 
@@ -753,11 +775,13 @@ def build_ours_final_ablation_variants():
     return [
         {
             "tag": "ours_final_full",
+            "checkpoint_tag": "ablation_full",
             "label": "Ours-Final: local descriptors + UOT rho=0.8 + threshold-mass score, EGSM off",
             "extra_args": base,
         },
         {
             "tag": "ours_final_full_ot",
+            "checkpoint_tag": "ablation_full_ot",
             "label": "Ours-Final ablation: balanced full OT replaces UOT",
             "extra_args": _ours_final_base_args(
                 "1.0",
@@ -769,12 +793,14 @@ def build_ours_final_ablation_variants():
         },
         {
             "tag": "ours_final_gap",
+            "checkpoint_tag": "ablation_gap",
             "label": "Ours-Final ablation: GAP feature-map descriptors replace local tokens",
             "extra_args": _ours_final_base_args(ablation="gap"),
             "mode1_noise": True,
         },
         {
             "tag": "ours_final_mass_off",
+            "checkpoint_tag": "ablation_mass_off",
             "label": "Ours-Final ablation: cost-only score removes threshold-mass reward",
             "extra_args": _ours_final_base_args(ablate_threshold_mass="true"),
             "mode1_noise": True,
@@ -786,6 +812,7 @@ def build_ours_final_rho_grid_variants():
     return [
         {
             "tag": f"ours_final_rho_{str(rho).replace('.', 'p')}",
+            "checkpoint_tag": f"rho_grid_rho_{str(rho).replace('.', 'p')}",
             "label": f"Ours-Final rho={rho} single-budget UOT",
             "extra_args": _ours_final_base_args(str(rho)),
         }
@@ -793,13 +820,40 @@ def build_ours_final_rho_grid_variants():
     ]
 
 
-def build_final_checkpoint_path(dataset_name, model, samples, shot, experiment_tag=None):
+def restricted_ours_final_rho_grid_pairs(samples_list, shots):
+    allowed_pairs = {(60, 5), (240, 1)}
+    return [
+        (samples, shot)
+        for samples in samples_list
+        for shot in shots
+        if (samples, shot) in allowed_pairs
+    ]
+
+
+def build_best_checkpoint_path(dataset_name, model, samples, shot, checkpoint_tag=None):
+    samples_suffix = f"{samples}samples" if samples is not None else "all"
+    tag_suffix = f"_{sanitize_result_tag(checkpoint_tag)}" if checkpoint_tag else ""
+    return os.path.join(
+        "checkpoints",
+        f"{dataset_name}_{model}_{samples_suffix}_{shot}shot{tag_suffix}_best.pth",
+    )
+
+
+def build_legacy_final_checkpoint_path(dataset_name, model, samples, shot, experiment_tag=None):
     samples_suffix = f"{samples}samples" if samples is not None else "all"
     tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
     return os.path.join(
         "checkpoints",
         f"{dataset_name}_{model}_{samples_suffix}_{shot}shot{tag_suffix}_final.pth",
     )
+
+
+def resolve_checkpoint_path(preferred_path, legacy_path=None):
+    if os.path.exists(preferred_path):
+        return preferred_path
+    if legacy_path and os.path.exists(legacy_path):
+        return legacy_path
+    return preferred_path
 
 
 def set_cli_option(cmd, flag, value):
@@ -858,6 +912,7 @@ def run_experiment(
     passthrough_args=None,
     variant_args=None,
     experiment_tag=None,
+    checkpoint_tag=None,
     experiment_label=None,
     extra_final_test_seeds=None,
     extra_test_protocols=None,
@@ -874,11 +929,20 @@ def run_experiment(
         print(f"Variant     : {experiment_label}")
     if experiment_tag:
         print(f"Tag         : {experiment_tag}")
+    if checkpoint_tag and checkpoint_tag != experiment_tag:
+        print(f"Ckpt Tag    : {checkpoint_tag}")
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
     print(f"Test Proto  : {test_protocol}")
-    checkpoint_path = build_final_checkpoint_path(
+    checkpoint_path = build_best_checkpoint_path(
+        dataset_name=dataset_name,
+        model=model,
+        samples=samples,
+        shot=shot,
+        checkpoint_tag=checkpoint_tag or experiment_tag,
+    )
+    legacy_checkpoint_path = build_legacy_final_checkpoint_path(
         dataset_name=dataset_name,
         model=model,
         samples=samples,
@@ -896,6 +960,8 @@ def run_experiment(
         noise_test_splits=noise_test_splits,
     )
     print(f"Checkpoint  : {checkpoint_path}")
+    if legacy_checkpoint_path != checkpoint_path and os.path.exists(legacy_checkpoint_path):
+        print(f"Legacy Ckpt : {legacy_checkpoint_path}")
     if len(primary_result_paths) == 1:
         print(f"Result File : {primary_result_paths[0]}")
     else:
@@ -1071,6 +1137,8 @@ def run_experiment(
         cmd.extend(variant_args)
     if experiment_tag:
         cmd.extend(["--experiment_tag", experiment_tag])
+    if checkpoint_tag:
+        cmd.extend(["--checkpoint_tag", checkpoint_tag])
 
     if os.environ.get("PULSE_FEWSHOT_PRINT_TRAIN_CMD", "").lower() in {"1", "true", "yes"}:
         print(f"[pulse_fewshot child CLI] {shlex.join(cmd)}")
@@ -1086,7 +1154,8 @@ def run_experiment(
             print("Warning: extra final tests are not implemented for external smnet models; skipping.")
             return True
 
-        if not os.path.exists(checkpoint_path):
+        checkpoint_for_test = resolve_checkpoint_path(checkpoint_path, legacy_checkpoint_path)
+        if not os.path.exists(checkpoint_for_test):
             print(f"Error: trained checkpoint not found for extra tests: {checkpoint_path}")
             return False
 
@@ -1109,11 +1178,11 @@ def run_experiment(
                 continue
             test_cmd = list(cmd)
             test_cmd = set_cli_option(test_cmd, "--mode", "test")
-            test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_path)
+            test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_for_test)
             test_cmd = set_cli_option(test_cmd, "--final_test_seed", str(extra_seed))
             test_cmd = set_cli_option(test_cmd, "--experiment_tag", seed_tag)
 
-            print(f"\nExtra final test: seed={extra_seed}, checkpoint={checkpoint_path}")
+            print(f"\nExtra final test: seed={extra_seed}, checkpoint={checkpoint_for_test}")
             subprocess.run(test_cmd, check=True)
 
         for extra_protocol in extra_test_protocols:
@@ -1122,7 +1191,7 @@ def run_experiment(
                 protocol_tag = f"{experiment_tag}_{protocol_tag}"
             test_cmd = list(cmd)
             test_cmd = set_cli_option(test_cmd, "--mode", "test")
-            test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_path)
+            test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_for_test)
             test_cmd = set_cli_option(test_cmd, "--final_test_seed", str(final_test_seed))
             test_cmd = set_cli_option(test_cmd, "--test_protocol", extra_protocol)
             test_cmd = set_cli_option(test_cmd, "--experiment_tag", protocol_tag)
@@ -1149,7 +1218,7 @@ def run_experiment(
 
             print(
                 f"\nExtra {extra_protocol} final test: "
-                f"seed={final_test_seed}, checkpoint={checkpoint_path}"
+                f"seed={final_test_seed}, checkpoint={checkpoint_for_test}"
             )
             if len(extra_result_paths) == 1:
                 print(f"Extra result file: {extra_result_paths[0]}")
@@ -1371,7 +1440,8 @@ def main():
 
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("results", exist_ok=True)
-    log_cli_command(args)
+    if str(getattr(args, "log_cli_command", "false")).lower() == "true":
+        log_cli_command(args)
 
     active_ablation_suites = [
         name
@@ -1404,6 +1474,7 @@ def main():
                 "shot": shot,
                 "variant_args": variant["extra_args"],
                 "experiment_tag": variant["tag"],
+                "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
                 "experiment_label": variant["label"],
             }
             for variant in ablation_variants
@@ -1456,11 +1527,15 @@ def main():
                 "`--ours_final_ablation_suite` currently supports only `--models ours_final` "
                 f"(got {requested_models})"
             )
-        ablation_variants = (
-            build_ours_final_rho_grid_variants()
-            if args.ours_final_ablation_suite == "rho_grid"
-            else build_ours_final_ablation_variants()
-        )
+        suite_name = args.ours_final_ablation_suite
+        contrib_variants = build_ours_final_ablation_variants()
+        rho_grid_variants = build_ours_final_rho_grid_variants()
+        if suite_name == "rho_grid":
+            ablation_variants = rho_grid_variants
+        elif suite_name == "complete":
+            ablation_variants = contrib_variants + rho_grid_variants
+        else:
+            ablation_variants = contrib_variants
         if args.mode_id is not None:
             samples_list = [EXPERIMENT_MODES[args.mode_id]]
         elif parsed_mode_ids is not None:
@@ -1469,10 +1544,13 @@ def main():
             samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
         mode1_sample_count = EXPERIMENT_MODES[1]
         enable_mode1_noise_tests = (
-            args.ours_final_ablation_suite == "contrib"
+            suite_name in {"contrib", "complete"}
             and effective_test_protocol != "noise"
             and mode1_sample_count in samples_list
         )
+        def include_mode1_noise(variant):
+            return suite_name == "complete" or variant.get("mode1_noise", False)
+
         mode1_noise_splits = []
         mode1_noise_splits_arg = None
         if enable_mode1_noise_tests:
@@ -1482,38 +1560,63 @@ def main():
                 snr_values=(15, 10, 5),
             )
             mode1_noise_splits_arg = ",".join(mode1_noise_splits)
-        experiments = [
-            {
-                "model": "ours_final",
-                "samples": samples,
-                "shot": shot,
-                "variant_args": variant["extra_args"],
-                "experiment_tag": variant["tag"],
-                "experiment_label": variant["label"],
-                "extra_test_protocols": merge_extra_test_protocols(
-                    args.extra_test_protocols,
-                    ["noise"]
-                    if (
-                        enable_mode1_noise_tests
-                        and samples == mode1_sample_count
-                        and variant.get("mode1_noise", False)
-                    )
-                    else [],
-                ),
-                "extra_noise_test_splits": (
-                    mode1_noise_splits_arg
-                    if (
-                        enable_mode1_noise_tests
-                        and samples == mode1_sample_count
-                        and variant.get("mode1_noise", False)
-                    )
-                    else None
-                ),
-            }
-            for variant in ablation_variants
-            for samples in samples_list
-            for shot in shots
-        ]
+        experiments = []
+        if suite_name in {"contrib", "complete"}:
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": merge_extra_test_protocols(
+                        args.extra_test_protocols,
+                        ["noise"]
+                        if (
+                            enable_mode1_noise_tests
+                            and samples == mode1_sample_count
+                            and include_mode1_noise(variant)
+                        )
+                        else [],
+                    ),
+                    "extra_noise_test_splits": (
+                        mode1_noise_splits_arg
+                        if (
+                            enable_mode1_noise_tests
+                            and samples == mode1_sample_count
+                            and include_mode1_noise(variant)
+                        )
+                        else None
+                    ),
+                }
+                for variant in contrib_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name in {"rho_grid", "complete"}:
+            rho_grid_pairs = restricted_ours_final_rho_grid_pairs(samples_list, shots)
+            if suite_name == "rho_grid" and not rho_grid_pairs:
+                raise ValueError(
+                    "Ours-Final rho_grid is restricted to 60-sample/5-shot and 240-sample/1-shot. "
+                    "Requested modes/shots do not include either pair."
+                )
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in rho_grid_variants
+                for samples, shot in rho_grid_pairs
+            )
         print("=" * 72)
         print("pulse_fewshot - Ours-Final Ablation Suite")
         print("=" * 72)
@@ -1526,17 +1629,23 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
+        if suite_name in {"rho_grid", "complete"}:
+            rho_pairs_text = ", ".join(
+                f"{samples} samples/{shot}-shot"
+                for samples, shot in restricted_ours_final_rho_grid_pairs(samples_list, shots)
+            )
+            print(f"Rho Grid    : {rho_pairs_text if rho_pairs_text else '(no selected rho-grid pair)'}")
         if enable_mode1_noise_tests:
             mode1_noise_tags = [
                 variant["tag"]
-                for variant in ablation_variants
-                if variant.get("mode1_noise", False)
+                for variant in contrib_variants
+                if include_mode1_noise(variant)
             ]
             mode1_noise_run_count = len(mode1_noise_tags) * len(shots)
             print(
                 "Mode-1 Noise : test-only after clean training for "
                 f"{', '.join(mode1_noise_tags)} at {mode1_sample_count} samples "
-                f"({mode1_noise_run_count} run(s); 3 ablations x requested shot count)"
+                f"({mode1_noise_run_count} run(s))"
             )
             print(f"Noise Root  : {args.noise_test_root}")
             print(
@@ -1833,6 +1942,7 @@ def main():
             passthrough_args=args.passthrough_args,
             variant_args=experiment["variant_args"],
             experiment_tag=experiment["experiment_tag"],
+            checkpoint_tag=experiment.get("checkpoint_tag"),
             experiment_label=experiment["experiment_label"],
             extra_final_test_seeds=args.extra_final_test_seeds,
             extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
@@ -1860,6 +1970,7 @@ def main():
         args.spifce_ablation_suite == "none"
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
+        and args.result_artifacts == "all"
     ):
         print("\n" + "=" * 60)
         print("Generating comparison charts...")
@@ -1871,6 +1982,15 @@ def main():
             effective_test_protocol,
             noise_test_split_names if effective_test_protocol == "noise" else None,
         )
+    elif (
+        args.spifce_ablation_suite == "none"
+        and args.ours_ablation_suite == "none"
+        and args.ours_final_ablation_suite == "none"
+        and args.result_artifacts != "all"
+    ):
+        print("\n" + "=" * 60)
+        print("Skipping comparison charts because result_artifacts=figures_only.")
+        print("=" * 60)
     elif (
         args.spifce_ablation_suite != "none"
         or args.ours_ablation_suite != "none"

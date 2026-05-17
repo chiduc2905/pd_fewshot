@@ -65,6 +65,10 @@ def _bool_flag(value, default=False):
     return str(value).lower() == "true"
 
 
+def save_auxiliary_result_artifacts(args):
+    return str(getattr(args, "result_artifacts", "figures_only")).lower() == "all"
+
+
 def _sanitize_wandb_project(name):
     """Map characters W&B rejects in project names (see wandb_settings.validate_project)."""
     raw = str(name or "").strip()
@@ -1788,6 +1792,13 @@ def get_args():
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--mode", type=str, default="train", choices=["train", "test"])
+    parser.add_argument(
+        "--result_artifacts",
+        type=str,
+        default="figures_only",
+        choices=["figures_only", "all"],
+        help="figures_only keeps results_*.txt and only saves confusion-matrix and t-SNE PNG/PDF files under path_results.",
+    )
     parser.add_argument("--save_misclf_report", action="store_true")
     parser.add_argument("--misclf_topk", type=int, default=30)
     parser.add_argument("--export_q1_report", type=str, default="false", choices=["true", "false"])
@@ -1795,7 +1806,13 @@ def get_args():
     parser.add_argument("--q1_queries_per_episode", type=int, default=1)
     parser.add_argument("--q1_misclassified_only", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--export_dataset_profile", type=str, default="false", choices=["true", "false"])
-    parser.add_argument("--save_last_checkpoint", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--save_last_checkpoint", type=str, default="false", choices=["true", "false"])
+    parser.add_argument(
+        "--checkpoint_tag",
+        type=str,
+        default="",
+        help="Optional tag used only in checkpoint filenames; experiment_tag still controls result filenames.",
+    )
     parser.add_argument("--skip_final_test", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_train_sfc", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--deepemd_train_sfc_update_step", type=int, default=None)
@@ -3275,7 +3292,18 @@ def load_model_weights(model, checkpoint_path, device):
 
 def get_checkpoint_stem(args):
     samples_suffix = f"{args.training_samples}samples" if args.training_samples else "all"
-    tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
+    checkpoint_tag = str(getattr(args, "checkpoint_tag", "") or "").strip()
+    if not checkpoint_tag:
+        checkpoint_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    if not checkpoint_tag and getattr(args, "model", "") in OURS_ENTRYPOINT_MODEL_NAMES:
+        ours_ablation = str(getattr(args, "ours_ablation", "full") or "full").strip().lower().replace("-", "_")
+        if (
+            getattr(args, "model", "") in OURS_FINAL_MODEL_NAMES
+            and _bool_flag(getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "false"), default=False)
+        ):
+            ours_ablation = "mass_off"
+        checkpoint_tag = f"ablation_{ours_ablation}"
+    tag_suffix = f"_{sanitize_result_tag(checkpoint_tag)}" if checkpoint_tag else ""
     return os.path.join(
         args.path_weights,
         f"{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot{tag_suffix}",
@@ -3283,7 +3311,7 @@ def get_checkpoint_stem(args):
 
 
 def get_best_model_path(args):
-    return f"{get_checkpoint_stem(args)}_final.pth"
+    return f"{get_checkpoint_stem(args)}_best.pth"
 
 
 def get_last_checkpoint_path(args):
@@ -4879,7 +4907,10 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
             hist = m2_val_aux.get("true_avg_cost_hist")
             if isinstance(hist, np.ndarray) and hist.size > 0:
                 wandb_payload["jecot_m2/val_true_avg_cost_hist"] = wandb.Histogram(hist[np.isfinite(hist)])
-            if _bool_flag(getattr(args, "jecot_m2_val_save_hist_fig", "true"), default=True):
+            if (
+                save_auxiliary_result_artifacts(args)
+                and _bool_flag(getattr(args, "jecot_m2_val_save_hist_fig", "true"), default=True)
+            ):
                 samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
                 tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
                 hist_path = os.path.join(
@@ -4904,7 +4935,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
             torch.save(net.state_dict(), final_path)
             print(f"  Saved best model to {final_path}")
 
-        if _bool_flag(args.save_last_checkpoint, default=True):
+        if _bool_flag(args.save_last_checkpoint, default=False):
             last_path = get_last_checkpoint_path(args)
             checkpoint = {
                 "epoch": epoch,
@@ -4919,28 +4950,29 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
 
     samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
-    curves_path = os.path.join(
-        args.path_results,
-        f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}",
-    )
-    try:
-        plot_training_curves(history, curves_path, eval_label=selection_split.title())
-        if os.path.exists(f"{curves_path}_curves.png"):
-            wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
-    except RuntimeError as exc:
-        print(f"Skipping training curves: {exc}")
-    if args.model in M2_LIKE_MODEL_NAMES and history.get("m2_transport_cost_threshold"):
-        t_path = f"{curves_path}_m2_threshold.png"
+    if save_auxiliary_result_artifacts(args):
+        curves_path = os.path.join(
+            args.path_results,
+            f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}",
+        )
         try:
-            save_jecot_m2_threshold_curve(
-                history["m2_transport_cost_threshold"],
-                t_path,
-                eval_label=selection_split.title(),
-            )
-            if os.path.exists(t_path):
-                wandb.log({"jecot_m2/threshold_curve": wandb.Image(t_path)})
-        except (RuntimeError, ValueError, OSError) as exc:
-            print(f"Skipping M2 threshold curve: {exc}")
+            plot_training_curves(history, curves_path, eval_label=selection_split.title())
+            if os.path.exists(f"{curves_path}_curves.png"):
+                wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
+        except RuntimeError as exc:
+            print(f"Skipping training curves: {exc}")
+        if args.model in M2_LIKE_MODEL_NAMES and history.get("m2_transport_cost_threshold"):
+            t_path = f"{curves_path}_m2_threshold.png"
+            try:
+                save_jecot_m2_threshold_curve(
+                    history["m2_transport_cost_threshold"],
+                    t_path,
+                    eval_label=selection_split.title(),
+                )
+                if os.path.exists(t_path):
+                    wandb.log({"jecot_m2/threshold_curve": wandb.Image(t_path)})
+            except (RuntimeError, ValueError, OSError) as exc:
+                print(f"Skipping M2 threshold curve: {exc}")
 
     print(f"Best {selection_split.title()} Accuracy: {best_acc:.4f}")
     return best_acc, history
@@ -5113,13 +5145,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     print("=" * 60)
 
     net.eval()
+    save_aux_artifacts = save_auxiliary_result_artifacts(args)
     all_preds, all_targets = [], []
     episode_accuracies = []
     episode_times = []
     query_seen = Counter()
     query_mis = Counter()
     query_pair = defaultdict(Counter)
-    q1_enabled = _bool_flag(getattr(args, "export_q1_report", "false"), default=False)
+    q1_enabled = save_aux_artifacts and _bool_flag(getattr(args, "export_q1_report", "false"), default=False)
     q1_limit = max(0, int(getattr(args, "q1_num_episodes", 0)))
     q1_queries_per_episode = max(1, int(getattr(args, "q1_queries_per_episode", 1)))
     q1_misclassified_only = _bool_flag(getattr(args, "q1_misclassified_only", "true"), default=True)
@@ -5192,7 +5225,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             accumulate_diagnostics(test_diag_sums, batch_metrics, weight=targets.size(0))
             test_diag_total += float(targets.size(0))
 
-            if args.shot_num > 1:
+            if save_aux_artifacts and args.shot_num > 1:
                 support_rows_episode, support_summary = compute_support_episode_distribution(
                     support[0].detach().cpu(),
                     class_names=args.class_names,
@@ -5371,7 +5404,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     except RuntimeError as exc:
         print(f"Skipping confusion matrix plot: {exc}")
 
-    if q1_rows:
+    if save_aux_artifacts and q1_rows:
         q1_csv_path = os.path.join(
             args.path_results,
             f"q1_focus_summary_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.csv",
@@ -5391,7 +5424,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         print(f"Saved Q1 focus summary: {q1_csv_path}")
         print(f"Saved {len(q1_figure_paths)} Q1 figure(s)")
 
-    if support_distribution_rows:
+    if save_aux_artifacts and support_distribution_rows:
         support_csv_path = os.path.join(
             args.path_results,
             f"support_episode_distribution_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.csv",
@@ -5399,7 +5432,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         write_rows_csv(support_csv_path, support_distribution_rows)
         print(f"Saved support-shot distribution summary: {support_csv_path}")
 
-    if args.save_misclf_report and query_seen:
+    if save_aux_artifacts and args.save_misclf_report and query_seen:
         pair_totals = Counter()
         true_totals = Counter()
         for true_i, pred_i in zip(all_targets.tolist(), all_preds.tolist()):
@@ -5538,6 +5571,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             handle.write(f"Support Outlier Score Max: {support_summary['support_outlier_score_max']:.4f}\n")
             handle.write(f"Support Entropy Std Mean: {support_summary['support_entropy_std_mean']:.4f}\n")
     print(f"Results saved to {txt_path}")
+    if not save_aux_artifacts:
+        print("Result artifact mode: figures_only (kept result txt plus confusion matrix and t-SNE PNG/PDF).")
 
 
 def calculate_flops(model, input_size=(3, 64, 64), device="cuda"):
@@ -5744,7 +5779,10 @@ def main():
             )
             args.way_num = len(args.class_names)
 
-    if _bool_flag(getattr(args, "export_dataset_profile", "false"), default=False):
+    if (
+        save_auxiliary_result_artifacts(args)
+        and _bool_flag(getattr(args, "export_dataset_profile", "false"), default=False)
+    ):
         profile_stem = f"{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}".strip("_")
         profile_splits = {
             "train": (train_X, train_y, train_file_paths),
@@ -5816,7 +5854,9 @@ def main():
     final_test_seed = build_episode_seed(args, "final_test")
     print(f"Final Test  : episode_seed={final_test_seed}")
     final_test_runs = []
-    return_indices = args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False)
+    return_indices = save_auxiliary_result_artifacts(args) and (
+        args.save_misclf_report or _bool_flag(getattr(args, "export_q1_report", "false"), default=False)
+    )
 
     if args.effective_test_protocol == "noise":
         if not noise_pools:
