@@ -1085,6 +1085,10 @@ def get_args():
     parser.add_argument("--hrot_ecot_tau_shot_min", type=float, default=0.5)
     parser.add_argument("--hrot_ecot_tau_shot_max", type=float, default=2.0)
     parser.add_argument("--hrot_ecot_enable_threshold_offset", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--hrot_ecot_m2_per_shot_threshold", type=str, default="false", choices=["true", "false"],
+                        help="J_ECOT_M2 only: learn per-shot adaptive threshold multiplier on T.")
+    parser.add_argument("--hrot_ecot_m2_pst_hidden", type=int, default=32,
+                        help="Hidden dim for per-shot threshold MLP.")
     parser.add_argument(
         "--hrot_ecot_m2_ablate_threshold_mass",
         "--m2_ablate_T",
