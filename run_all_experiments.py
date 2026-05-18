@@ -210,12 +210,23 @@ def get_args():
         "--ours_final_ablation_suite",
         type=str,
         default="none",
-        choices=["none", "contrib", "rho_grid", "complete"],
+        choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off"],
         help=(
             "Expand Ours-Final runs with tagged variants. "
             "contrib=full, full_ot, gap, mass_off; "
-            "rho_grid=rho 0.6,0.7,0.8,0.9 at 60/5-shot and 240/1-shot; "
-            "complete=contrib over all modes/shots plus restricted rho_grid."
+            "rho_grid=rho 0.6,0.7,0.8,0.9 at 60/5-shot and 240/1-shot unless "
+            "--ours_final_rho_values is set; "
+            "complete=contrib over all modes/shots plus restricted rho_grid; "
+            "tau_shot_off=Ours-Final with ECOT tau-shot pooling disabled."
+        ),
+    )
+    parser.add_argument(
+        "--ours_final_rho_values",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated rho values for --ours_final_ablation_suite rho_grid/complete "
+            "(e.g. 0.9,0.95). Defaults to 0.6,0.7,0.8,0.9."
         ),
     )
     parser.add_argument(
@@ -808,7 +819,8 @@ def build_ours_final_ablation_variants():
     ]
 
 
-def build_ours_final_rho_grid_variants():
+def build_ours_final_rho_grid_variants(rho_values=None):
+    rho_values = tuple(rho_values or ("0.6", "0.7", "0.8", "0.9"))
     return [
         {
             "tag": f"ours_final_rho_{str(rho).replace('.', 'p')}",
@@ -816,7 +828,18 @@ def build_ours_final_rho_grid_variants():
             "label": f"Ours-Final rho={rho} single-budget UOT",
             "extra_args": _ours_final_base_args(str(rho)),
         }
-        for rho in ("0.6", "0.7", "0.8", "0.9")
+        for rho in rho_values
+    ]
+
+
+def build_ours_final_tau_shot_off_variants():
+    return [
+        {
+            "tag": "ours_final_tau_shot_off",
+            "checkpoint_tag": "ablation_tau_shot_off",
+            "label": "Ours-Final ablation: ECOT tau-shot pooling disabled",
+            "extra_args": _ours_final_base_args() + ["--hrot_ecot_enable_tau_shot", "false"],
+        }
     ]
 
 
@@ -1334,6 +1357,23 @@ def parse_mode_ids(mode_ids_str):
     return parsed
 
 
+def parse_rho_values(rho_values_str):
+    if rho_values_str is None or not str(rho_values_str).strip():
+        return None
+    parsed = []
+    for token in str(rho_values_str).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        rho = float(token)
+        if not 0.0 < rho <= 1.0:
+            raise ValueError(f"Invalid rho value {rho!r} in --ours_final_rho_values (expected 0 < rho <= 1).")
+        parsed.append(f"{rho:.6g}")
+    if not parsed:
+        return None
+    return parsed
+
+
 def parse_final_test_seeds(seed_list_str):
     if seed_list_str is None or not str(seed_list_str).strip():
         return None
@@ -1393,6 +1433,7 @@ def main():
     parsed_mode_ids = parse_mode_ids(getattr(args, "mode_ids", None))
     if args.mode_id is not None and parsed_mode_ids is not None:
         raise ValueError("Use either --mode_id or --mode_ids, not both.")
+    ours_final_rho_values = parse_rho_values(getattr(args, "ours_final_rho_values", None))
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
     if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
@@ -1529,9 +1570,12 @@ def main():
             )
         suite_name = args.ours_final_ablation_suite
         contrib_variants = build_ours_final_ablation_variants()
-        rho_grid_variants = build_ours_final_rho_grid_variants()
+        rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
+        tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
+        elif suite_name == "tau_shot_off":
+            ablation_variants = tau_shot_off_variants
         elif suite_name == "complete":
             ablation_variants = contrib_variants + rho_grid_variants
         else:
@@ -1595,6 +1639,23 @@ def main():
                 for samples in samples_list
                 for shot in shots
             )
+        if suite_name == "tau_shot_off":
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in tau_shot_off_variants
+                for samples in samples_list
+                for shot in shots
+            )
         if suite_name in {"rho_grid", "complete"}:
             rho_grid_pairs = restricted_ours_final_rho_grid_pairs(samples_list, shots)
             if suite_name == "rho_grid" and not rho_grid_pairs:
@@ -1635,6 +1696,8 @@ def main():
                 for samples, shot in restricted_ours_final_rho_grid_pairs(samples_list, shots)
             )
             print(f"Rho Grid    : {rho_pairs_text if rho_pairs_text else '(no selected rho-grid pair)'}")
+            if ours_final_rho_values:
+                print(f"Rho Values  : {', '.join(ours_final_rho_values)}")
         if enable_mode1_noise_tests:
             mode1_noise_tags = [
                 variant["tag"]
