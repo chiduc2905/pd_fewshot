@@ -2598,6 +2598,12 @@ def build_model_from_args(args):
             eval_use_float64=_bool_flag(getattr(args, "hrot_eval_use_float64", "true"), default=True),
             hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
             ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
+            cost_hubness_enable=_bool_flag(
+                getattr(args, "hrot_cost_hubness_enable", "false"),
+                default=False,
+            ),
+            cost_hubness_lambda=float(getattr(args, "hrot_cost_hubness_lambda", 0.0)),
+            cost_hubness_k=int(getattr(args, "hrot_cost_hubness_k", 5)),
             care_enable_fwec=_bool_flag(getattr(args, "care_enable_fwec", "true"), default=True),
             care_enable_qesm=_bool_flag(getattr(args, "care_enable_qesm", "true"), default=True),
             care_enable_mdr=_bool_flag(getattr(args, "care_enable_mdr", "true"), default=True),

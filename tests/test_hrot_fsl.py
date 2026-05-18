@@ -407,6 +407,40 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     assert egsm_on.egsm_marginal.kappa_max == 0.35
 
 
+def test_ours_final_hubness_cost_forward_exposes_aux():
+    torch.manual_seed(392)
+    model = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            device="cpu",
+            image_size=64,
+            fewshot_backbone="conv64f",
+            hrot_token_dim=12,
+            hrot_eam_hidden_dim=16,
+            hrot_sinkhorn_iterations=4,
+            hrot_sinkhorn_tolerance=1e-5,
+            hrot_cost_hubness_enable="true",
+            hrot_cost_hubness_lambda=0.1,
+            hrot_cost_hubness_k=3,
+        )
+    )
+    model.eval()
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["hubness_base_cost_matrix"].shape == outputs["cost_matrix"].shape
+    assert outputs["hubness_scaled_cost_matrix"].shape == outputs["cost_matrix"].shape
+    assert outputs["hubness_support_bias"].shape[:3] == outputs["cost_matrix"].shape[:3]
+    assert outputs["hubness_query_bias"].shape[0] == outputs["cost_matrix"].shape[0]
+    assert torch.isfinite(outputs["cost_matrix"]).all()
+    assert torch.all(outputs["cost_matrix"] >= 0.0)
+
+
 def test_ours_gap_ablation_forward_uses_gap_descriptor_cost_and_uot():
     torch.manual_seed(390)
     model = build_model_from_args(
@@ -608,6 +642,40 @@ def test_hrot_fsl_cosine_ground_cost_uses_deepemd_style_cost():
     assert torch.allclose(outputs["cost_matrix"], expected_cost, atol=1e-5, rtol=1e-5)
     assert not torch.allclose(outputs["cost_matrix"], euclidean_cost, atol=1e-5, rtol=1e-5)
     assert torch.all(outputs["cost_matrix"] >= 0.0)
+
+
+def test_hrot_cost_hubness_disabled_returns_original_cost():
+    torch.manual_seed(391)
+    model = _build_model(variant="J_ECOT_M2", cost_hubness_enable=False)
+    cost = torch.rand(2, 3, 4, 5)
+
+    corrected, payload = model._apply_hubness_corrected_cost(cost)
+
+    assert payload is None
+    assert torch.allclose(corrected, cost, atol=0.0, rtol=0.0)
+
+
+def test_hrot_cost_hubness_increases_hub_penalty_margin():
+    model = _build_model(
+        variant="J_ECOT_M2",
+        cost_hubness_enable=True,
+        cost_hubness_lambda=1.0,
+        cost_hubness_k=3,
+    )
+    cost = torch.tensor(
+        [[[[0.20, 0.10, 0.90], [0.20, 0.90, 0.90], [0.20, 0.90, 0.90]]]],
+        dtype=torch.float32,
+    )
+
+    corrected, payload = model._apply_hubness_corrected_cost(cost)
+
+    assert payload is not None
+    assert corrected.shape == cost.shape
+    assert torch.all(corrected >= 0.0)
+    assert torch.allclose(corrected.mean(dim=(-1, -2)), cost.mean(dim=(-1, -2)), atol=1e-5)
+    original_margin = cost[0, 0, 0, 0] - cost[0, 0, 0, 1]
+    corrected_margin = corrected[0, 0, 0, 0] - corrected[0, 0, 0, 1]
+    assert corrected_margin > original_margin
 
 
 def test_hrot_fsl_auto_ground_cost_preserves_hyperbolic_variant_and_cosine_overrides():
@@ -3046,6 +3114,29 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     model = build_model_from_args(args)
 
     assert model.ground_cost == "cosine"
+
+
+def test_ours_final_model_factory_accepts_hubness_cost():
+    args = SimpleNamespace(
+        model="ours_final",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=16,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=6,
+        hrot_cost_hubness_enable="true",
+        hrot_cost_hubness_lambda=0.1,
+        hrot_cost_hubness_k=3,
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.cost_hubness_enable
+    assert model.cost_hubness_lambda == 0.1
+    assert model.cost_hubness_k == 3
+    assert not model.uses_ecot_egsm_marginal
+    assert not model.ecot_m2_ablate_threshold_mass
 
 
 def test_hrot_fsl_model_factory_accepts_ecot_noise_sink():

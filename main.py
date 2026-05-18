@@ -1493,6 +1493,9 @@ def get_args():
     parser.add_argument("--hrot_min_curvature", type=float, default=0.05)
     parser.add_argument("--hrot_structure_cost_init", type=float, default=0.05)
     parser.add_argument("--hrot_ground_cost", type=str, default="auto", choices=["auto", "euclidean", "cosine"])
+    parser.add_argument("--hrot_cost_hubness_enable", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--hrot_cost_hubness_lambda", type=float, default=0.0)
+    parser.add_argument("--hrot_cost_hubness_k", type=int, default=5)
     parser.add_argument("--hrot_eam_mode", type=str, default="compact", choices=["legacy", "compact"])
     parser.add_argument("--hrot_compact_eam_prior_mix", type=float, default=0.5)
     parser.add_argument("--hrot_normalize_euclidean_tokens", type=str, default="true", choices=["true", "false"])
@@ -2655,6 +2658,9 @@ def get_model(args):
             f"rho_rank_temperature={getattr(args, 'hrot_rho_rank_temperature', 0.05)}, "
             f"structure_cost_init={getattr(args, 'hrot_structure_cost_init', 0.05)}, "
             f"ground_cost={getattr(args, 'hrot_ground_cost', 'auto')}, "
+            f"cost_hubness={getattr(args, 'hrot_cost_hubness_enable', 'false')}, "
+            f"cost_hubness_lambda={getattr(args, 'hrot_cost_hubness_lambda', 0.0)}, "
+            f"cost_hubness_k={getattr(args, 'hrot_cost_hubness_k', 5)}, "
             f"eam_mode={getattr(args, 'hrot_eam_mode', 'compact')}, "
             f"compact_eam_prior_mix={getattr(args, 'hrot_compact_eam_prior_mix', 0.5)}, "
             f"normalize_rho={getattr(args, 'hrot_normalize_rho', 'false')})"
