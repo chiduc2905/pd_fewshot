@@ -407,7 +407,7 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     assert egsm_on.egsm_marginal.kappa_max == 0.35
 
 
-def test_ours_final_hubness_cost_forward_exposes_aux():
+def test_ours_final_cost_margin_aux_forward_exposes_loss():
     torch.manual_seed(392)
     model = build_model_from_args(
         SimpleNamespace(
@@ -420,23 +420,21 @@ def test_ours_final_hubness_cost_forward_exposes_aux():
             hrot_eam_hidden_dim=16,
             hrot_sinkhorn_iterations=4,
             hrot_sinkhorn_tolerance=1e-5,
-            hrot_cost_hubness_enable="true",
-            hrot_cost_hubness_lambda=0.1,
-            hrot_cost_hubness_k=3,
+            hrot_cost_margin_aux_weight=0.05,
+            hrot_cost_margin_aux_margin=0.02,
         )
     )
-    model.eval()
+    model.train()
     query = torch.randn(1, 2, 3, 64, 64)
     support = torch.randn(1, 3, 1, 3, 64, 64)
+    targets = torch.tensor([0, 1], dtype=torch.long)
 
-    with torch.no_grad():
-        outputs = model(query, support, return_aux=True)
+    outputs = model(query, support, query_targets=targets, return_aux=True)
 
     assert outputs["logits"].shape == (2, 3)
-    assert outputs["hubness_base_cost_matrix"].shape == outputs["cost_matrix"].shape
-    assert outputs["hubness_scaled_cost_matrix"].shape == outputs["cost_matrix"].shape
-    assert outputs["hubness_support_bias"].shape[:3] == outputs["cost_matrix"].shape[:3]
-    assert outputs["hubness_query_bias"].shape[0] == outputs["cost_matrix"].shape[0]
+    assert outputs["cost_margin_aux_loss"].ndim == 0
+    assert torch.isfinite(outputs["cost_margin_aux_loss"])
+    assert outputs["cost_margin_aux_loss"] >= 0.0
     assert torch.isfinite(outputs["cost_matrix"]).all()
     assert torch.all(outputs["cost_matrix"] >= 0.0)
 
@@ -644,38 +642,28 @@ def test_hrot_fsl_cosine_ground_cost_uses_deepemd_style_cost():
     assert torch.all(outputs["cost_matrix"] >= 0.0)
 
 
-def test_hrot_cost_hubness_disabled_returns_original_cost():
-    torch.manual_seed(391)
-    model = _build_model(variant="J_ECOT_M2", cost_hubness_enable=False)
-    cost = torch.rand(2, 3, 4, 5)
-
-    corrected, payload = model._apply_hubness_corrected_cost(cost)
-
-    assert payload is None
-    assert torch.allclose(corrected, cost, atol=0.0, rtol=0.0)
-
-
-def test_hrot_cost_hubness_increases_hub_penalty_margin():
+def test_hrot_cost_margin_aux_is_train_only_and_matches_manual_margin():
     model = _build_model(
         variant="J_ECOT_M2",
-        cost_hubness_enable=True,
-        cost_hubness_lambda=1.0,
-        cost_hubness_k=3,
+        cost_margin_aux_weight=0.1,
+        cost_margin_aux_margin=0.05,
     )
-    cost = torch.tensor(
-        [[[[0.20, 0.10, 0.90], [0.20, 0.90, 0.90], [0.20, 0.90, 0.90]]]],
+    transport_cost = torch.tensor(
+        [[0.20, 0.10, 0.40], [0.05, 0.20, 0.30]],
         dtype=torch.float32,
     )
+    targets = torch.tensor([0, 1], dtype=torch.long)
 
-    corrected, payload = model._apply_hubness_corrected_cost(cost)
+    model.train()
+    loss = model._supervised_transport_cost_margin_loss(transport_cost, targets)
 
-    assert payload is not None
-    assert corrected.shape == cost.shape
-    assert torch.all(corrected >= 0.0)
-    assert torch.allclose(corrected.mean(dim=(-1, -2)), cost.mean(dim=(-1, -2)), atol=1e-5)
-    original_margin = cost[0, 0, 0, 0] - cost[0, 0, 0, 1]
-    corrected_margin = corrected[0, 0, 0, 0] - corrected[0, 0, 0, 1]
-    assert corrected_margin > original_margin
+    expected = torch.relu(
+        torch.tensor([0.05 + 0.20 - 0.10, 0.05 + 0.20 - 0.05])
+    ).mean()
+    assert torch.allclose(loss, expected, atol=1e-6, rtol=1e-6)
+
+    model.eval()
+    assert model._supervised_transport_cost_margin_loss(transport_cost, targets).item() == 0.0
 
 
 def test_hrot_fsl_auto_ground_cost_preserves_hyperbolic_variant_and_cosine_overrides():
@@ -3116,7 +3104,7 @@ def test_hrot_fsl_model_factory_accepts_cosine_ground_cost():
     assert model.ground_cost == "cosine"
 
 
-def test_ours_final_model_factory_accepts_hubness_cost():
+def test_ours_final_model_factory_accepts_cost_margin_aux():
     args = SimpleNamespace(
         model="ours_final",
         device="cpu",
@@ -3125,16 +3113,14 @@ def test_ours_final_model_factory_accepts_hubness_cost():
         hrot_token_dim=16,
         hrot_eam_hidden_dim=16,
         hrot_sinkhorn_iterations=6,
-        hrot_cost_hubness_enable="true",
-        hrot_cost_hubness_lambda=0.1,
-        hrot_cost_hubness_k=3,
+        hrot_cost_margin_aux_weight=0.05,
+        hrot_cost_margin_aux_margin=0.02,
     )
 
     model = build_model_from_args(args)
 
-    assert model.cost_hubness_enable
-    assert model.cost_hubness_lambda == 0.1
-    assert model.cost_hubness_k == 3
+    assert model.cost_margin_aux_weight == 0.05
+    assert model.cost_margin_aux_margin == 0.02
     assert not model.uses_ecot_egsm_marginal
     assert not model.ecot_m2_ablate_threshold_mass
 

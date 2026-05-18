@@ -551,9 +551,8 @@ class HROTFSL(BaseConv64FewShotModel):
         min_curvature: float = 0.05,
         structure_cost_init: float = 0.05,
         ground_cost: str = "auto",
-        cost_hubness_enable: bool = False,
-        cost_hubness_lambda: float = 0.0,
-        cost_hubness_k: int = 5,
+        cost_margin_aux_weight: float = 0.0,
+        cost_margin_aux_margin: float = 0.02,
         eam_mode: str = "compact",
         compact_eam_prior_mix: float = 0.5,
         normalize_euclidean_tokens: bool = True,
@@ -735,10 +734,10 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_noise_sink_cost_init must be positive")
         if float(ecot_noise_sink_score_penalty) < 0.0:
             raise ValueError("ecot_noise_sink_score_penalty must be non-negative")
-        if not 0.0 <= float(cost_hubness_lambda) <= 1.0:
-            raise ValueError("cost_hubness_lambda must be in [0, 1]")
-        if int(cost_hubness_k) <= 0:
-            raise ValueError("cost_hubness_k must be positive")
+        if float(cost_margin_aux_weight) < 0.0:
+            raise ValueError("cost_margin_aux_weight must be non-negative")
+        if float(cost_margin_aux_margin) < 0.0:
+            raise ValueError("cost_margin_aux_margin must be non-negative")
         if bool(ecot_episode_feature_normalize) and variant != "J_ECOT_M2":
             raise ValueError("ecot_episode_feature_normalize is supported only for variant J_ECOT_M2")
         if float(ecot_episode_feature_norm_eps) <= 0.0:
@@ -850,9 +849,8 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_coverage_regularized_cover = variant == "U"
         self.coverage_penalty_weight = 0.5 if self.uses_coverage_regularized_cover else 0.0
         self.ground_cost = _normalize_hrot_ground_cost(ground_cost)
-        self.cost_hubness_enable = bool(cost_hubness_enable)
-        self.cost_hubness_lambda = float(cost_hubness_lambda)
-        self.cost_hubness_k = int(cost_hubness_k)
+        self.cost_margin_aux_weight = float(cost_margin_aux_weight)
+        self.cost_margin_aux_margin = float(cost_margin_aux_margin)
         self.eam_mode = eam_mode
         self.uses_compact_geodesic_eam = self.eam_mode == "compact" and variant == "H"
         self.compact_eam_prior_mix = float(compact_eam_prior_mix)
@@ -1748,53 +1746,42 @@ class HROTFSL(BaseConv64FewShotModel):
             return self._cosine_cost(query_tokens, class_tokens)
         return self._euclidean_cost(query_tokens, class_tokens)
 
-    def _apply_hubness_corrected_cost(
+    def _supervised_transport_cost_margin_loss(
         self,
-        cost: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
-        if not self.cost_hubness_enable or self.cost_hubness_lambda <= 0.0:
-            return cost, None
-        if cost.dim() != 4:
+        transport_cost: torch.Tensor,
+        query_targets: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Train-only margin on the baseline UOT transported cost.
+
+        This regularizes the learned token geometry without changing the cost
+        matrix, Sinkhorn plan, threshold-mass score, or shot pooling at
+        inference.
+        """
+        zero = transport_cost.new_zeros(())
+        if not self.training or self.cost_margin_aux_weight <= 0.0 or query_targets is None:
+            return zero
+        if transport_cost.dim() != 2:
             raise ValueError(
-                "Hubness-corrected ECOT cost expects cost shaped "
-                f"(NumQuery, NumPairs, QueryTokens, SupportTokens), got {tuple(cost.shape)}"
+                "transport_cost margin expects class costs shaped (NumQuery, Way), "
+                f"got {tuple(transport_cost.shape)}"
             )
-
-        num_query, num_pairs, query_len, support_len = cost.shape
-        k_query = min(int(self.cost_hubness_k), num_pairs * support_len)
-        k_support = min(int(self.cost_hubness_k), query_len)
-
-        similarity = -cost
-        with torch.no_grad():
-            ref_similarity = similarity.detach()
-            query_local_scale = ref_similarity.reshape(num_query, query_len, num_pairs * support_len)
-            query_bias = query_local_scale.topk(k_query, dim=-1).values.mean(dim=-1)
-            support_bias = ref_similarity.transpose(-1, -2).topk(k_support, dim=-1).values.mean(dim=-1)
-
-        csls_similarity = (
-            2.0 * similarity
-            - query_bias.unsqueeze(1).unsqueeze(-1)
-            - support_bias.unsqueeze(-2)
-        )
-        csls_cost = -csls_similarity
-        csls_cost = csls_cost - csls_cost.amin(dim=(-1, -2), keepdim=True).detach()
-
-        base_mean = cost.detach().mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
-        csls_mean = csls_cost.detach().mean(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
-        csls_cost = csls_cost * (base_mean / csls_mean)
-
-        lam = cost.new_tensor(float(self.cost_hubness_lambda))
-        corrected = ((1.0 - lam) * cost + lam * csls_cost).clamp_min(0.0)
-        payload = {
-            "hubness_base_cost_matrix": cost.detach(),
-            "hubness_scaled_cost_matrix": csls_cost.detach(),
-            "hubness_query_bias": query_bias.to(device=cost.device, dtype=cost.dtype),
-            "hubness_support_bias": support_bias.to(device=cost.device, dtype=cost.dtype),
-            "hubness_lambda": lam.detach(),
-            "hubness_k_query": cost.new_tensor(float(k_query)),
-            "hubness_k_support": cost.new_tensor(float(k_support)),
-        }
-        return corrected, payload
+        num_query, way_num = transport_cost.shape
+        if way_num <= 1:
+            return zero
+        targets = query_targets.to(device=transport_cost.device, dtype=torch.long).reshape(-1)
+        if targets.shape[0] != num_query:
+            raise ValueError(
+                "query_targets length must match NumQuery for cost-margin aux loss, "
+                f"got {targets.shape[0]} vs {num_query}"
+            )
+        true_cost = transport_cost.gather(1, targets.unsqueeze(1)).squeeze(1)
+        true_mask = F.one_hot(targets, num_classes=way_num).to(dtype=torch.bool, device=transport_cost.device)
+        wrong_cost = transport_cost.masked_fill(true_mask, torch.inf).amin(dim=1)
+        valid = torch.isfinite(wrong_cost)
+        if not bool(valid.any()):
+            return zero
+        margin = transport_cost.new_tensor(float(self.cost_margin_aux_margin))
+        return F.relu(margin + true_cost[valid] - wrong_cost[valid]).mean()
 
     def _apply_tsw(
         self,
@@ -4099,7 +4086,6 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_geodesic_distance = None
         transport_probe_payload = None
         tsw_payload = None
-        cost_hubness_payload = None
         if self.uses_shot_decomposed_transport:
             matching_shot_num = shot_num
             if self.uses_ecot and self.pre_transport_shot_pool:
@@ -4510,7 +4496,6 @@ class HROTFSL(BaseConv64FewShotModel):
                     cost_support_tokens,
                 )
                 if self.uses_ecot:
-                    flat_cost, cost_hubness_payload = self._apply_hubness_corrected_cost(flat_cost)
                     nncs_support_weight = None
                     nncs_payload = None
                     if self.uses_ecot_nncs_marginal:
@@ -4593,39 +4578,6 @@ class HROTFSL(BaseConv64FewShotModel):
                             "transport_plan",
                         }
                     }
-                    if cost_hubness_payload is not None:
-                        transport_probe_payload.update(
-                            {
-                                "hubness_base_cost_matrix": cost_hubness_payload[
-                                    "hubness_base_cost_matrix"
-                                ].reshape(
-                                    query.shape[0],
-                                    way_num,
-                                    matching_shot_num,
-                                    flat_cost.shape[-2],
-                                    flat_cost.shape[-1],
-                                ),
-                                "hubness_scaled_cost_matrix": cost_hubness_payload[
-                                    "hubness_scaled_cost_matrix"
-                                ].reshape(
-                                    query.shape[0],
-                                    way_num,
-                                    matching_shot_num,
-                                    flat_cost.shape[-2],
-                                    flat_cost.shape[-1],
-                                ),
-                                "hubness_query_bias": cost_hubness_payload["hubness_query_bias"],
-                                "hubness_support_bias": cost_hubness_payload["hubness_support_bias"].reshape(
-                                    query.shape[0],
-                                    way_num,
-                                    matching_shot_num,
-                                    flat_cost.shape[-1],
-                                ),
-                                "hubness_lambda": cost_hubness_payload["hubness_lambda"],
-                                "hubness_k_query": cost_hubness_payload["hubness_k_query"],
-                                "hubness_k_support": cost_hubness_payload["hubness_k_support"],
-                            }
-                        )
                 else:
                     transport_match_kwargs = {}
                     if self.uses_nuisance_decoupled_transport:
@@ -4919,6 +4871,8 @@ class HROTFSL(BaseConv64FewShotModel):
         )
         if self.uses_ecot and transport_probe_payload is not None:
             aux_loss = aux_loss + transport_probe_payload.get("ecot_aux_loss", logits.new_zeros(()))
+        cost_margin_aux_loss = self._supervised_transport_cost_margin_loss(transport_cost, query_targets)
+        aux_loss = aux_loss + float(self.cost_margin_aux_weight) * cost_margin_aux_loss
 
         if not needs_payload:
             return logits
@@ -4933,6 +4887,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho": rho,
             "rho_regularization": rho_regularization,
             "rho_rank_loss": rho_rank_loss,
+            "cost_margin_aux_loss": cost_margin_aux_loss,
             "hlm_rho_regularization": hlm_rho_regularization,
             "hlm_eff_loss": hlm_eff_loss,
             "hlm_shot_cov_loss": hlm_shot_cov_loss,
@@ -5000,6 +4955,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho": torch.cat([item["rho"] for item in batch_outputs], dim=0),
             "rho_regularization": torch.stack([item["rho_regularization"] for item in batch_outputs]).mean(),
             "rho_rank_loss": torch.stack([item["rho_rank_loss"] for item in batch_outputs]).mean(),
+            "cost_margin_aux_loss": torch.stack([item["cost_margin_aux_loss"] for item in batch_outputs]).mean(),
             "curvature_regularization": torch.stack([item["curvature_regularization"] for item in batch_outputs]).mean(),
             "curvature": torch.stack([item["curvature"] for item in batch_outputs]).mean(),
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),
@@ -5180,10 +5136,6 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_noise_sink_support_mass",
             "ecot_noise_sink_self_mass",
             "base_cost_matrix",
-            "hubness_base_cost_matrix",
-            "hubness_scaled_cost_matrix",
-            "hubness_query_bias",
-            "hubness_support_bias",
             "structure_cost",
             "structure_probe_mass",
             "shot_cover_weights",
@@ -5235,9 +5187,6 @@ class HROTFSL(BaseConv64FewShotModel):
             "ncet_mix",
             "tsw_mean_gate_q",
             "tsw_mean_gate_s",
-            "hubness_lambda",
-            "hubness_k_query",
-            "hubness_k_support",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
