@@ -1810,6 +1810,12 @@ def main():
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
         dmuot_variants = build_ours_final_dmuot_variants()
+        if suite_name == "dmuot" and ours_final_variant_filter is None:
+            dmuot_variants = [
+                variant
+                for variant in dmuot_variants
+                if not variant["tag"].startswith("ours_final_dmuot_exp0_")
+            ]
         contrib_variants = filter_ours_final_variants(contrib_variants, ours_final_variant_filter)
         rho_grid_variants = filter_ours_final_variants(rho_grid_variants, ours_final_variant_filter)
         tau_shot_off_variants = filter_ours_final_variants(tau_shot_off_variants, ours_final_variant_filter)
