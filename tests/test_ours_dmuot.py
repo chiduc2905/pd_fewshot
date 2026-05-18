@@ -215,6 +215,51 @@ def test_shot_neutralized_marginals_blend_toward_uniform_for_5shot():
     assert neutral_support_l1 <= baseline_support_l1 + 1e-6
 
 
+def test_shot_consensus_mass_score_matches_standard_for_1shot():
+    torch.manual_seed(515)
+    baseline = _tiny_ours_final()
+    consensus = _tiny_ours_final(ecot_m2_mass_score_mode="shot_consensus")
+    consensus.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    consensus.eval()
+    query, support = _episode(shot=1)
+
+    with torch.no_grad():
+        expected = baseline(query, support, return_aux=True)
+        actual = consensus(query, support, return_aux=True)
+
+    assert torch.allclose(actual["logits"], expected["logits"], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        actual["shot_mass_for_score"],
+        actual["shot_transported_mass"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+def test_shot_consensus_mass_score_uses_class_mean_mass_for_5shot():
+    torch.manual_seed(516)
+    model = _tiny_ours_final(
+        ecot_m2_mass_score_mode="shot_consensus",
+        ecot_m2_consensus_mass_alpha=1.0,
+    )
+    model.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    expected_mass = outputs["shot_transported_mass"].mean(dim=-1, keepdim=True)
+    expected_mass = expected_mass.expand_as(outputs["shot_mass_for_score"])
+    assert torch.allclose(
+        outputs["shot_mass_for_score"],
+        expected_mass,
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert outputs["ecot_m2_consensus_mass_alpha"].item() == pytest.approx(1.0)
+
+
 def test_per_shot_threshold_produces_varying_thresholds():
     torch.manual_seed(520)
     model = _tiny_ours_final(ecot_m2_per_shot_threshold=True, ecot_m2_pst_hidden=16)

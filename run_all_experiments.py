@@ -1663,6 +1663,14 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_dm": "ours_final_dm",
         "pst_dm": "ours_final_pst_dm",
         "ours_final_pst_dm": "ours_final_pst_dm",
+        "mass_consensus": "ours_final_mass_consensus_a1",
+        "mass_on": "ours_final_mass_consensus_a1",
+        "mass_consensus_a1": "ours_final_mass_consensus_a1",
+        "ours_final_mass_consensus_a1": "ours_final_mass_consensus_a1",
+        "mass_consensus_a0p75": "ours_final_mass_consensus_a0p75",
+        "ours_final_mass_consensus_a0p75": "ours_final_mass_consensus_a0p75",
+        "mass_consensus_a0p5": "ours_final_mass_consensus_a0p5",
+        "ours_final_mass_consensus_a0p5": "ours_final_mass_consensus_a0p5",
     }
 
     parsed = []
@@ -1684,7 +1692,8 @@ def parse_ours_final_variant_filter(variants_str):
         if tag is None:
             raise ValueError(
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
-                "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, rho_<value>, dmuot_<name>, or exact tags."
+                "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, "
+                "mass_consensus_a*, rho_<value>, dmuot_<name>, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)
@@ -1898,6 +1907,7 @@ def main():
         contrib_variants = build_ours_final_ablation_variants()
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
+        mass_on_variants = build_ours_final_mass_on_variants()
         dmuot_variants = build_ours_final_dmuot_variants()
         pst_dm_variants = build_ours_final_pst_dm_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
@@ -1909,6 +1919,7 @@ def main():
         contrib_variants = filter_ours_final_variants(contrib_variants, ours_final_variant_filter)
         rho_grid_variants = filter_ours_final_variants(rho_grid_variants, ours_final_variant_filter)
         tau_shot_off_variants = filter_ours_final_variants(tau_shot_off_variants, ours_final_variant_filter)
+        mass_on_variants = filter_ours_final_variants(mass_on_variants, ours_final_variant_filter)
         dmuot_variants = filter_ours_final_variants(dmuot_variants, ours_final_variant_filter)
         pst_dm_variants = filter_ours_final_variants(pst_dm_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
@@ -1917,6 +1928,8 @@ def main():
             ablation_variants = tau_shot_off_variants
         elif suite_name == "dmuot":
             ablation_variants = dmuot_variants
+        elif suite_name == "mass_on":
+            ablation_variants = mass_on_variants
         elif suite_name == "pst_dm":
             ablation_variants = pst_dm_variants
         elif suite_name == "complete":
@@ -2019,6 +2032,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in dmuot_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "mass_on":
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in mass_on_variants
                 for samples in samples_list
                 for shot in shots
             )

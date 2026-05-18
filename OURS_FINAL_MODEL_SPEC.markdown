@@ -411,6 +411,16 @@ exp2 values enable discriminative token marginals with the encoded tau_marg.
 exp5 values blend discriminative marginals back toward uniform as shot count grows.
 ```
 
+Shot-consensus threshold-mass flag:
+
+```text
+--hrot_ecot_m2_mass_score_mode {standard,shot_consensus}
+Default: standard, so current Ours-Final and mass-off behavior is unchanged.
+standard scores each support shot as T * shot_mass - shot_cost.
+shot_consensus scores each shot with blended class-consensus mass before subtracting shot_cost.
+--hrot_ecot_m2_consensus_mass_alpha controls the blend; alpha=1 uses class mean mass.
+```
+
 Minimum evidence needed for a credible claim:
 
 ```text
@@ -482,6 +492,10 @@ marginal_support
 marginal_l1_drift
 dmuot_shot_strength
 lambda_cost_effective
+shot_mass_for_score
+ecot_m2_mass_for_score_bank
+ecot_m2_mass_consensus_bank
+ecot_m2_consensus_mass_alpha
 ```
 
 Good diagnostic signs:
