@@ -1145,6 +1145,22 @@ def get_args():
         help="J_ECOT_M2 shot_consensus mass score: alpha in [0,1] for blending shot mass toward class mean mass.",
     )
     parser.add_argument(
+        "--hrot_ecot_m2_mass_reward_beta",
+        type=float,
+        default=1.0,
+        help="J_ECOT_M2 threshold-mass score: multiplier in [0,1] on the T*mass reward term.",
+    )
+    parser.add_argument(
+        "--hrot_ecot_m2_mass_reward_shot_scaling",
+        type=str,
+        default="none",
+        choices=["none", "multi_shot_beta"],
+        help=(
+            "J_ECOT_M2 threshold-mass score: none keeps beta=1 for all shots; "
+            "multi_shot_beta keeps 1-shot unchanged and applies --hrot_ecot_m2_mass_reward_beta when shot>1."
+        ),
+    )
+    parser.add_argument(
         "--hrot_ecot_m2_use_swts",
         type=str,
         default="false",
@@ -2750,6 +2766,9 @@ def get_model(args):
                 if mass_score_mode == "shot_consensus":
                     alpha = getattr(args, "hrot_ecot_m2_consensus_mass_alpha", 1.0)
                     score_text = f"threshold-mass consensus score(T*M_cons-C, alpha={alpha})"
+                elif str(getattr(args, "hrot_ecot_m2_mass_reward_shot_scaling", "none")) != "none":
+                    beta = getattr(args, "hrot_ecot_m2_mass_reward_beta", 1.0)
+                    score_text = f"threshold-mass scaled score(beta*T*M-C, beta={beta})"
                 else:
                     score_text = "threshold-mass score(T*M-C)"
             default_text = (

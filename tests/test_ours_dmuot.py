@@ -260,6 +260,41 @@ def test_shot_consensus_mass_score_uses_class_mean_mass_for_5shot():
     assert outputs["ecot_m2_consensus_mass_alpha"].item() == pytest.approx(1.0)
 
 
+def test_multi_shot_mass_reward_scaling_keeps_1shot_logits_unchanged():
+    torch.manual_seed(517)
+    baseline = _tiny_ours_final()
+    scaled = _tiny_ours_final(
+        ecot_m2_mass_reward_shot_scaling="multi_shot_beta",
+        ecot_m2_mass_reward_beta=0.5,
+    )
+    scaled.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    scaled.eval()
+    query, support = _episode(shot=1)
+
+    with torch.no_grad():
+        expected = baseline(query, support, return_aux=True)
+        actual = scaled(query, support, return_aux=True)
+
+    assert torch.allclose(actual["logits"], expected["logits"], atol=1e-6, rtol=1e-6)
+    assert actual["ecot_m2_mass_reward_beta_effective"].item() == pytest.approx(1.0)
+
+
+def test_multi_shot_mass_reward_scaling_applies_beta_for_5shot():
+    torch.manual_seed(518)
+    model = _tiny_ours_final(
+        ecot_m2_mass_reward_shot_scaling="multi_shot_beta",
+        ecot_m2_mass_reward_beta=0.5,
+    )
+    model.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["ecot_m2_mass_reward_beta_effective"].item() == pytest.approx(0.5)
+
+
 def test_per_shot_threshold_produces_varying_thresholds():
     torch.manual_seed(520)
     model = _tiny_ours_final(ecot_m2_per_shot_threshold=True, ecot_m2_pst_hidden=16)

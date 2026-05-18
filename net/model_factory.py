@@ -2572,6 +2572,10 @@ def build_model_from_args(args):
             ecot_m2_consensus_mass_alpha=float(
                 getattr(args, "hrot_ecot_m2_consensus_mass_alpha", 1.0)
             ),
+            ecot_m2_mass_reward_beta=float(getattr(args, "hrot_ecot_m2_mass_reward_beta", 1.0)),
+            ecot_m2_mass_reward_shot_scaling=str(
+                getattr(args, "hrot_ecot_m2_mass_reward_shot_scaling", "none")
+            ),
             ecot_m2_use_swts=_bool_flag(
                 getattr(args, "hrot_ecot_m2_use_swts", "false"),
                 default=False,
@@ -2857,6 +2861,10 @@ def build_model_from_args(args):
             ecot_m2_mass_score_mode=str(getattr(args, "hrot_ecot_m2_mass_score_mode", "standard")),
             ecot_m2_consensus_mass_alpha=float(
                 getattr(args, "hrot_ecot_m2_consensus_mass_alpha", 1.0)
+            ),
+            ecot_m2_mass_reward_beta=float(getattr(args, "hrot_ecot_m2_mass_reward_beta", 1.0)),
+            ecot_m2_mass_reward_shot_scaling=str(
+                getattr(args, "hrot_ecot_m2_mass_reward_shot_scaling", "none")
             ),
             ecot_m2_use_swts=_bool_flag(getattr(args, "hrot_ecot_m2_use_swts", "false"), default=False),
             ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 1.0)),

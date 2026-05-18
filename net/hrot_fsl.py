@@ -488,6 +488,8 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_m2_cost_per_mass_detach_mass: bool = True,
         ecot_m2_mass_score_mode: str = "standard",
         ecot_m2_consensus_mass_alpha: float = 1.0,
+        ecot_m2_mass_reward_beta: float = 1.0,
+        ecot_m2_mass_reward_shot_scaling: str = "none",
         ecot_m2_use_swts: bool = False,
         ecot_m2_swts_temp: float = 1.0,
         ecot_m2_use_aqm: bool = False,
@@ -972,6 +974,15 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_m2_consensus_mass_alpha = float(ecot_m2_consensus_mass_alpha)
         if not 0.0 <= self.ecot_m2_consensus_mass_alpha <= 1.0:
             raise ValueError("ecot_m2_consensus_mass_alpha must be in [0, 1]")
+        self.ecot_m2_mass_reward_beta = float(ecot_m2_mass_reward_beta)
+        if not 0.0 <= self.ecot_m2_mass_reward_beta <= 1.0:
+            raise ValueError("ecot_m2_mass_reward_beta must be in [0, 1]")
+        mass_reward_shot_scaling = str(ecot_m2_mass_reward_shot_scaling).strip().lower().replace("-", "_")
+        if mass_reward_shot_scaling not in {"none", "multi_shot_beta"}:
+            raise ValueError("ecot_m2_mass_reward_shot_scaling must be 'none' or 'multi_shot_beta'")
+        self.ecot_m2_mass_reward_shot_scaling = (
+            mass_reward_shot_scaling if variant == "J_ECOT_M2" else "none"
+        )
         if (
             self.ecot_m2_mass_score_mode != "standard"
             and (self.ecot_m2_ablate_threshold_mass or self.ecot_m2_cost_per_mass_score)
@@ -3360,6 +3371,10 @@ class HROTFSL(BaseConv64FewShotModel):
             mass_consensus_bank = shot_mass_bank.mean(dim=2, keepdim=True)
             alpha_mass = flat_cost.new_tensor(float(self.ecot_m2_consensus_mass_alpha))
             mass_for_score_bank = (1.0 - alpha_mass) * shot_mass_bank + alpha_mass * mass_consensus_bank
+        if self.ecot_m2_mass_reward_shot_scaling == "multi_shot_beta" and shot_num > 1:
+            mass_reward_beta = flat_cost.new_tensor(float(self.ecot_m2_mass_reward_beta))
+        else:
+            mass_reward_beta = flat_cost.new_tensor(1.0)
 
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
@@ -3397,7 +3412,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 if self.ecot_m2_use_swts:
                     score_terms = swts_pre_score
                 else:
-                    score_terms = thr * mass_for_score_bank - shot_cost_bank
+                    score_terms = mass_reward_beta * thr * mass_for_score_bank - shot_cost_bank
             if sink_penalty_bank is not None:
                 score_terms = score_terms - flat_cost.new_tensor(self.ecot_noise_sink_score_penalty) * sink_penalty_bank
             return self.score_scale * score_terms
@@ -3540,6 +3555,8 @@ class HROTFSL(BaseConv64FewShotModel):
                     ),
                 }
             )
+        if self.ecot_m2_mass_reward_shot_scaling != "none":
+            payload["ecot_m2_mass_reward_beta_effective"] = mass_reward_beta
         if swts_w_entropy_mean is not None:
             payload["mean_ecot_m2_swts_w_entropy"] = swts_w_entropy_mean.detach()
         if mean_aqm_a_entropy is not None:
@@ -5234,6 +5251,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_tau_k",
             "mean_ecot_m2_swts_w_entropy",
             "ecot_m2_consensus_mass_alpha",
+            "ecot_m2_mass_reward_beta_effective",
             "mean_aqm_a_entropy",
         ):
             if key in batch_outputs[0]:

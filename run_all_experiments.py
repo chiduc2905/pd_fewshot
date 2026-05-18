@@ -898,6 +898,24 @@ def build_ours_final_tau_shot_off_variants():
 def build_ours_final_mass_on_variants():
     base = _ours_final_base_args()
     variants = []
+    for beta, tag_value in (("0.5", "0p5"), ("0.75", "0p75"), ("0.25", "0p25")):
+        variants.append(
+            {
+                "tag": f"ours_final_mass_scaled_b{tag_value}",
+                "checkpoint_tag": f"mass_scaled_b{tag_value}",
+                "label": (
+                    "Ours-Final mass-on: keep 1-shot mass reward, scale multi-shot "
+                    f"T*M reward by beta={beta}"
+                ),
+                "extra_args": base
+                + [
+                    "--hrot_ecot_m2_mass_reward_shot_scaling",
+                    "multi_shot_beta",
+                    "--hrot_ecot_m2_mass_reward_beta",
+                    beta,
+                ],
+            }
+        )
     for alpha, tag_value in (("1.0", "1"), ("0.75", "0p75"), ("0.5", "0p5")):
         variants.append(
             {
@@ -1663,8 +1681,15 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_dm": "ours_final_dm",
         "pst_dm": "ours_final_pst_dm",
         "ours_final_pst_dm": "ours_final_pst_dm",
+        "mass_scaled": "ours_final_mass_scaled_b0p5",
+        "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
+        "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
+        "mass_scaled_b0p75": "ours_final_mass_scaled_b0p75",
+        "ours_final_mass_scaled_b0p75": "ours_final_mass_scaled_b0p75",
+        "mass_scaled_b0p25": "ours_final_mass_scaled_b0p25",
+        "ours_final_mass_scaled_b0p25": "ours_final_mass_scaled_b0p25",
         "mass_consensus": "ours_final_mass_consensus_a1",
-        "mass_on": "ours_final_mass_consensus_a1",
+        "mass_on": "ours_final_mass_scaled_b0p5",
         "mass_consensus_a1": "ours_final_mass_consensus_a1",
         "ours_final_mass_consensus_a1": "ours_final_mass_consensus_a1",
         "mass_consensus_a0p75": "ours_final_mass_consensus_a0p75",
@@ -1693,7 +1718,7 @@ def parse_ours_final_variant_filter(variants_str):
             raise ValueError(
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
                 "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, "
-                "mass_consensus_a*, rho_<value>, dmuot_<name>, or exact tags."
+                "mass_scaled_b*, mass_consensus_a*, rho_<value>, dmuot_<name>, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)

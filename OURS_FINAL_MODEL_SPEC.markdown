@@ -419,6 +419,8 @@ Default: standard, so current Ours-Final and mass-off behavior is unchanged.
 standard scores each support shot as T * shot_mass - shot_cost.
 shot_consensus scores each shot with blended class-consensus mass before subtracting shot_cost.
 --hrot_ecot_m2_consensus_mass_alpha controls the blend; alpha=1 uses class mean mass.
+--hrot_ecot_m2_mass_reward_shot_scaling multi_shot_beta keeps 1-shot unchanged.
+--hrot_ecot_m2_mass_reward_beta scales the T * mass reward only when shot count is greater than 1.
 ```
 
 Minimum evidence needed for a credible claim:
@@ -496,6 +498,7 @@ shot_mass_for_score
 ecot_m2_mass_for_score_bank
 ecot_m2_mass_consensus_bank
 ecot_m2_consensus_mass_alpha
+ecot_m2_mass_reward_beta_effective
 ```
 
 Good diagnostic signs:
