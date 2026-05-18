@@ -2022,6 +2022,23 @@ def main():
                 for samples in samples_list
                 for shot in shots
             )
+        if suite_name in {"pst_dm", "complete"} and pst_dm_variants:
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in pst_dm_variants
+                for samples in samples_list
+                for shot in shots
+            )
         if suite_name in {"rho_grid", "complete"} and rho_grid_variants:
             rho_grid_pairs = restricted_ours_final_rho_grid_pairs(samples_list, shots)
             if suite_name == "rho_grid" and not rho_grid_pairs:
