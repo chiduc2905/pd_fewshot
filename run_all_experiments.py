@@ -230,6 +230,26 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--ours_final_ablation_variants",
+        type=str,
+        default="all",
+        help=(
+            "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
+            "Aliases: full/original/uot, full_ot/ot/balanced_ot, gap, mass_off, tau_shot_off, rho_<value>. "
+            "Default all keeps the suite's normal variants."
+        ),
+    )
+    parser.add_argument(
+        "--export_uot_evidence_figure",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Forwarded to main.py to export the four-panel transport evidence figure during final test.",
+    )
+    parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
+    parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
+    parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
         "--m2_ablate_T",
         type=str,
         default="auto",
@@ -278,6 +298,17 @@ def get_args():
             extra += ["--save_last_checkpoint", "false"]
         if "--jecot_m2_val_save_hist_fig" not in extra:
             extra += ["--jecot_m2_val_save_hist_fig", "false"]
+    if str(getattr(args, "export_uot_evidence_figure", "false")).lower() == "true":
+        extra += [
+            "--export_uot_evidence_figure",
+            "true",
+            "--uot_evidence_num_episodes",
+            str(args.uot_evidence_num_episodes),
+            "--uot_evidence_queries_per_episode",
+            str(args.uot_evidence_queries_per_episode),
+            "--uot_evidence_correct_only",
+            str(args.uot_evidence_correct_only),
+        ]
     args.passthrough_args = extra
     return args
 
@@ -912,6 +943,41 @@ def all_paths_exist(paths):
     return bool(paths) and all(os.path.exists(path) for path in paths)
 
 
+def cli_bool_option(cmd, flag, default=False):
+    if flag not in cmd:
+        return default
+    idx = len(cmd) - 1 - list(reversed(cmd)).index(flag)
+    if idx + 1 >= len(cmd) or str(cmd[idx + 1]).startswith("--"):
+        return True
+    return str(cmd[idx + 1]).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def uot_evidence_artifacts_exist(
+    dataset_name,
+    model,
+    samples,
+    shot,
+    experiment_tag=None,
+    test_protocol="clean",
+    noise_test_root=None,
+    noise_test_splits="auto",
+):
+    samples_str = f"{samples}samples" if samples is not None else "allsamples"
+    tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
+    split_names = [None]
+    if str(test_protocol).lower() == "noise":
+        split_names = discover_noise_test_splits(noise_test_root, noise_test_splits)
+    for split_name in split_names:
+        protocol_suffix = result_protocol_suffix(test_protocol, split_name)
+        pattern = (
+            f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
+            f"{shot}shot{tag_suffix}{protocol_suffix}_ep*.png"
+        )
+        if not any(Path("results").glob(pattern)):
+            return False
+    return True
+
+
 def run_experiment(
     model,
     shot,
@@ -1167,8 +1233,34 @@ def run_experiment(
         print(f"[pulse_fewshot child CLI] {shlex.join(cmd)}")
 
     primary_complete = all_paths_exist(primary_result_paths)
+    needs_uot_evidence = cli_bool_option(cmd, "--export_uot_evidence_figure", default=False)
+    primary_uot_evidence_complete = (
+        not needs_uot_evidence
+        or uot_evidence_artifacts_exist(
+            dataset_name=dataset_name,
+            model=model,
+            samples=samples,
+            shot=shot,
+            experiment_tag=experiment_tag,
+            test_protocol=test_protocol,
+            noise_test_root=noise_test_root,
+            noise_test_splits=noise_test_splits,
+        )
+    )
     if skip_existing and primary_complete:
-        print("Skip        : primary result file(s) already exist; not training this experiment.")
+        if needs_uot_evidence and not primary_uot_evidence_complete:
+            checkpoint_for_test = resolve_checkpoint_path(checkpoint_path, legacy_checkpoint_path)
+            if os.path.exists(checkpoint_for_test):
+                print("Skip train  : primary result exists; running test-only to export missing UOT evidence figure.")
+                test_cmd = list(cmd)
+                test_cmd = set_cli_option(test_cmd, "--mode", "test")
+                test_cmd = set_cli_option(test_cmd, "--weights", checkpoint_for_test)
+                subprocess.run(test_cmd, check=True)
+            else:
+                print("Re-run      : result exists but checkpoint is missing; training is required for UOT evidence export.")
+                subprocess.run(cmd, check=True)
+        else:
+            print("Skip        : primary result file(s) already exist; not training this experiment.")
     else:
         subprocess.run(cmd, check=True)
 
@@ -1374,6 +1466,64 @@ def parse_rho_values(rho_values_str):
     return parsed
 
 
+def parse_ours_final_variant_filter(variants_str):
+    if variants_str is None:
+        return None
+    raw = str(variants_str).strip()
+    if not raw or raw.lower() in {"all", "none", "*"}:
+        return None
+
+    aliases = {
+        "full": "ours_final_full",
+        "original": "ours_final_full",
+        "orig": "ours_final_full",
+        "uot": "ours_final_full",
+        "ours_final": "ours_final_full",
+        "ours_final_full": "ours_final_full",
+        "full_ot": "ours_final_full_ot",
+        "ot": "ours_final_full_ot",
+        "balanced": "ours_final_full_ot",
+        "balanced_ot": "ours_final_full_ot",
+        "ours_full_ot": "ours_final_full_ot",
+        "ours_final_full_ot": "ours_final_full_ot",
+        "gap": "ours_final_gap",
+        "prototype": "ours_final_gap",
+        "ours_final_gap": "ours_final_gap",
+        "mass_off": "ours_final_mass_off",
+        "cost_only": "ours_final_mass_off",
+        "threshold_mass_off": "ours_final_mass_off",
+        "ours_final_mass_off": "ours_final_mass_off",
+        "tau_shot_off": "ours_final_tau_shot_off",
+        "ours_final_tau_shot_off": "ours_final_tau_shot_off",
+    }
+
+    parsed = []
+    for token in raw.split(","):
+        name = token.strip().lower().replace("-", "_")
+        if not name:
+            continue
+        if name.startswith("rho_") and not name.startswith("ours_final_rho_"):
+            name = "ours_final_" + name
+        if name.startswith("ours_final_rho_"):
+            tag = name.replace(".", "p")
+        else:
+            tag = aliases.get(name)
+        if tag is None:
+            raise ValueError(
+                f"Invalid --ours_final_ablation_variants token '{token}'. "
+                "Use full, full_ot, gap, mass_off, tau_shot_off, rho_<value>, or exact tags."
+            )
+        if tag not in parsed:
+            parsed.append(tag)
+    return set(parsed) if parsed else None
+
+
+def filter_ours_final_variants(variants, allowed_tags):
+    if allowed_tags is None:
+        return list(variants)
+    return [variant for variant in variants if variant["tag"] in allowed_tags]
+
+
 def parse_final_test_seeds(seed_list_str):
     if seed_list_str is None or not str(seed_list_str).strip():
         return None
@@ -1434,6 +1584,9 @@ def main():
     if args.mode_id is not None and parsed_mode_ids is not None:
         raise ValueError("Use either --mode_id or --mode_ids, not both.")
     ours_final_rho_values = parse_rho_values(getattr(args, "ours_final_rho_values", None))
+    ours_final_variant_filter = parse_ours_final_variant_filter(
+        getattr(args, "ours_final_ablation_variants", "all")
+    )
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
     if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
@@ -1572,6 +1725,9 @@ def main():
         contrib_variants = build_ours_final_ablation_variants()
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
+        contrib_variants = filter_ours_final_variants(contrib_variants, ours_final_variant_filter)
+        rho_grid_variants = filter_ours_final_variants(rho_grid_variants, ours_final_variant_filter)
+        tau_shot_off_variants = filter_ours_final_variants(tau_shot_off_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -1580,6 +1736,12 @@ def main():
             ablation_variants = contrib_variants + rho_grid_variants
         else:
             ablation_variants = contrib_variants
+        if not ablation_variants:
+            requested = ", ".join(sorted(ours_final_variant_filter or [])) or "all"
+            raise ValueError(
+                f"No Ours-Final variants selected for suite={suite_name!r} "
+                f"with --ours_final_ablation_variants={requested}."
+            )
         if args.mode_id is not None:
             samples_list = [EXPERIMENT_MODES[args.mode_id]]
         elif parsed_mode_ids is not None:
@@ -1656,7 +1818,7 @@ def main():
                 for samples in samples_list
                 for shot in shots
             )
-        if suite_name in {"rho_grid", "complete"}:
+        if suite_name in {"rho_grid", "complete"} and rho_grid_variants:
             rho_grid_pairs = restricted_ours_final_rho_grid_pairs(samples_list, shots)
             if suite_name == "rho_grid" and not rho_grid_pairs:
                 raise ValueError(
@@ -1687,10 +1849,12 @@ def main():
         print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
         print(f"Ablation    : {args.ours_final_ablation_suite}")
+        if ours_final_variant_filter is not None:
+            print(f"Variant Pick: {', '.join(sorted(ours_final_variant_filter))}")
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
-        if suite_name in {"rho_grid", "complete"}:
+        if suite_name in {"rho_grid", "complete"} and rho_grid_variants:
             rho_pairs_text = ", ".join(
                 f"{samples} samples/{shot}-shot"
                 for samples, shot in restricted_ours_final_rho_grid_pairs(samples_list, shots)

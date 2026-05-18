@@ -54,6 +54,7 @@ from visualization import (
     export_dataset_noise_profile,
     export_episode_q1_figure,
     export_support_distribution_figure,
+    export_uot_evidence_figure,
 )
 
 
@@ -1805,6 +1806,10 @@ def get_args():
     parser.add_argument("--q1_num_episodes", type=int, default=8)
     parser.add_argument("--q1_queries_per_episode", type=int, default=1)
     parser.add_argument("--q1_misclassified_only", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--export_uot_evidence_figure", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
+    parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
+    parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--export_dataset_profile", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--save_last_checkpoint", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
@@ -5156,14 +5161,21 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     q1_limit = max(0, int(getattr(args, "q1_num_episodes", 0)))
     q1_queries_per_episode = max(1, int(getattr(args, "q1_queries_per_episode", 1)))
     q1_misclassified_only = _bool_flag(getattr(args, "q1_misclassified_only", "true"), default=True)
+    uot_evidence_enabled = _bool_flag(getattr(args, "export_uot_evidence_figure", "false"), default=False)
+    uot_evidence_limit = max(0, int(getattr(args, "uot_evidence_num_episodes", 0)))
+    uot_evidence_queries_per_episode = max(1, int(getattr(args, "uot_evidence_queries_per_episode", 1)))
+    uot_evidence_correct_only = _bool_flag(getattr(args, "uot_evidence_correct_only", "true"), default=True)
     q1_rows = []
     q1_figure_paths = []
+    uot_evidence_rows = []
+    uot_evidence_paths = []
     support_distribution_rows = []
     support_summary_sums = defaultdict(float)
     support_summary_count = 0.0
     test_diag_sums = defaultdict(float)
     test_diag_total = 0.0
     exported_q1 = 0
+    exported_uot_evidence = 0
     egsm_test_diagnostics = resolve_hrot_ecot_enable_egsm(args) == "true"
     model_name = str(getattr(args, "model", "")).strip().lower()
     if model_name in {"ours", "ours_final"}:
@@ -5179,6 +5191,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         or args.model == "crj_fsl"
         or egsm_test_diagnostics
     )
+    ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
+    transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
+    uot_transport_kind = (
+        "balanced_ot"
+        if ours_ablation_name in {"full_ot", "balanced_ot"} or transport_mode_name in {"balanced", "ot", "balanced_ot", "full_ot"}
+        else "uot"
+    )
+    uot_variant_label = str(getattr(args, "experiment_tag", "") or f"{args.model}_{ours_ablation_name}")
 
     with torch.no_grad():
         for episode_idx, batch in enumerate(tqdm(loader, desc="Testing")):
@@ -5210,7 +5230,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 phase="test",
                 query_targets=targets,
                 support_targets=support_targets,
-                collect_diagnostics=collect_test_diagnostics,
+                collect_diagnostics=(
+                    collect_test_diagnostics
+                    or (uot_evidence_enabled and exported_uot_evidence < uot_evidence_limit)
+                ),
             )
             logits = extract_logits(scores)
             preds = logits.argmax(dim=1)
@@ -5288,6 +5311,47 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                             save_path=support_fig_path,
                         )
                     exported_q1 += 1
+
+            if uot_evidence_enabled and exported_uot_evidence < uot_evidence_limit:
+                if uot_evidence_correct_only:
+                    selected_query_indices = preds.eq(targets).nonzero(as_tuple=True)[0].tolist()
+                else:
+                    selected_query_indices = list(range(int(preds.shape[0])))
+                selected_query_indices = selected_query_indices[:uot_evidence_queries_per_episode]
+
+                if selected_query_indices:
+                    samples_stem = f"{args.training_samples}samples" if args.training_samples else "allsamples"
+                    tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
+                    protocol_suffix = get_test_protocol_suffix(args)
+                    uot_base = os.path.join(
+                        args.path_results,
+                        (
+                            f"uot_evidence_{args.dataset_name}_{args.model}_{samples_stem}_"
+                            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}_ep{episode_idx:04d}.png"
+                        ),
+                    )
+                    try:
+                        rows = export_uot_evidence_figure(
+                            outputs=scores if isinstance(scores, dict) else {"logits": logits},
+                            query_images=query[0].detach().cpu(),
+                            support_images=support[0].detach().cpu(),
+                            logits=logits.detach().cpu(),
+                            preds=preds.detach().cpu(),
+                            targets=targets.detach().cpu(),
+                            class_names=args.class_names,
+                            save_path=uot_base,
+                            episode_index=episode_idx,
+                            query_indices=selected_query_indices,
+                            transport_kind=uot_transport_kind,
+                            variant_label=uot_variant_label,
+                        )
+                    except Exception as exc:
+                        print(f"Skipping UOT evidence figure for episode {episode_idx}: {exc}")
+                        rows = []
+                    if rows:
+                        uot_evidence_rows.extend(rows)
+                        uot_evidence_paths.append(uot_base)
+                        exported_uot_evidence += 1
 
             if q_indices_np is not None:
                 preds_np = preds.cpu().numpy()
@@ -5423,6 +5487,26 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 wandb.log({f"q1/example_{idx}": wandb.Image(figure_path)})
         print(f"Saved Q1 focus summary: {q1_csv_path}")
         print(f"Saved {len(q1_figure_paths)} Q1 figure(s)")
+
+    if uot_evidence_rows:
+        uot_csv_path = os.path.join(
+            args.path_results,
+            f"uot_evidence_summary_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.csv",
+        )
+        write_rows_csv(uot_csv_path, uot_evidence_rows)
+        margin_mean = float(np.mean([row["decision_margin"] for row in uot_evidence_rows]))
+        unmatched_mean = float(np.mean([row["unmatched_fraction"] for row in uot_evidence_rows]))
+        wandb.log(
+            {
+                "uot_evidence/decision_margin_mean": margin_mean,
+                "uot_evidence/unmatched_fraction_mean": unmatched_mean,
+            }
+        )
+        for idx, figure_path in enumerate(uot_evidence_paths[: min(3, len(uot_evidence_paths))]):
+            if os.path.exists(figure_path):
+                wandb.log({f"uot_evidence/example_{idx}": wandb.Image(figure_path)})
+        print(f"Saved UOT evidence summary: {uot_csv_path}")
+        print(f"Saved {len(uot_evidence_paths)} UOT evidence figure(s)")
 
     if save_aux_artifacts and support_distribution_rows:
         support_csv_path = os.path.join(

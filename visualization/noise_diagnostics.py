@@ -322,6 +322,356 @@ def _plot_overlay(ax: plt.Axes, image: np.ndarray, heatmap: np.ndarray, title: s
     ax.axis("off")
 
 
+def _minmax01(values: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    values = np.clip(values, a_min=0.0, a_max=None)
+    vmax = float(values.max())
+    values = values - float(values.min())
+    scale = float(values.max())
+    if scale <= eps:
+        if vmax > eps:
+            return np.ones_like(values, dtype=np.float32)
+        return np.zeros_like(values, dtype=np.float32)
+    return values / scale
+
+
+def _build_query_support_montage(
+    query_image: torch.Tensor | np.ndarray,
+    support_images: torch.Tensor | np.ndarray,
+    *,
+    pad: int = 5,
+) -> np.ndarray:
+    query_np = _ensure_numpy_image(query_image)
+    support_np = _build_support_montage(support_images, pad=pad)
+    height = max(query_np.shape[0], support_np.shape[0])
+    width = query_np.shape[1] + support_np.shape[1] + pad
+    canvas = np.ones((height, width), dtype=np.float32)
+    q_y = (height - query_np.shape[0]) // 2
+    s_y = (height - support_np.shape[0]) // 2
+    canvas[q_y : q_y + query_np.shape[0], : query_np.shape[1]] = query_np
+    x0 = query_np.shape[1] + pad
+    canvas[s_y : s_y + support_np.shape[0], x0 : x0 + support_np.shape[1]] = support_np
+    return canvas
+
+
+def _build_pair_canvas(
+    query_image: np.ndarray,
+    support_image: np.ndarray,
+    query_heatmap: np.ndarray,
+    support_heatmap: np.ndarray,
+    *,
+    pad: int = 6,
+) -> tuple[np.ndarray, np.ndarray]:
+    height = max(query_image.shape[0], support_image.shape[0])
+    width = query_image.shape[1] + support_image.shape[1] + pad
+    image_canvas = np.ones((height, width), dtype=np.float32)
+    heat_canvas = np.zeros((height, width), dtype=np.float32)
+
+    q_y = (height - query_image.shape[0]) // 2
+    s_y = (height - support_image.shape[0]) // 2
+    image_canvas[q_y : q_y + query_image.shape[0], : query_image.shape[1]] = query_image
+    heat_canvas[q_y : q_y + query_heatmap.shape[0], : query_heatmap.shape[1]] = _minmax01(query_heatmap)
+
+    x0 = query_image.shape[1] + pad
+    image_canvas[s_y : s_y + support_image.shape[0], x0 : x0 + support_image.shape[1]] = support_image
+    heat_canvas[s_y : s_y + support_heatmap.shape[0], x0 : x0 + support_heatmap.shape[1]] = _minmax01(
+        support_heatmap
+    )
+    return image_canvas, heat_canvas
+
+
+def _plot_transport_pair(
+    ax: plt.Axes,
+    query_image: np.ndarray,
+    support_image: np.ndarray,
+    query_heatmap: np.ndarray,
+    support_heatmap: np.ndarray,
+    *,
+    title: str,
+    subtitle: str,
+) -> None:
+    image_canvas, heat_canvas = _build_pair_canvas(query_image, support_image, query_heatmap, support_heatmap)
+    ax.imshow(image_canvas, cmap="gray", vmin=0.0, vmax=1.0)
+    ax.imshow(heat_canvas, cmap="inferno", alpha=0.64, vmin=0.0, vmax=1.0)
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.text(
+        0.02,
+        0.02,
+        subtitle,
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8.5,
+        color="white",
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "black", "alpha": 0.62, "edgecolor": "none"},
+    )
+    ax.axis("off")
+
+
+def _transport_plan_by_shot(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    way_num: int,
+    shot_num: int,
+) -> torch.Tensor | None:
+    if not isinstance(outputs, dict):
+        return None
+    plan = _safe_detach_tensor(outputs.get("transport_plan"))
+    if plan is None:
+        return None
+    plan = plan.float().cpu()
+    if plan.dim() == 5 and plan.shape[1] == way_num and plan.shape[2] == shot_num:
+        return plan
+    if plan.dim() == 4 and plan.shape[1] == way_num * shot_num:
+        return plan.view(plan.shape[0], way_num, shot_num, plan.shape[-2], plan.shape[-1])
+    if plan.dim() == 4 and plan.shape[1] == way_num:
+        return plan.unsqueeze(2)
+    return None
+
+
+def _shot_tensor_by_class(
+    outputs: dict[str, Any] | torch.Tensor,
+    key: str,
+    *,
+    way_num: int,
+    shot_num: int,
+) -> torch.Tensor | None:
+    if not isinstance(outputs, dict):
+        return None
+    tensor = _safe_detach_tensor(outputs.get(key))
+    if tensor is None:
+        return None
+    tensor = tensor.float().cpu()
+    if tensor.dim() == 3 and tensor.shape[1] == way_num and tensor.shape[2] == shot_num:
+        return tensor
+    if tensor.dim() == 2 and tensor.shape[1] == way_num * shot_num:
+        return tensor.view(tensor.shape[0], way_num, shot_num)
+    if tensor.dim() == 2 and tensor.shape[0] == way_num and tensor.shape[1] == shot_num:
+        return tensor.unsqueeze(0)
+    return None
+
+
+def _select_transport_shot(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    query_idx: int,
+    class_idx: int,
+    way_num: int,
+    shot_num: int,
+) -> int:
+    for key in ("shot_pool_weights", "shot_transported_mass"):
+        tensor = _shot_tensor_by_class(outputs, key, way_num=way_num, shot_num=shot_num)
+        if tensor is not None and query_idx < tensor.shape[0]:
+            values = tensor[query_idx, class_idx]
+            if values.numel() > 0:
+                return int(values.argmax().item())
+    return 0
+
+
+def _shot_expected_mass(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    query_idx: int,
+    class_idx: int,
+    shot_idx: int,
+    fallback_mass: float,
+    way_num: int,
+    shot_num: int,
+) -> float:
+    for key in ("shot_rho", "rho"):
+        tensor = _shot_tensor_by_class(outputs, key, way_num=way_num, shot_num=shot_num)
+        if tensor is not None and query_idx < tensor.shape[0]:
+            return float(tensor[query_idx, class_idx, shot_idx].item())
+    return float(fallback_mass)
+
+
+def export_uot_evidence_figure(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    query_images: torch.Tensor,
+    support_images: torch.Tensor,
+    logits: torch.Tensor,
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    class_names: Sequence[str],
+    save_path: str,
+    episode_index: int,
+    query_indices: Iterable[int] | None = None,
+    transport_kind: str = "uot",
+    variant_label: str = "",
+) -> list[dict[str, Any]]:
+    """Export a four-panel UOT-vs-full-mass evidence figure for selected queries."""
+    if query_images.dim() != 4:
+        raise ValueError(f"query_images must have shape (NumQuery, C, H, W), got {tuple(query_images.shape)}")
+    if support_images.dim() != 5:
+        raise ValueError(f"support_images must have shape (Way, Shot, C, H, W), got {tuple(support_images.shape)}")
+
+    way_num, shot_num = support_images.shape[:2]
+    plan = _transport_plan_by_shot(outputs, way_num=way_num, shot_num=shot_num)
+    if plan is None:
+        return []
+
+    selected_indices = list(query_indices) if query_indices is not None else list(range(int(query_images.shape[0])))
+    if not selected_indices:
+        return []
+
+    logits = logits.detach().float().cpu()
+    preds = preds.detach().cpu()
+    targets = targets.detach().cpu()
+    transport_kind = str(transport_kind or "uot").strip().lower()
+    is_uot = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"}
+    method_title = "Proposed UOT" if is_uot else "Balanced OT output"
+    variant_text = str(variant_label or ("Ours_final UOT" if is_uot else "Ours_final full OT"))
+
+    rows: list[dict[str, Any]] = []
+    fig, axes = plt.subplots(
+        len(selected_indices),
+        4,
+        figsize=(21, max(4.3, 4.0 * len(selected_indices))),
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+
+    for row_idx, query_idx_raw in enumerate(selected_indices):
+        query_idx = int(query_idx_raw)
+        true_class = int(targets[query_idx].item())
+        pred_class = int(preds[query_idx].item())
+        score_np = logits[query_idx].numpy()
+        if len(score_np) > 1:
+            wrong_scores = score_np.copy()
+            wrong_scores[true_class] = -np.inf
+            best_wrong_class = int(np.argmax(wrong_scores))
+            best_wrong_score = float(wrong_scores[best_wrong_class])
+        else:
+            best_wrong_class = true_class
+            best_wrong_score = 0.0
+        true_score = float(score_np[true_class])
+        decision_margin = true_score - best_wrong_score
+
+        shot_idx = _select_transport_shot(
+            outputs,
+            query_idx=query_idx,
+            class_idx=true_class,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+        pair_plan = plan[query_idx, true_class, shot_idx]
+        query_mass = pair_plan.sum(dim=-1)
+        support_mass = pair_plan.sum(dim=-2)
+        transported_mass = float(pair_plan.sum().item())
+        expected_mass = _shot_expected_mass(
+            outputs,
+            query_idx=query_idx,
+            class_idx=true_class,
+            shot_idx=shot_idx,
+            fallback_mass=max(transported_mass, 1e-8),
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+        unmatched_fraction = max(0.0, 1.0 - transported_mass / max(expected_mass, 1e-8))
+
+        query_np = _ensure_numpy_image(query_images[query_idx])
+        support_np = _ensure_numpy_image(support_images[true_class, shot_idx])
+        image_hw = tuple(int(dim) for dim in query_np.shape)
+        support_hw = tuple(int(dim) for dim in support_np.shape)
+        query_heat = _token_values_to_heatmap(query_mass, image_hw)
+        support_heat = _token_values_to_heatmap(support_mass, support_hw)
+        query_ref = _token_values_to_heatmap(torch.ones_like(query_mass), image_hw)
+        support_ref = _token_values_to_heatmap(torch.ones_like(support_mass), support_hw)
+
+        rows.append(
+            {
+                "episode_index": episode_index,
+                "query_rank_in_episode": query_idx,
+                "variant_label": variant_text,
+                "transport_kind": transport_kind,
+                "true_class": true_class,
+                "true_class_name": class_names[true_class] if true_class < len(class_names) else str(true_class),
+                "pred_class": pred_class,
+                "pred_class_name": class_names[pred_class] if pred_class < len(class_names) else str(pred_class),
+                "best_wrong_class": best_wrong_class,
+                "best_wrong_class_name": (
+                    class_names[best_wrong_class] if best_wrong_class < len(class_names) else str(best_wrong_class)
+                ),
+                "selected_shot": shot_idx,
+                "correct": int(true_class == pred_class),
+                "true_score": true_score,
+                "best_wrong_score": best_wrong_score,
+                "decision_margin": decision_margin,
+                "expected_mass": expected_mass,
+                "transported_mass": transported_mass,
+                "unmatched_fraction": unmatched_fraction,
+                "save_path": save_path,
+            }
+        )
+
+        ax_episode, ax_balanced, ax_uot, ax_margin = axes[row_idx]
+        episode_canvas = _build_query_support_montage(query_images[query_idx], support_images[true_class])
+        ax_episode.imshow(episode_canvas, cmap="gray", vmin=0.0, vmax=1.0)
+        ax_episode.set_title("(a) Few-shot episode", fontsize=11, weight="bold")
+        ax_episode.text(
+            0.02,
+            0.02,
+            f"Q: {class_names[true_class] if true_class < len(class_names) else true_class} | supports={shot_num}",
+            transform=ax_episode.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=8.5,
+            color="white",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "black", "alpha": 0.62, "edgecolor": "none"},
+        )
+        ax_episode.axis("off")
+
+        _plot_transport_pair(
+            ax_balanced,
+            query_np,
+            support_np,
+            query_ref,
+            support_ref,
+            title="(b) Balanced OT reference",
+            subtitle="Full token marginals; background still participates",
+        )
+        _plot_transport_pair(
+            ax_uot,
+            query_np,
+            support_np,
+            query_heat,
+            support_heat,
+            title=f"(c) {method_title}",
+            subtitle=f"mass={transported_mass:.3f}, unmatched={unmatched_fraction:.1%}, shot={shot_idx + 1}",
+        )
+
+        class_positions = np.arange(len(score_np))
+        colors = ["#94a3b8"] * len(score_np)
+        colors[true_class] = "#0f766e"
+        if best_wrong_class != true_class:
+            colors[best_wrong_class] = "#b45309"
+        if pred_class != true_class and pred_class < len(colors):
+            colors[pred_class] = "#dc2626"
+        ax_margin.barh(class_positions, score_np, color=colors, alpha=0.92)
+        ax_margin.axvline(best_wrong_score, color="#b45309", linestyle="--", linewidth=1.0, alpha=0.75)
+        ax_margin.axvline(true_score, color="#0f766e", linestyle="-", linewidth=1.2, alpha=0.9)
+        ax_margin.set_yticks(class_positions)
+        ax_margin.set_yticklabels(class_names[: len(score_np)], fontsize=8.5)
+        ax_margin.invert_yaxis()
+        ax_margin.grid(axis="x", linestyle="--", linewidth=0.5, alpha=0.35)
+        ax_margin.set_title("(d) Decision effect", fontsize=11, weight="bold")
+        ax_margin.set_xlabel(f"margin={decision_margin:+.3f}", fontsize=9)
+
+    fig.suptitle(
+        f"Evidence-selective transport | Episode {episode_index} | {variant_text}",
+        fontsize=15,
+        weight="bold",
+        y=0.995,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.965))
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=260, bbox_inches="tight")
+    plt.close(fig)
+    return rows
+
+
 def export_episode_q1_figure(
     *,
     model: Any,

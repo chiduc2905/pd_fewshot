@@ -15,6 +15,7 @@ from .noise_diagnostics import (
     export_dataset_noise_profile,
     export_episode_q1_figure,
     export_support_distribution_figure,
+    export_uot_evidence_figure,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     'export_dataset_noise_profile',
     'export_episode_q1_figure',
     'export_support_distribution_figure',
+    'export_uot_evidence_figure',
 ]

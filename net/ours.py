@@ -62,9 +62,9 @@ def apply_ours_design_defaults(kwargs: dict, ablation: str) -> dict:
     kwargs.setdefault("cata_num_anchors", 8)
     kwargs.setdefault("cata_num_heads", 4)
     kwargs.setdefault("cata_attn_dropout", 0.0)
-    kwargs["ecot_rho_bank"] = "0.8"
-    kwargs["ecot_base_rho"] = 0.8
-    kwargs["ecot_transport_mode"] = "unbalanced"
+    kwargs.setdefault("ecot_rho_bank", "0.8")
+    kwargs.setdefault("ecot_base_rho", 0.8)
+    kwargs.setdefault("ecot_transport_mode", "unbalanced")
     # Default Ours score is -cost only. If the caller already enabled cost/mass
     # (CLI / run_all_experiments --m2_cost_per_mass), do not overwrite it here —
     # otherwise cost/mass appears to have no effect vs baseline.
