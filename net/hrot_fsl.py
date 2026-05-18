@@ -529,6 +529,10 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_egsm_rho_delta_max: float = 0.15,
         ecot_egsm_rho_grad_clip: float = 1.0,
         ecot_egsm_rho_reg_lambda: float = 0.01,
+        ecot_enable_ccem_marginal: bool = False,
+        ecot_ccem_uniform_mix: float = 0.05,
+        ecot_ccem_tau_q: float = 0.25,
+        ecot_ccem_tau_s: float = 0.25,
         ecot_transport_mode: str | None = None,
         ecot_enable_noise_sink: bool = False,
         ecot_noise_sink_cost_init: float = 1.0,
@@ -729,6 +733,10 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_egsm_hidden_dim must be positive")
         if float(ecot_egsm_candidate_tau_q) <= 0.0 or float(ecot_egsm_candidate_tau_b) <= 0.0:
             raise ValueError("ecot_egsm_candidate_tau_q and ecot_egsm_candidate_tau_b must be positive")
+        if not 0.0 <= float(ecot_ccem_uniform_mix) < 1.0:
+            raise ValueError("ecot_ccem_uniform_mix must satisfy 0 <= mix < 1")
+        if float(ecot_ccem_tau_q) <= 0.0 or float(ecot_ccem_tau_s) <= 0.0:
+            raise ValueError("ecot_ccem_tau_q and ecot_ccem_tau_s must be positive")
         ecot_transport_mode = _normalize_ecot_transport_mode(ecot_transport_mode)
         if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
             raise ValueError("ecot_noise_sink_cost_init must be positive")
@@ -792,6 +800,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_ecot_mea_marginal = self.uses_ecot and bool(ecot_enable_mea_marginal)
         self.uses_ecot_ccdm_marginal = self.uses_ecot and bool(ecot_enable_ccdm_marginal)
         self.uses_ecot_egsm_marginal = self.uses_ecot and bool(ecot_enable_egsm)
+        self.uses_ecot_ccem_marginal = self.uses_ecot and bool(ecot_enable_ccem_marginal)
         self.uses_ecot_noise_sink = self.uses_ecot and bool(ecot_enable_noise_sink)
         if self.uses_ecot_crs_marginal and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CRS marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
@@ -801,6 +810,8 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("CCDM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if bool(ecot_enable_egsm) and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("EGSM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
+        if bool(ecot_enable_ccem_marginal) and variant not in {"J_ECOT", "J_ECOT_M2"}:
+            raise ValueError("CCEM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if self.uses_ecot_crs_marginal and self.uses_ecot_nncs_marginal:
             raise ValueError("CRS and NNCS support marginals are mutually exclusive")
         if self.uses_ecot_mea_marginal and (self.uses_ecot_crs_marginal or self.uses_ecot_nncs_marginal):
@@ -819,6 +830,14 @@ class HROTFSL(BaseConv64FewShotModel):
             or self.uses_ecot_ccdm_marginal
         ):
             raise ValueError("EGSM is mutually exclusive with MEA, CRS, NNCS, and CCDM marginals")
+        if self.uses_ecot_ccem_marginal and (
+            self.uses_ecot_mea_marginal
+            or self.uses_ecot_crs_marginal
+            or self.uses_ecot_nncs_marginal
+            or self.uses_ecot_ccdm_marginal
+            or self.uses_ecot_egsm_marginal
+        ):
+            raise ValueError("CCEM marginal is mutually exclusive with MEA, CRS, NNCS, CCDM, and EGSM")
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
@@ -1001,6 +1020,10 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_egsm_rho_delta_max = float(ecot_egsm_rho_delta_max)
         self.ecot_egsm_rho_grad_clip = float(ecot_egsm_rho_grad_clip)
         self.ecot_egsm_rho_reg_lambda = float(ecot_egsm_rho_reg_lambda)
+        self.ecot_enable_ccem_marginal = bool(ecot_enable_ccem_marginal)
+        self.ecot_ccem_uniform_mix = float(ecot_ccem_uniform_mix)
+        self.ecot_ccem_tau_q = float(ecot_ccem_tau_q)
+        self.ecot_ccem_tau_s = float(ecot_ccem_tau_s)
         self.ecot_transport_mode = ecot_transport_mode
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
@@ -1454,6 +1477,121 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.raw_noise_sink_cost is None:
             return self.curvature.new_tensor(1.0)
         return F.softplus(self.raw_noise_sink_cost).clamp_min(self.eps)
+
+    @staticmethod
+    def _standardize_token_scores(scores: torch.Tensor, eps: float) -> torch.Tensor:
+        return (scores - scores.mean(dim=-1, keepdim=True)) / scores.std(
+            dim=-1,
+            keepdim=True,
+            unbiased=False,
+        ).clamp_min(float(eps))
+
+    def _compute_ccem_marginal_probs(
+        self,
+        flat_cost: torch.Tensor,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Class-Contrastive Evidence Marginals from learned episode tokens.
+
+        CCEM does not assume any hand-crafted scalogram morphology. Query tokens
+        receive mass only when they match the candidate class more strongly than
+        competing classes. Support tokens receive mass when they are consistent
+        within the class and/or uncommon across other support classes.
+        """
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must be 4D, got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"CCEM expected Way*Shot={int(way_num) * int(shot_num)}, got {num_pairs}")
+        if tuple(query_tokens.shape[:2]) != (num_query, query_len):
+            raise ValueError(
+                "query_tokens must have shape (NumQuery, QueryTokens, Dim), "
+                f"got {tuple(query_tokens.shape)}"
+            )
+        if tuple(support_tokens.shape[:3]) != (int(way_num), int(shot_num), support_len):
+            raise ValueError(
+                "support_tokens must have shape (Way, Shot, SupportTokens, Dim), "
+                f"got {tuple(support_tokens.shape)}"
+            )
+
+        w = int(way_num)
+        k = int(shot_num)
+        mix = float(self.ecot_ccem_uniform_mix)
+        tau_q = max(float(self.ecot_ccem_tau_q), float(self.eps))
+        tau_s = max(float(self.ecot_ccem_tau_s), float(self.eps))
+
+        pair_match = (-flat_cost.detach()).amax(dim=-1).reshape(num_query, w, k, query_len)
+        class_match = pair_match.amax(dim=2)
+        if w > 1:
+            other_best = []
+            for class_idx in range(w):
+                mask = torch.ones(w, device=flat_cost.device, dtype=torch.bool)
+                mask[class_idx] = False
+                other_best.append(class_match[:, mask].amax(dim=1))
+            other_best = torch.stack(other_best, dim=1)
+            class_margin = class_match - other_best
+        else:
+            class_margin = torch.zeros_like(class_match)
+        query_score = class_margin.unsqueeze(2).expand(-1, -1, k, -1).reshape(num_query, num_pairs, query_len)
+        query_score = self._standardize_token_scores(query_score, self.eps)
+        query_reliability = torch.sigmoid(query_score / tau_q)
+        query_weight = mix + (1.0 - mix) * query_reliability
+        query_prob = query_weight / query_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        support_norm = F.normalize(support_tokens.detach(), p=2, dim=-1, eps=float(self.eps))
+        support_reliability_rows = []
+        for class_idx in range(w):
+            class_rows = []
+            other_pool = None
+            if w > 1:
+                other_pool = support_norm[
+                    torch.arange(w, device=support_norm.device) != class_idx
+                ].reshape(-1, support_norm.shape[-1])
+            for shot_idx in range(k):
+                tokens = support_norm[class_idx, shot_idx]
+                if k > 1:
+                    same_pool = support_norm[
+                        class_idx,
+                        torch.arange(k, device=support_norm.device) != shot_idx,
+                    ].reshape(-1, support_norm.shape[-1])
+                    same_score = tokens.matmul(same_pool.transpose(0, 1)).amax(dim=-1)
+                else:
+                    same_score = torch.zeros(support_len, device=flat_cost.device, dtype=flat_cost.dtype)
+                if other_pool is not None and other_pool.numel() > 0:
+                    cross_score = tokens.matmul(other_pool.transpose(0, 1)).amax(dim=-1)
+                else:
+                    cross_score = torch.zeros_like(same_score)
+                raw_score = same_score - cross_score if k > 1 else -cross_score
+                raw_score = self._standardize_token_scores(raw_score.unsqueeze(0), self.eps).squeeze(0)
+                class_rows.append(torch.sigmoid(raw_score / tau_s))
+            support_reliability_rows.append(torch.stack(class_rows, dim=0))
+        support_reliability = torch.stack(support_reliability_rows, dim=0).to(device=flat_cost.device, dtype=flat_cost.dtype)
+        support_weight = mix + (1.0 - mix) * support_reliability
+        support_prob_base = support_weight / support_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        support_prob = support_prob_base.reshape(1, num_pairs, support_len).expand(num_query, -1, -1)
+
+        query_prob_view = query_prob.reshape(num_query, w, k, query_len)
+        support_prob_view = support_prob.reshape(num_query, w, k, support_len)
+        query_entropy = -(query_prob * query_prob.clamp_min(self.eps).log()).sum(dim=-1).mean()
+        support_entropy = -(
+            support_prob_base * support_prob_base.clamp_min(self.eps).log()
+        ).sum(dim=-1).mean()
+        payload = {
+            "ecot_ccem_query_pi": query_prob_view,
+            "ecot_ccem_support_pi": support_prob_view,
+            "ecot_ccem_query_reliability": query_reliability.reshape(num_query, w, k, query_len),
+            "ecot_ccem_support_reliability": support_reliability,
+            "ecot_ccem_query_entropy": query_entropy,
+            "ecot_ccem_support_entropy": support_entropy,
+            "ecot_ccem_uniform_mix": flat_cost.new_tensor(mix),
+            "ecot_ccem_tau_q": flat_cost.new_tensor(tau_q),
+            "ecot_ccem_tau_s": flat_cost.new_tensor(tau_s),
+        }
+        return query_prob, support_prob, payload
 
     @property
     def ncet_mix(self) -> torch.Tensor:
@@ -2911,6 +3049,7 @@ class HROTFSL(BaseConv64FewShotModel):
         mea_payload: dict[str, torch.Tensor] = {}
         ccdm_payload: dict[str, torch.Tensor] = {}
         egsm_payload: dict[str, torch.Tensor] = {}
+        ccem_payload: dict[str, torch.Tensor] = {}
         if self.mea_marginal is not None:
             if query_weight is not None or support_weight is not None:
                 raise ValueError("MEA marginal cannot be combined with explicit query/support weights")
@@ -2989,6 +3128,22 @@ class HROTFSL(BaseConv64FewShotModel):
                 for key, value in egsm_aux.items()
                 if torch.is_tensor(value)
             }
+        elif self.uses_ecot_ccem_marginal:
+            if query_weight is not None or support_weight is not None:
+                raise ValueError("CCEM marginal cannot be combined with explicit query/support weights")
+            if support_tokens is None or query_tokens is None:
+                raise ValueError("CCEM marginal requires support_tokens and query_tokens")
+            query_prob, support_prob, ccem_payload = self._compute_ccem_marginal_probs(
+                flat_cost,
+                query_tokens.to(device=flat_cost.device, dtype=flat_cost.dtype),
+                support_tokens.to(device=flat_cost.device, dtype=flat_cost.dtype),
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            a_bank = query_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            b_bank = support_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
+            transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
         elif query_weight is not None:
             if tuple(query_weight.shape) != (num_query, query_len):
                 raise ValueError(
@@ -3326,6 +3481,7 @@ class HROTFSL(BaseConv64FewShotModel):
         payload.update(mea_payload)
         payload.update(ccdm_payload)
         payload.update(egsm_payload)
+        payload.update(ccem_payload)
         payload.update(cp_payload)
         if noise_query_mass_bank is not None:
             payload.update(
@@ -5156,9 +5312,17 @@ class HROTFSL(BaseConv64FewShotModel):
             "ncet_support_sink_mass",
             "tsw_gate_q",
             "tsw_cost_modifier",
+            "ecot_ccem_query_pi",
+            "ecot_ccem_query_reliability",
+            "ecot_ccem_support_pi",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
+        for key in (
+            "ecot_ccem_support_reliability",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
         if "tsw_gate_s" in batch_outputs[0]:
             stacked["tsw_gate_s"] = torch.stack([item["tsw_gate_s"] for item in batch_outputs], dim=0)
         for key in (
@@ -5187,6 +5351,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "ncet_mix",
             "tsw_mean_gate_q",
             "tsw_mean_gate_s",
+            "ecot_ccem_query_entropy",
+            "ecot_ccem_support_entropy",
+            "ecot_ccem_uniform_mix",
+            "ecot_ccem_tau_q",
+            "ecot_ccem_tau_s",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

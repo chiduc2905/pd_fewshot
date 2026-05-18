@@ -213,7 +213,7 @@ def get_args():
         choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off"],
         help=(
             "Expand Ours-Final runs with tagged variants. "
-            "contrib=full, full_ot, gap, mass_off; "
+            "contrib=full, ccem_uot, full_ot, gap, mass_off; "
             "rho_grid=rho 0.6,0.7,0.8,0.9 at 60/5-shot and 240/1-shot unless "
             "--ours_final_rho_values is set; "
             "complete=contrib over all modes/shots plus restricted rho_grid; "
@@ -235,7 +235,8 @@ def get_args():
         default="all",
         help=(
             "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
-            "Aliases: full/original/uot, full_ot/ot/balanced_ot, gap, mass_off, tau_shot_off, rho_<value>. "
+            "Aliases: full/original/uot, ccem_uot/evidence, full_ot/ot/balanced_ot, "
+            "gap, mass_off, tau_shot_off, rho_<value>. "
             "Default all keeps the suite's normal variants."
         ),
     )
@@ -820,6 +821,24 @@ def build_ours_final_ablation_variants():
             "checkpoint_tag": "ablation_full",
             "label": "Ours-Final: local descriptors + UOT rho=0.8 + threshold-mass score, EGSM off",
             "extra_args": base,
+        },
+        {
+            "tag": "ours_final_ccem_uot",
+            "checkpoint_tag": "ablation_ccem_uot",
+            "label": (
+                "Ours-Final CCEM-UOT: class-contrastive evidence marginals + UOT rho=0.8 "
+                "+ explicit noise sink"
+            ),
+            "extra_args": base
+            + [
+                "--hrot_ecot_enable_ccem_marginal",
+                "true",
+                "--hrot_ecot_enable_noise_sink",
+                "true",
+                "--hrot_ecot_noise_sink_cost_init",
+                "0.7",
+            ],
+            "mode1_noise": True,
         },
         {
             "tag": "ours_final_full_ot",
@@ -1480,6 +1499,10 @@ def parse_ours_final_variant_filter(variants_str):
         "uot": "ours_final_full",
         "ours_final": "ours_final_full",
         "ours_final_full": "ours_final_full",
+        "ccem": "ours_final_ccem_uot",
+        "ccem_uot": "ours_final_ccem_uot",
+        "evidence": "ours_final_ccem_uot",
+        "ours_final_ccem_uot": "ours_final_ccem_uot",
         "full_ot": "ours_final_full_ot",
         "ot": "ours_final_full_ot",
         "balanced": "ours_final_full_ot",
@@ -1511,7 +1534,7 @@ def parse_ours_final_variant_filter(variants_str):
         if tag is None:
             raise ValueError(
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
-                "Use full, full_ot, gap, mass_off, tau_shot_off, rho_<value>, or exact tags."
+                "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, rho_<value>, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)

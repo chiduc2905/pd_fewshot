@@ -1350,6 +1350,19 @@ def get_args():
     parser.add_argument("--hrot_ecot_egsm_rho_reg_lambda", type=float, default=0.01,
                         help="EGSM adaptive rho: L2 regularization strength toward base_rho.")
     parser.add_argument(
+        "--hrot_ecot_enable_ccem_marginal",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "CCEM-UOT: use class-contrastive learned-token evidence as ECOT query/support marginals. "
+            "Mutually exclusive with EGSM/MEA/CCDM/CRS/NNCS."
+        ),
+    )
+    parser.add_argument("--hrot_ecot_ccem_uniform_mix", type=float, default=0.05)
+    parser.add_argument("--hrot_ecot_ccem_tau_q", type=float, default=0.25)
+    parser.add_argument("--hrot_ecot_ccem_tau_s", type=float, default=0.25)
+    parser.add_argument(
         "--hrot_ecot_transport_mode",
         type=str,
         default=None,
@@ -2633,6 +2646,10 @@ def get_model(args):
             f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.35)}), "
             f"ecot_egsm_adaptive_rho={getattr(args, 'hrot_ecot_egsm_adaptive_rho', 'false')}, "
             f"ecot_egsm_rho_delta_max={getattr(args, 'hrot_ecot_egsm_rho_delta_max', 0.15)}, "
+            f"ecot_ccem_enable={getattr(args, 'hrot_ecot_enable_ccem_marginal', 'false')}, "
+            f"ecot_ccem_mix={getattr(args, 'hrot_ecot_ccem_uniform_mix', 0.05)}, "
+            f"ecot_ccem_tau_q={getattr(args, 'hrot_ecot_ccem_tau_q', 0.25)}, "
+            f"ecot_ccem_tau_s={getattr(args, 'hrot_ecot_ccem_tau_s', 0.25)}, "
             f"ecot_transport_mode={ecot_transport_mode}, "
             f"ecot_noise_sink={getattr(args, 'hrot_ecot_enable_noise_sink', 'false')}, "
             f"ecot_noise_sink_cost={getattr(args, 'hrot_ecot_noise_sink_cost_init', 1.0)}, "
@@ -3123,6 +3140,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_egsm_candidate_tau_b",
             "hrot_ecot_egsm_kappa_min",
             "hrot_ecot_egsm_kappa_max",
+            "hrot_ecot_enable_ccem_marginal",
+            "hrot_ecot_ccem_uniform_mix",
+            "hrot_ecot_ccem_tau_q",
+            "hrot_ecot_ccem_tau_s",
             "hrot_ecot_enable_noise_sink",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
@@ -4187,6 +4208,11 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "egsm_candidate_tau_q",
         "egsm_candidate_tau_b",
         "egsm_rho_adaptive",
+        "ecot_ccem_query_entropy",
+        "ecot_ccem_support_entropy",
+        "ecot_ccem_uniform_mix",
+        "ecot_ccem_tau_q",
+        "ecot_ccem_tau_s",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -4583,6 +4609,8 @@ def format_diagnostic_summary(metrics):
         "egsm_candidate_tau_q",
         "egsm_candidate_tau_b",
         "egsm_rho_adaptive",
+        "ecot_ccem_query_entropy",
+        "ecot_ccem_support_entropy",
         "logit_scale",
     ]
     chunks = []
@@ -5500,11 +5528,20 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         write_rows_csv(uot_csv_path, uot_evidence_rows)
         margin_mean = float(np.mean([row["decision_margin"] for row in uot_evidence_rows]))
         unmatched_mean = float(np.mean([row["unmatched_fraction"] for row in uot_evidence_rows]))
+        fg_bg_values = [
+            float(row["evidence_background_mass_ratio"])
+            for row in uot_evidence_rows
+            if row.get("evidence_background_mass_ratio") is not None
+        ]
+        fg_bg_mean = float(np.mean(fg_bg_values)) if fg_bg_values else None
+        uot_log_payload = {
+            "uot_evidence/decision_margin_mean": margin_mean,
+            "uot_evidence/unmatched_fraction_mean": unmatched_mean,
+        }
+        if fg_bg_mean is not None:
+            uot_log_payload["uot_evidence/evidence_background_mass_ratio_mean"] = fg_bg_mean
         wandb.log(
-            {
-                "uot_evidence/decision_margin_mean": margin_mean,
-                "uot_evidence/unmatched_fraction_mean": unmatched_mean,
-            }
+            uot_log_payload
         )
         for idx, figure_path in enumerate(uot_evidence_paths[: min(3, len(uot_evidence_paths))]):
             if os.path.exists(figure_path):

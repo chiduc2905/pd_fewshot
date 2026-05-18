@@ -390,10 +390,18 @@ def _plot_transport_pair(
     *,
     title: str,
     subtitle: str,
+    query_outline: np.ndarray | None = None,
+    support_outline: np.ndarray | None = None,
 ) -> None:
     image_canvas, heat_canvas = _build_pair_canvas(query_image, support_image, query_heatmap, support_heatmap)
     ax.imshow(image_canvas, cmap="gray", vmin=0.0, vmax=1.0)
     ax.imshow(heat_canvas, cmap="inferno", alpha=0.64, vmin=0.0, vmax=1.0)
+    if query_outline is not None or support_outline is not None:
+        outline_q = np.zeros_like(query_image, dtype=np.float32) if query_outline is None else query_outline
+        outline_s = np.zeros_like(support_image, dtype=np.float32) if support_outline is None else support_outline
+        _, outline_canvas = _build_pair_canvas(query_image, support_image, outline_q, outline_s)
+        if float(np.nanmax(outline_canvas)) > 0.0:
+            ax.contour(outline_canvas, levels=[0.5], colors=["#2dd4bf"], linewidths=1.1, alpha=0.95)
     ax.set_title(title, fontsize=11, weight="bold")
     ax.text(
         0.02,
@@ -469,6 +477,67 @@ def _select_transport_shot(
     return 0
 
 
+def _query_evidence_tokens(outputs: dict[str, Any] | torch.Tensor) -> torch.Tensor | None:
+    if not isinstance(outputs, dict):
+        return None
+    tokens = _safe_detach_tensor(outputs.get("ecot_ccem_query_reliability"))
+    if tokens is None:
+        tokens = _safe_detach_tensor(outputs.get("ecot_ccem_query_pi"))
+    if tokens is None:
+        return None
+    tokens = tokens.float().cpu()
+    if tokens.dim() == 5 and tokens.shape[0] == 1:
+        tokens = tokens.squeeze(0)
+    return tokens if tokens.dim() in {2, 4} else None
+
+
+def _support_evidence_tokens(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    way_num: int,
+    shot_num: int,
+) -> torch.Tensor | None:
+    if not isinstance(outputs, dict):
+        return None
+    tokens = _safe_detach_tensor(outputs.get("ecot_ccem_support_reliability"))
+    if tokens is None:
+        tokens = _safe_detach_tensor(outputs.get("ecot_ccem_support_pi"))
+    if tokens is None:
+        return None
+    tokens = tokens.float().cpu()
+    if tokens.dim() in {4, 5} and tokens.shape[0] == 1:
+        tokens = tokens.squeeze(0)
+    if tokens.dim() == 3 and tokens.shape[0] == way_num:
+        return tokens
+    if tokens.dim() == 4:
+        return tokens
+    if tokens.dim() == 2 and tokens.shape[0] == way_num * shot_num:
+        return tokens.view(way_num, shot_num, tokens.shape[-1])
+    return None
+
+
+def _noise_sink_value(
+    outputs: dict[str, Any] | torch.Tensor,
+    key: str,
+    *,
+    query_idx: int,
+    class_idx: int,
+    shot_idx: int,
+) -> float:
+    if not isinstance(outputs, dict):
+        return 0.0
+    tensor = _safe_detach_tensor(outputs.get(key))
+    if tensor is None:
+        return 0.0
+    tensor = tensor.float().cpu()
+    if tensor.dim() == 4 and tensor.shape[0] == 1:
+        tensor = tensor.squeeze(0)
+    if tensor.dim() != 3 or query_idx >= tensor.shape[0]:
+        return 0.0
+    shot_idx = min(shot_idx, int(tensor.shape[2]) - 1)
+    return float(tensor[query_idx, class_idx, shot_idx].item())
+
+
 def _shot_expected_mass(
     outputs: dict[str, Any] | torch.Tensor,
     *,
@@ -511,6 +580,9 @@ def export_uot_evidence_figure(
     plan = _transport_plan_by_shot(outputs, way_num=way_num, shot_num=shot_num)
     if plan is None:
         return []
+    query_evidence_tokens = _query_evidence_tokens(outputs)
+    support_evidence_tokens = _support_evidence_tokens(outputs, way_num=way_num, shot_num=shot_num)
+    has_evidence = query_evidence_tokens is not None and support_evidence_tokens is not None
 
     selected_indices = list(query_indices) if query_indices is not None else list(range(int(query_images.shape[0])))
     if not selected_indices:
@@ -521,7 +593,7 @@ def export_uot_evidence_figure(
     targets = targets.detach().cpu()
     transport_kind = str(transport_kind or "uot").strip().lower()
     is_uot = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"}
-    method_title = "Proposed UOT" if is_uot else "Balanced OT output"
+    method_title = "CCEM-UOT" if has_evidence else ("Proposed UOT" if is_uot else "Balanced OT output")
     variant_text = str(variant_label or ("Ours_final UOT" if is_uot else "Ours_final full OT"))
 
     rows: list[dict[str, Any]] = []
@@ -579,6 +651,57 @@ def export_uot_evidence_figure(
         support_heat = _token_values_to_heatmap(support_mass, support_hw)
         query_ref = _token_values_to_heatmap(torch.ones_like(query_mass), image_hw)
         support_ref = _token_values_to_heatmap(torch.ones_like(support_mass), support_hw)
+        query_evidence = None
+        support_evidence = None
+        query_bg_mass_ratio = None
+        support_bg_mass_ratio = None
+        evidence_bg_mass_ratio = None
+        query_evidence_heat = None
+        support_evidence_heat = None
+        if has_evidence and query_evidence_tokens is not None and support_evidence_tokens is not None:
+            if query_evidence_tokens.dim() == 4:
+                support_shot_idx = min(shot_idx, int(query_evidence_tokens.shape[2]) - 1)
+                query_evidence = query_evidence_tokens[query_idx, true_class, support_shot_idx].flatten()
+            else:
+                query_evidence = query_evidence_tokens[query_idx].flatten()
+            if support_evidence_tokens.dim() == 4:
+                support_shot_idx = min(shot_idx, int(support_evidence_tokens.shape[2]) - 1)
+                support_evidence = support_evidence_tokens[query_idx, true_class, support_shot_idx].flatten()
+            else:
+                support_shot_idx = min(shot_idx, int(support_evidence_tokens.shape[1]) - 1)
+                support_evidence = support_evidence_tokens[true_class, support_shot_idx].flatten()
+            if query_evidence.numel() == query_mass.numel():
+                query_bg = query_evidence < 0.5
+                query_bg_mass_ratio = float(
+                    query_mass[query_bg].sum().item() / max(float(query_mass.sum().item()), 1e-8)
+                )
+                query_evidence_heat = _token_values_to_heatmap(query_evidence, image_hw)
+            if support_evidence.numel() == support_mass.numel():
+                support_bg = support_evidence < 0.5
+                support_bg_mass_ratio = float(
+                    support_mass[support_bg].sum().item() / max(float(support_mass.sum().item()), 1e-8)
+                )
+                support_evidence_heat = _token_values_to_heatmap(support_evidence, support_hw)
+            bg_parts = [
+                value
+                for value in (query_bg_mass_ratio, support_bg_mass_ratio)
+                if value is not None and np.isfinite(value)
+            ]
+            if bg_parts:
+                evidence_bg_mass_ratio = float(np.mean(bg_parts))
+        sink_mass = _noise_sink_value(
+            outputs,
+            "ecot_noise_sink_query_mass",
+            query_idx=query_idx,
+            class_idx=true_class,
+            shot_idx=shot_idx,
+        ) + _noise_sink_value(
+            outputs,
+            "ecot_noise_sink_support_mass",
+            query_idx=query_idx,
+            class_idx=true_class,
+            shot_idx=shot_idx,
+        )
 
         rows.append(
             {
@@ -602,6 +725,10 @@ def export_uot_evidence_figure(
                 "expected_mass": expected_mass,
                 "transported_mass": transported_mass,
                 "unmatched_fraction": unmatched_fraction,
+                "evidence_background_mass_ratio": evidence_bg_mass_ratio,
+                "evidence_query_background_mass_ratio": query_bg_mass_ratio,
+                "evidence_support_background_mass_ratio": support_bg_mass_ratio,
+                "noise_sink_mass": sink_mass,
                 "save_path": save_path,
             }
         )
@@ -632,6 +759,14 @@ def export_uot_evidence_figure(
             title="(b) Balanced OT reference",
             subtitle="Full token marginals; background still participates",
         )
+        if has_evidence and evidence_bg_mass_ratio is not None:
+            uot_subtitle = (
+                f"evidence-gated mass={transported_mass:.3f}, bg-mass={evidence_bg_mass_ratio:.1%}, "
+                f"sink={sink_mass:.3f}"
+            )
+        else:
+            uot_subtitle = f"mass={transported_mass:.3f}, unmatched={unmatched_fraction:.1%}, shot={shot_idx + 1}"
+
         _plot_transport_pair(
             ax_uot,
             query_np,
@@ -639,7 +774,9 @@ def export_uot_evidence_figure(
             query_heat,
             support_heat,
             title=f"(c) {method_title}",
-            subtitle=f"mass={transported_mass:.3f}, unmatched={unmatched_fraction:.1%}, shot={shot_idx + 1}",
+            subtitle=uot_subtitle,
+            query_outline=query_evidence_heat,
+            support_outline=support_evidence_heat,
         )
 
         class_positions = np.arange(len(score_np))

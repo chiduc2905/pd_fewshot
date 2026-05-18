@@ -2526,6 +2526,13 @@ def build_model_from_args(args):
             ecot_egsm_rho_delta_max=float(getattr(args, "hrot_ecot_egsm_rho_delta_max", 0.15)),
             ecot_egsm_rho_grad_clip=float(getattr(args, "hrot_ecot_egsm_rho_grad_clip", 1.0)),
             ecot_egsm_rho_reg_lambda=float(getattr(args, "hrot_ecot_egsm_rho_reg_lambda", 0.01)),
+            ecot_enable_ccem_marginal=_bool_flag(
+                getattr(args, "hrot_ecot_enable_ccem_marginal", "false"),
+                default=False,
+            ),
+            ecot_ccem_uniform_mix=float(getattr(args, "hrot_ecot_ccem_uniform_mix", 0.05)),
+            ecot_ccem_tau_q=float(getattr(args, "hrot_ecot_ccem_tau_q", 0.25)),
+            ecot_ccem_tau_s=float(getattr(args, "hrot_ecot_ccem_tau_s", 0.25)),
             ecot_transport_mode=ecot_transport_mode,
             ecot_enable_noise_sink=_bool_flag(
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
