@@ -403,11 +403,12 @@ python run_all_experiments.py \
 DM-UOT incremental flag:
 
 ```text
---ours_final_dmuot_ablation {off,exp0_g_episode_mean_dist,exp0_g_token_norm_pre_l2,exp1_lambda_cost_*,exp2_tau_marg_*}
+--ours_final_dmuot_ablation {off,exp0_g_episode_mean_dist,exp0_g_token_norm_pre_l2,exp1_lambda_cost_*,exp2_tau_marg_*,exp5_tau_marg_*_shot_*}
 Default: off, so Ours-Final keeps the current transport and score path unchanged.
 exp0 values compute and log token_g_query/support only.
 exp1 values enable cost modulation with the encoded lambda_cost.
 exp2 values enable discriminative token marginals with the encoded tau_marg.
+exp5 values blend discriminative marginals back toward uniform as shot count grows.
 ```
 
 Minimum evidence needed for a credible claim:
@@ -479,6 +480,8 @@ transport_plan_modulated
 marginal_query
 marginal_support
 marginal_l1_drift
+dmuot_shot_strength
+lambda_cost_effective
 ```
 
 Good diagnostic signs:

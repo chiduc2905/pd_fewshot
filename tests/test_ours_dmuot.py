@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -29,9 +30,9 @@ def _tiny_ours_final(**overrides) -> OursM2:
     return OursM2(**kwargs)
 
 
-def _episode():
+def _episode(shot=1):
     query = torch.randn(1, 2, 3, 64, 64)
-    support = torch.randn(1, 2, 1, 3, 64, 64)
+    support = torch.randn(1, 2, shot, 3, 64, 64)
     return query, support
 
 
@@ -122,6 +123,18 @@ def test_dmuot_factory_flags_are_ours_final_only():
     assert ours_final.token_g_kind == "episode_mean_dist"
     assert ours_final.lambda_cost == 0.5
     assert ours_final.marginal_kind == "uniform"
+    assert ours_final.dmuot_shot_strength == "none"
+    shot_neutral = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            ours_final_dmuot_ablation="exp5_tau_marg_2_shot_sqrt",
+            **{key: value for key, value in common.items() if key != "ours_final_dmuot_ablation"},
+        )
+    )
+    assert shot_neutral.marginal_kind == "discriminative"
+    assert shot_neutral.tau_marg == 2.0
+    assert shot_neutral.dmuot_shot_strength == "inverse_sqrt"
     with pytest.raises(ValueError, match="--ours_final_dmuot_ablation is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
@@ -160,3 +173,154 @@ def test_discriminative_marginals_log_shapes_and_mass_budget():
         rtol=1e-5,
     )
     assert torch.isfinite(outputs["marginal_l1_drift"])
+
+
+def test_shot_neutralized_marginals_blend_toward_uniform_for_5shot():
+    torch.manual_seed(514)
+    baseline = _tiny_ours_final(
+        token_g_kind="episode_mean_dist",
+        marginal_kind="discriminative",
+        tau_marg=2.0,
+    )
+    neutralized = _tiny_ours_final(
+        token_g_kind="episode_mean_dist",
+        marginal_kind="discriminative",
+        tau_marg=2.0,
+        dmuot_shot_strength="inverse_sqrt",
+    )
+    neutralized.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    neutralized.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        baseline_outputs = baseline(query, support, return_aux=True)
+        neutral_outputs = neutralized(query, support, return_aux=True)
+
+    assert neutral_outputs["dmuot_shot_strength"].item() == pytest.approx(1.0 / math.sqrt(5.0))
+    uniform_query = torch.full_like(
+        baseline_outputs["marginal_query"],
+        0.8 / float(baseline_outputs["marginal_query"].shape[-1]),
+    )
+    uniform_support = torch.full_like(
+        baseline_outputs["marginal_support"],
+        0.8 / float(baseline_outputs["marginal_support"].shape[-1]),
+    )
+    baseline_query_l1 = (baseline_outputs["marginal_query"] - uniform_query).abs().sum(dim=-1).mean()
+    neutral_query_l1 = (neutral_outputs["marginal_query"] - uniform_query).abs().sum(dim=-1).mean()
+    baseline_support_l1 = (baseline_outputs["marginal_support"] - uniform_support).abs().sum(dim=-1).mean()
+    neutral_support_l1 = (neutral_outputs["marginal_support"] - uniform_support).abs().sum(dim=-1).mean()
+
+    assert neutral_query_l1 <= baseline_query_l1 + 1e-6
+    assert neutral_support_l1 <= baseline_support_l1 + 1e-6
+
+
+def test_per_shot_threshold_produces_varying_thresholds():
+    torch.manual_seed(520)
+    model = _tiny_ours_final(ecot_m2_per_shot_threshold=True, ecot_m2_pst_hidden=16)
+    model.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert "logits" in outputs
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+
+
+def test_per_shot_threshold_gradient_flows():
+    torch.manual_seed(521)
+    model = _tiny_ours_final(ecot_m2_per_shot_threshold=True, ecot_m2_pst_hidden=16)
+    model.train()
+    query, support = _episode(shot=5)
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    scorer = model.ecot_m2_pst_scorer
+    assert scorer is not None
+    for param in scorer.parameters():
+        assert param.grad is not None, "PST scorer param has no gradient"
+        assert torch.isfinite(param.grad).all(), "PST scorer gradient is not finite"
+
+
+def test_per_shot_threshold_disabled_matches_baseline():
+    torch.manual_seed(522)
+    baseline = _tiny_ours_final()
+    pst_off = _tiny_ours_final(ecot_m2_per_shot_threshold=False)
+    pst_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    pst_off.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = pst_off(query, support)
+
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_learned_attention_token_g_produces_nonuniform_marginals():
+    torch.manual_seed(530)
+    model = _tiny_ours_final(
+        token_g_kind="learned_attention",
+        marginal_kind="discriminative",
+        tau_marg=1.0,
+    )
+    model.eval()
+    query, support = _episode(shot=1)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert "marginal_query" in outputs
+    assert "marginal_support" in outputs
+    mq = outputs["marginal_query"]
+    ms = outputs["marginal_support"]
+    num_tokens = mq.shape[-1]
+    uniform_val = 0.8 / float(num_tokens)
+    assert not torch.allclose(mq, torch.full_like(mq, uniform_val), atol=1e-4)
+    assert torch.allclose(mq.sum(dim=-1), torch.full(mq.shape[:-1], 0.8), atol=1e-5)
+
+
+def test_learned_attention_gradient_flows_to_query_vector():
+    torch.manual_seed(531)
+    model = _tiny_ours_final(
+        token_g_kind="learned_attention",
+        marginal_kind="discriminative",
+        tau_marg=1.0,
+    )
+    model.train()
+    query, support = _episode(shot=1)
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.token_attention_query is not None
+    assert model.token_attention_query.grad is not None
+    assert torch.isfinite(model.token_attention_query.grad).all()
+
+
+def test_pst_and_dm_combined_runs():
+    torch.manual_seed(540)
+    model = _tiny_ours_final(
+        ecot_m2_per_shot_threshold=True,
+        ecot_m2_pst_hidden=16,
+        token_g_kind="learned_attention",
+        marginal_kind="discriminative",
+        tau_marg=1.0,
+        dmuot_shot_strength="inverse_sqrt",
+    )
+    model.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert "marginal_query" in outputs
+    assert "dmuot_shot_strength" in outputs

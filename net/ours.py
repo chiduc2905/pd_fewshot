@@ -27,8 +27,9 @@ from net.jecot_m2 import JECOTM2
 
 
 OURS_ABLATIONS = frozenset({"full", "full_ot", "no_egsm", "gap"})
-TOKEN_G_KINDS = frozenset({"none", "episode_mean_dist", "token_norm_pre_l2"})
+TOKEN_G_KINDS = frozenset({"none", "episode_mean_dist", "token_norm_pre_l2", "learned_attention"})
 DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
+DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
 
 
 def normalize_ours_ablation(value: str | None) -> str:
@@ -133,6 +134,9 @@ def _normalize_token_g_kind(value: str | None) -> str:
         "prenorm": "token_norm_pre_l2",
         "pre_l2": "token_norm_pre_l2",
         "token_norm": "token_norm_pre_l2",
+        "learned": "learned_attention",
+        "attention": "learned_attention",
+        "learned_attn": "learned_attention",
     }
     name = aliases.get(name, name)
     if name not in TOKEN_G_KINDS:
@@ -152,6 +156,26 @@ def _normalize_dmuot_marginal_kind(value: str | None) -> str:
     if name not in DMUOT_MARGINAL_KINDS:
         raise ValueError(
             f"Unsupported marginal_kind: {value}. Expected one of {sorted(DMUOT_MARGINAL_KINDS)}"
+        )
+    return name
+
+
+def _normalize_dmuot_shot_strength(value: str | None) -> str:
+    name = "none" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "off": "none",
+        "false": "none",
+        "sqrt": "inverse_sqrt",
+        "inv_sqrt": "inverse_sqrt",
+        "shot_sqrt": "inverse_sqrt",
+        "inv": "inverse",
+        "shot_inverse": "inverse",
+    }
+    name = aliases.get(name, name)
+    if name not in DMUOT_SHOT_STRENGTH_KINDS:
+        raise ValueError(
+            f"Unsupported dmuot_shot_strength: {value}. "
+            f"Expected one of {sorted(DMUOT_SHOT_STRENGTH_KINDS)}"
         )
     return name
 
@@ -189,6 +213,7 @@ class OursM2(JECOTM2):
         lambda_cost: float = 0.0,
         marginal_kind: str = "uniform",
         tau_marg: float = 1.0,
+        dmuot_shot_strength: str = "none",
         **kwargs,
     ) -> None:
         if not 0.0 <= float(dm_alpha) <= 1.0:
@@ -199,6 +224,7 @@ class OursM2(JECOTM2):
         self.lambda_cost = float(lambda_cost)
         self.marginal_kind = _normalize_dmuot_marginal_kind(marginal_kind)
         self.tau_marg = float(tau_marg)
+        self.dmuot_shot_strength = _normalize_dmuot_shot_strength(dmuot_shot_strength)
         if self.lambda_cost < 0.0:
             raise ValueError("lambda_cost must be non-negative")
         if self.lambda_cost > 0.0 and self.token_g_kind == "none":
@@ -222,6 +248,11 @@ class OursM2(JECOTM2):
             rho=float(kwargs["ecot_base_rho"]),
             transport_mode=kwargs["ecot_transport_mode"],
             **kwargs,
+        )
+        self.token_attention_query = (
+            torch.nn.Parameter(torch.randn(self.token_dim) * 0.01)
+            if self.token_g_kind == "learned_attention"
+            else None
         )
         self.register_buffer("dm_global_template", torch.empty(0), persistent=False)
         self.register_buffer("dm_template_count", torch.tensor(0.0), persistent=False)
@@ -338,6 +369,22 @@ class OursM2(JECOTM2):
             self._minmax_normalize_per_image(support_norm, float(self.eps)),
         )
 
+    def _learned_attention_token_g(
+        self,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.token_attention_query is None:
+            raise RuntimeError("token_attention_query not initialized for learned_attention")
+        v = self.token_attention_query.to(device=query_tokens.device, dtype=query_tokens.dtype)
+        d_sqrt = math.sqrt(float(v.shape[-1]))
+        query_scores = (query_tokens @ v) / d_sqrt
+        support_scores = (support_tokens @ v) / d_sqrt
+        return (
+            self._minmax_normalize_per_image(query_scores, float(self.eps)),
+            self._minmax_normalize_per_image(support_scores, float(self.eps)),
+        )
+
     def _compute_token_g(
         self,
         query_tokens: torch.Tensor,
@@ -350,6 +397,8 @@ class OursM2(JECOTM2):
             )
         if self.token_g_kind == "token_norm_pre_l2":
             return self._prenorm_token_g(query_tokens, support_tokens)
+        if self.token_g_kind == "learned_attention":
+            return self._learned_attention_token_g(query_tokens, support_tokens)
         raise RuntimeError("token_g_kind='none' does not compute token-g diagnostics")
 
     def _dmuot_marginal_probs(
@@ -363,6 +412,27 @@ class OursM2(JECOTM2):
             return query_prob, support_prob
         tau = max(float(self.tau_marg), float(self.eps))
         return torch.softmax(token_g_query / tau, dim=-1), torch.softmax(token_g_support / tau, dim=-1)
+
+    def _dmuot_shot_strength_value(self, shot_num: int, reference: torch.Tensor) -> torch.Tensor:
+        if self.dmuot_shot_strength == "inverse_sqrt":
+            value = 1.0 / math.sqrt(float(max(1, shot_num)))
+        elif self.dmuot_shot_strength == "inverse":
+            value = 1.0 / float(max(1, shot_num))
+        else:
+            value = 1.0
+        return reference.new_tensor(value)
+
+    def _blend_dmuot_prob_with_uniform(
+        self,
+        prob: torch.Tensor,
+        strength: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.dmuot_shot_strength == "none":
+            return prob
+        uniform = torch.full_like(prob, 1.0 / float(prob.shape[-1]))
+        return strength.to(device=prob.device, dtype=prob.dtype) * prob + (
+            1.0 - strength.to(device=prob.device, dtype=prob.dtype)
+        ) * uniform
 
     def _forward_ecot_budget_bank(
         self,
@@ -387,9 +457,13 @@ class OursM2(JECOTM2):
             token_g_query, token_g_support = self._compute_token_g(query_tokens, support_tokens)
             dmuot_payload["token_g_query"] = token_g_query
             dmuot_payload["token_g_support"] = token_g_support
+            dmuot_strength = self._dmuot_shot_strength_value(shot_num, flat_cost)
+            lambda_cost_effective = dmuot_strength * float(self.lambda_cost)
+            dmuot_payload["dmuot_shot_strength"] = dmuot_strength.detach()
+            dmuot_payload["lambda_cost_effective"] = lambda_cost_effective.detach()
 
             flat_support_g = token_g_support.reshape(way_num * shot_num, token_g_support.shape[-1])
-            cost_modulator = 1.0 + float(self.lambda_cost) * (
+            cost_modulator = 1.0 + lambda_cost_effective * (
                 1.0 - token_g_query[:, None, :, None] * flat_support_g[None, :, None, :]
             )
             cost_modulator = cost_modulator.to(device=flat_cost.device, dtype=flat_cost.dtype)
@@ -417,6 +491,8 @@ class OursM2(JECOTM2):
                         "marginal_kind='discriminative' cannot be combined with explicit query/support weights"
                     )
                 query_prob, support_prob = self._dmuot_marginal_probs(token_g_query, token_g_support)
+                query_prob = self._blend_dmuot_prob_with_uniform(query_prob, dmuot_strength)
+                support_prob = self._blend_dmuot_prob_with_uniform(support_prob, dmuot_strength)
                 query_weight = query_prob
                 support_weight = support_prob
                 dmuot_payload["marginal_query"] = query_prob * base_rho
@@ -678,6 +754,8 @@ class OursM2(JECOTM2):
             "marginal_query_l1_drift",
             "marginal_support_l1_drift",
             "marginal_l1_drift",
+            "dmuot_shot_strength",
+            "lambda_cost_effective",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

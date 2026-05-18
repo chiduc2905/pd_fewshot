@@ -1125,6 +1125,22 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--hrot_ecot_m2_mass_score_mode",
+        type=str,
+        default="standard",
+        choices=["standard", "shot_consensus"],
+        help=(
+            "J_ECOT_M2 threshold-mass score only: standard uses T*shot_mass-cost; "
+            "shot_consensus blends each shot mass with its class mean mass before scoring."
+        ),
+    )
+    parser.add_argument(
+        "--hrot_ecot_m2_consensus_mass_alpha",
+        type=float,
+        default=1.0,
+        help="J_ECOT_M2 shot_consensus mass score: alpha in [0,1] for blending shot mass toward class mean mass.",
+    )
+    parser.add_argument(
         "--hrot_ecot_m2_use_swts",
         type=str,
         default="false",
@@ -2726,7 +2742,12 @@ def get_model(args):
             elif ablate_mass:
                 score_text = "cost-only score(-C)"
             else:
-                score_text = "threshold-mass score(T*M-C)"
+                mass_score_mode = str(getattr(args, "hrot_ecot_m2_mass_score_mode", "standard"))
+                if mass_score_mode == "shot_consensus":
+                    alpha = getattr(args, "hrot_ecot_m2_consensus_mass_alpha", 1.0)
+                    score_text = f"threshold-mass consensus score(T*M_cons-C, alpha={alpha})"
+                else:
+                    score_text = "threshold-mass score(T*M-C)"
             default_text = (
                 "local_descriptors+UOT(rho=0.8)+EGSM_off+T*M-C"
                 if args.model in OURS_FINAL_MODEL_NAMES

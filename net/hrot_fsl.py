@@ -480,10 +480,14 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_tau_shot_min: float = 0.5,
         ecot_tau_shot_max: float = 2.0,
         ecot_enable_threshold_offset: bool = False,
+        ecot_m2_per_shot_threshold: bool = False,
+        ecot_m2_pst_hidden: int = 32,
         ecot_m2_ablate_threshold_mass: bool = True,
         ecot_m2_cost_per_mass_score: bool = False,
         ecot_m2_cost_per_mass_alpha: float = 1.0,
         ecot_m2_cost_per_mass_detach_mass: bool = True,
+        ecot_m2_mass_score_mode: str = "standard",
+        ecot_m2_consensus_mass_alpha: float = 1.0,
         ecot_m2_use_swts: bool = False,
         ecot_m2_swts_temp: float = 1.0,
         ecot_m2_use_aqm: bool = False,
@@ -947,6 +951,8 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_tau_shot_min = float(ecot_tau_shot_min)
         self.ecot_tau_shot_max = float(ecot_tau_shot_max)
         self.ecot_enable_threshold_offset = bool(ecot_enable_threshold_offset)
+        self.ecot_m2_per_shot_threshold = bool(ecot_m2_per_shot_threshold) and variant == "J_ECOT_M2"
+        self.ecot_m2_pst_hidden = int(ecot_m2_pst_hidden)
         self.ecot_m2_ablate_threshold_mass = bool(ecot_m2_ablate_threshold_mass) and variant == "J_ECOT_M2"
         self.ecot_m2_cost_per_mass_score = bool(ecot_m2_cost_per_mass_score) and variant == "J_ECOT_M2"
         self.ecot_m2_cost_per_mass_alpha = float(ecot_m2_cost_per_mass_alpha)
@@ -959,6 +965,20 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_m2_cost_per_mass_detach_mass = (
             bool(ecot_m2_cost_per_mass_detach_mass) and variant == "J_ECOT_M2"
         )
+        mass_score_mode = str(ecot_m2_mass_score_mode).strip().lower().replace("-", "_")
+        if mass_score_mode not in {"standard", "shot_consensus"}:
+            raise ValueError("ecot_m2_mass_score_mode must be 'standard' or 'shot_consensus'")
+        self.ecot_m2_mass_score_mode = mass_score_mode if variant == "J_ECOT_M2" else "standard"
+        self.ecot_m2_consensus_mass_alpha = float(ecot_m2_consensus_mass_alpha)
+        if not 0.0 <= self.ecot_m2_consensus_mass_alpha <= 1.0:
+            raise ValueError("ecot_m2_consensus_mass_alpha must be in [0, 1]")
+        if (
+            self.ecot_m2_mass_score_mode != "standard"
+            and (self.ecot_m2_ablate_threshold_mass or self.ecot_m2_cost_per_mass_score)
+        ):
+            raise ValueError(
+                "ecot_m2_mass_score_mode is only supported for active threshold-mass J_ECOT_M2 scoring"
+            )
         if bool(ecot_m2_use_swts) and variant == "J_ECOT_M2":
             if float(ecot_m2_swts_temp) <= 0.0:
                 raise ValueError("ecot_m2_swts_temp must be positive when ecot_m2_use_swts is enabled.")
@@ -1145,6 +1165,19 @@ class HROTFSL(BaseConv64FewShotModel):
             if self.uses_ecot
             else None
         )
+        self.ecot_m2_pst_scorer = (
+            nn.Sequential(
+                nn.Linear(3, self.ecot_m2_pst_hidden),
+                nn.GELU(),
+                nn.Linear(self.ecot_m2_pst_hidden, 1),
+            )
+            if self.ecot_m2_per_shot_threshold
+            else None
+        )
+        if self.ecot_m2_pst_scorer is not None:
+            with torch.no_grad():
+                self.ecot_m2_pst_scorer[-1].weight.zero_()
+                self.ecot_m2_pst_scorer[-1].bias.zero_()
         self.crs_marginal = (
             CrossReferencedSelectiveMarginal(
                 embed_dim=token_dim,
@@ -3321,6 +3354,13 @@ class HROTFSL(BaseConv64FewShotModel):
                 self.eps,
             )
 
+        mass_for_score_bank = shot_mass_bank
+        mass_consensus_bank: torch.Tensor | None = None
+        if self.ecot_m2_mass_score_mode == "shot_consensus":
+            mass_consensus_bank = shot_mass_bank.mean(dim=2, keepdim=True)
+            alpha_mass = flat_cost.new_tensor(float(self.ecot_m2_consensus_mass_alpha))
+            mass_for_score_bank = (1.0 - alpha_mass) * shot_mass_bank + alpha_mass * mass_consensus_bank
+
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
                 mass_denom = (
@@ -3339,10 +3379,25 @@ class HROTFSL(BaseConv64FewShotModel):
                     if self.ecot_m2_ablate_threshold_mass
                     else active_threshold
                 )
+                if self.ecot_m2_pst_scorer is not None and not self.ecot_m2_ablate_threshold_mass:
+                    pst_features = torch.stack(
+                        [
+                            shot_cost_bank.detach(),
+                            shot_mass_bank.detach(),
+                            shot_cost_bank.detach() / shot_mass_bank.detach().clamp_min(self.eps),
+                        ],
+                        dim=-1,
+                    )
+                    network_dtype = self.ecot_m2_pst_scorer[0].weight.dtype
+                    raw_delta = self.ecot_m2_pst_scorer(
+                        pst_features.to(dtype=network_dtype)
+                    ).squeeze(-1)
+                    raw_delta = raw_delta.to(device=thr.device, dtype=thr.dtype)
+                    thr = (thr * torch.exp(0.25 * torch.tanh(raw_delta))).clamp_min(self.eps)
                 if self.ecot_m2_use_swts:
                     score_terms = swts_pre_score
                 else:
-                    score_terms = thr * shot_mass_bank - shot_cost_bank
+                    score_terms = thr * mass_for_score_bank - shot_cost_bank
             if sink_penalty_bank is not None:
                 score_terms = score_terms - flat_cost.new_tensor(self.ecot_noise_sink_score_penalty) * sink_penalty_bank
             return self.score_scale * score_terms
@@ -3377,6 +3432,7 @@ class HROTFSL(BaseConv64FewShotModel):
         lambda_ecot = self.ecot_lambda.to(device=flat_cost.device, dtype=flat_cost.dtype)
         shot_cost_diag = (pi_view * shot_cost_bank).sum(dim=-1)
         shot_mass_diag = (pi_view * shot_mass_bank).sum(dim=-1)
+        shot_mass_for_score_diag = (pi_view * mass_for_score_bank).sum(dim=-1)
         noise_query_mass_diag = None if noise_query_mass_bank is None else (pi_view * noise_query_mass_bank).sum(dim=-1)
         noise_support_mass_diag = (
             None if noise_support_mass_bank is None else (pi_view * noise_support_mass_bank).sum(dim=-1)
@@ -3473,6 +3529,17 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_policy_entropy_loss": -self.ecot_policy_entropy_reg * policy_entropy,
             "ecot_aux_loss": ecot_aux_loss,
         }
+        if self.ecot_m2_mass_score_mode == "shot_consensus":
+            payload.update(
+                {
+                    "shot_mass_for_score": shot_mass_for_score_diag,
+                    "ecot_m2_mass_for_score_bank": mass_for_score_bank,
+                    "ecot_m2_mass_consensus_bank": mass_consensus_bank.expand_as(shot_mass_bank),
+                    "ecot_m2_consensus_mass_alpha": flat_cost.new_tensor(
+                        float(self.ecot_m2_consensus_mass_alpha)
+                    ),
+                }
+            )
         if swts_w_entropy_mean is not None:
             payload["mean_ecot_m2_swts_w_entropy"] = swts_w_entropy_mean.detach()
         if mean_aqm_a_entropy is not None:
@@ -5138,6 +5205,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_class_mix_score",
             "ecot_shot_transport_cost_bank",
             "ecot_shot_transported_mass_bank",
+            "ecot_m2_mass_for_score_bank",
+            "ecot_m2_mass_consensus_bank",
             "ecot_noise_sink_query_mass_bank",
             "ecot_noise_sink_support_mass_bank",
             "ecot_noise_sink_self_mass_bank",
@@ -5164,6 +5233,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_lambda_k",
             "ecot_tau_k",
             "mean_ecot_m2_swts_w_entropy",
+            "ecot_m2_consensus_mass_alpha",
             "mean_aqm_a_entropy",
         ):
             if key in batch_outputs[0]:
@@ -5278,6 +5348,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "adaptive_transport_cost_threshold",
             "shot_logits",
             "shot_pool_weights",
+            "shot_mass_for_score",
             "q_enhanced_logits",
             "h_anchor_logits",
             "h_anchor_shot_logits",

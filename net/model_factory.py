@@ -114,6 +114,35 @@ for _tau_marg in (0.25, 0.5, 1.0, 2.0, float("inf")):
         "marginal_kind": "discriminative",
         "tau_marg": _tau_marg,
     }
+for _tau_marg in (1.0, 2.0):
+    _suffix = f"{_tau_marg:.6g}".replace(".", "p")
+    for _strength_name, _strength_value in (
+        ("shot_sqrt", "inverse_sqrt"),
+        ("shot_inverse", "inverse"),
+    ):
+        OURS_FINAL_DMUOT_ABLATION_CONFIGS[f"exp5_tau_marg_{_suffix}_{_strength_name}"] = {
+            "token_g_kind": "episode_mean_dist",
+            "lambda_cost": 0.0,
+            "marginal_kind": "discriminative",
+            "tau_marg": _tau_marg,
+            "dmuot_shot_strength": _strength_value,
+        }
+
+for _tau_marg_la in (0.5, 1.0, 2.0):
+    _suffix_la = f"{_tau_marg_la:.6g}".replace(".", "p")
+    OURS_FINAL_DMUOT_ABLATION_CONFIGS[f"exp6_learned_attn_tau_{_suffix_la}"] = {
+        "token_g_kind": "learned_attention",
+        "lambda_cost": 0.0,
+        "marginal_kind": "discriminative",
+        "tau_marg": _tau_marg_la,
+    }
+    OURS_FINAL_DMUOT_ABLATION_CONFIGS[f"exp6_learned_attn_tau_{_suffix_la}_shot_sqrt"] = {
+        "token_g_kind": "learned_attention",
+        "lambda_cost": 0.0,
+        "marginal_kind": "discriminative",
+        "tau_marg": _tau_marg_la,
+        "dmuot_shot_strength": "inverse_sqrt",
+    }
 
 
 def resolve_hrot_ecot_enable_egsm(args) -> str:
@@ -169,7 +198,9 @@ def resolve_ours_final_dmuot_config(args) -> dict:
     ablation = normalize_ours_final_dmuot_ablation(
         getattr(args, "ours_final_dmuot_ablation", "off")
     )
-    return dict(OURS_FINAL_DMUOT_ABLATION_CONFIGS[ablation])
+    config = dict(OURS_FINAL_DMUOT_ABLATION_CONFIGS[ablation])
+    config.setdefault("dmuot_shot_strength", "none")
+    return config
 
 
 def validate_dmuot_scope(args) -> None:
@@ -2518,6 +2549,11 @@ def build_model_from_args(args):
                 getattr(args, "hrot_ecot_enable_threshold_offset", "false"),
                 default=False,
             ),
+            ecot_m2_per_shot_threshold=_bool_flag(
+                getattr(args, "hrot_ecot_m2_per_shot_threshold", "false"),
+                default=False,
+            ),
+            ecot_m2_pst_hidden=int(getattr(args, "hrot_ecot_m2_pst_hidden", 32)),
             ecot_m2_ablate_threshold_mass=_bool_flag(
                 getattr(args, "hrot_ecot_m2_ablate_threshold_mass", default_m2_ablate_threshold_mass),
                 default=(not is_ours_final_model and is_m2_like_model),
@@ -2531,6 +2567,10 @@ def build_model_from_args(args):
                 (False if getattr(args, "model", None) == CANONICAL_M2_MODEL_NAME else True)
                 if getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", None) is None
                 else _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass"), default=False)
+            ),
+            ecot_m2_mass_score_mode=str(getattr(args, "hrot_ecot_m2_mass_score_mode", "standard")),
+            ecot_m2_consensus_mass_alpha=float(
+                getattr(args, "hrot_ecot_m2_consensus_mass_alpha", 1.0)
             ),
             ecot_m2_use_swts=_bool_flag(
                 getattr(args, "hrot_ecot_m2_use_swts", "false"),
@@ -2795,6 +2835,11 @@ def build_model_from_args(args):
                 getattr(args, "hrot_ecot_enable_threshold_offset", "false"),
                 default=False,
             ),
+            ecot_m2_per_shot_threshold=_bool_flag(
+                getattr(args, "hrot_ecot_m2_per_shot_threshold", "false"),
+                default=False,
+            ),
+            ecot_m2_pst_hidden=int(getattr(args, "hrot_ecot_m2_pst_hidden", 32)),
             ecot_m2_ablate_threshold_mass=_bool_flag(
                 getattr(args, "hrot_ecot_m2_ablate_threshold_mass", "false"),
                 default=False,
@@ -2808,6 +2853,10 @@ def build_model_from_args(args):
                 True
                 if getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass", None) is None
                 else _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_detach_mass"), default=True)
+            ),
+            ecot_m2_mass_score_mode=str(getattr(args, "hrot_ecot_m2_mass_score_mode", "standard")),
+            ecot_m2_consensus_mass_alpha=float(
+                getattr(args, "hrot_ecot_m2_consensus_mass_alpha", 1.0)
             ),
             ecot_m2_use_swts=_bool_flag(getattr(args, "hrot_ecot_m2_use_swts", "false"), default=False),
             ecot_m2_swts_temp=float(getattr(args, "hrot_ecot_m2_swts_temp", 1.0)),

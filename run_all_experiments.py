@@ -210,7 +210,7 @@ def get_args():
         "--ours_final_ablation_suite",
         type=str,
         default="none",
-        choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off", "dmuot"],
+        choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off", "dmuot", "mass_on", "pst_dm"],
         help=(
             "Expand Ours-Final runs with tagged variants. "
             "contrib=full, ccem_uot, full_ot, gap, mass_off; "
@@ -218,7 +218,8 @@ def get_args():
             "--ours_final_rho_values is set; "
             "complete=contrib over all modes/shots plus restricted rho_grid; "
             "tau_shot_off=Ours-Final with ECOT tau-shot pooling disabled; "
-            "dmuot=token-g, cost modulation, and discriminative marginal sweeps."
+            "dmuot=token-g, cost modulation, and discriminative marginal sweeps; "
+            "mass_on=shot-consensus threshold-mass score variants."
         ),
     )
     parser.add_argument(
@@ -894,6 +895,66 @@ def build_ours_final_tau_shot_off_variants():
     ]
 
 
+def build_ours_final_mass_on_variants():
+    base = _ours_final_base_args()
+    variants = []
+    for alpha, tag_value in (("1.0", "1"), ("0.75", "0p75"), ("0.5", "0p5")):
+        variants.append(
+            {
+                "tag": f"ours_final_mass_consensus_a{tag_value}",
+                "checkpoint_tag": f"mass_consensus_a{tag_value}",
+                "label": (
+                    "Ours-Final mass-on: shot-consensus threshold-mass score "
+                    f"with alpha={alpha}"
+                ),
+                "extra_args": base
+                + [
+                    "--hrot_ecot_m2_mass_score_mode",
+                    "shot_consensus",
+                    "--hrot_ecot_m2_consensus_mass_alpha",
+                    alpha,
+                ],
+            }
+        )
+    return variants
+
+
+def build_ours_final_pst_dm_variants():
+    """Per-Shot Threshold (PST) and Discriminative Marginals (DM) ablation variants."""
+    base = _ours_final_base_args()
+    return [
+        {
+            "tag": "ours_final_pst",
+            "checkpoint_tag": "pst_only",
+            "label": "Ours-Final + per-shot adaptive threshold",
+            "extra_args": base + ["--hrot_ecot_m2_per_shot_threshold", "true"],
+            "mode1_noise": True,
+        },
+        {
+            "tag": "ours_final_dm",
+            "checkpoint_tag": "dm_only",
+            "label": "Ours-Final + discriminative learned-attention marginals",
+            "extra_args": base + [
+                "--ours_final_dmuot_ablation",
+                "exp6_learned_attn_tau_1_shot_sqrt",
+            ],
+            "mode1_noise": True,
+        },
+        {
+            "tag": "ours_final_pst_dm",
+            "checkpoint_tag": "pst_dm",
+            "label": "Ours-Final + per-shot threshold + discriminative marginals",
+            "extra_args": base + [
+                "--hrot_ecot_m2_per_shot_threshold",
+                "true",
+                "--ours_final_dmuot_ablation",
+                "exp6_learned_attn_tau_1_shot_sqrt",
+            ],
+            "mode1_noise": True,
+        },
+    ]
+
+
 def build_ours_final_dmuot_variants():
     base = _ours_final_base_args()
     variants = [
@@ -910,6 +971,26 @@ def build_ours_final_dmuot_variants():
             "extra_args": base + ["--ours_final_dmuot_ablation", "exp0_g_token_norm_pre_l2"],
         },
     ]
+    for value, tag_value in (("2.0", "2"), ("1.0", "1")):
+        for strength_tag, strength_label in (
+            ("shot_sqrt", "1/sqrt(shot)"),
+            ("shot_inverse", "1/shot"),
+        ):
+            variants.append(
+                {
+                    "tag": f"ours_final_dmuot_exp5_tau_marg_{tag_value}_{strength_tag}",
+                    "checkpoint_tag": f"dmuot_exp5_tau_marg_{tag_value}_{strength_tag}",
+                    "label": (
+                        "DM-UOT exp5: shot-neutralized discriminative marginals "
+                        f"tau_marg={value}, strength={strength_label}"
+                    ),
+                    "extra_args": base
+                    + [
+                        "--ours_final_dmuot_ablation",
+                        f"exp5_tau_marg_{tag_value}_{strength_tag}",
+                    ],
+                }
+            )
     for value, tag_value in (
         ("0.5", "0p5"),
         ("1.0", "1"),
@@ -1574,6 +1655,14 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_mass_off": "ours_final_mass_off",
         "tau_shot_off": "ours_final_tau_shot_off",
         "ours_final_tau_shot_off": "ours_final_tau_shot_off",
+        "pst": "ours_final_pst",
+        "per_shot_threshold": "ours_final_pst",
+        "ours_final_pst": "ours_final_pst",
+        "dm": "ours_final_dm",
+        "disc_marginal": "ours_final_dm",
+        "ours_final_dm": "ours_final_dm",
+        "pst_dm": "ours_final_pst_dm",
+        "ours_final_pst_dm": "ours_final_pst_dm",
     }
 
     parsed = []
@@ -1810,6 +1899,7 @@ def main():
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
         dmuot_variants = build_ours_final_dmuot_variants()
+        pst_dm_variants = build_ours_final_pst_dm_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -1820,14 +1910,17 @@ def main():
         rho_grid_variants = filter_ours_final_variants(rho_grid_variants, ours_final_variant_filter)
         tau_shot_off_variants = filter_ours_final_variants(tau_shot_off_variants, ours_final_variant_filter)
         dmuot_variants = filter_ours_final_variants(dmuot_variants, ours_final_variant_filter)
+        pst_dm_variants = filter_ours_final_variants(pst_dm_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
             ablation_variants = tau_shot_off_variants
         elif suite_name == "dmuot":
             ablation_variants = dmuot_variants
+        elif suite_name == "pst_dm":
+            ablation_variants = pst_dm_variants
         elif suite_name == "complete":
-            ablation_variants = contrib_variants + rho_grid_variants
+            ablation_variants = contrib_variants + rho_grid_variants + pst_dm_variants
         else:
             ablation_variants = contrib_variants
         if not ablation_variants:
