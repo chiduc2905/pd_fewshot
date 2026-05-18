@@ -210,14 +210,15 @@ def get_args():
         "--ours_final_ablation_suite",
         type=str,
         default="none",
-        choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off"],
+        choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off", "dmuot"],
         help=(
             "Expand Ours-Final runs with tagged variants. "
             "contrib=full, ccem_uot, full_ot, gap, mass_off; "
             "rho_grid=rho 0.6,0.7,0.8,0.9 at 60/5-shot and 240/1-shot unless "
             "--ours_final_rho_values is set; "
             "complete=contrib over all modes/shots plus restricted rho_grid; "
-            "tau_shot_off=Ours-Final with ECOT tau-shot pooling disabled."
+            "tau_shot_off=Ours-Final with ECOT tau-shot pooling disabled; "
+            "dmuot=token-g, cost modulation, and discriminative marginal sweeps."
         ),
     )
     parser.add_argument(
@@ -893,6 +894,53 @@ def build_ours_final_tau_shot_off_variants():
     ]
 
 
+def build_ours_final_dmuot_variants():
+    base = _ours_final_base_args()
+    variants = [
+        {
+            "tag": "ours_final_dmuot_exp0_g_episode_mean_dist",
+            "checkpoint_tag": "dmuot_exp0_g_episode_mean_dist",
+            "label": "DM-UOT exp0: log token g via episode mean distance; no transport change",
+            "extra_args": base + ["--ours_final_dmuot_ablation", "exp0_g_episode_mean_dist"],
+        },
+        {
+            "tag": "ours_final_dmuot_exp0_g_token_norm_pre_l2",
+            "checkpoint_tag": "dmuot_exp0_g_token_norm_pre_l2",
+            "label": "DM-UOT exp0: log token g via projector pre-L2 norm; no transport change",
+            "extra_args": base + ["--ours_final_dmuot_ablation", "exp0_g_token_norm_pre_l2"],
+        },
+    ]
+    for value in ("0.0", "0.5", "1.0", "2.0", "5.0"):
+        tag_value = value.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_dmuot_exp1_lambda_cost_{tag_value}",
+                "checkpoint_tag": f"dmuot_exp1_lambda_cost_{tag_value}",
+                "label": f"DM-UOT exp1: discriminative cost modulation lambda_cost={value}",
+                "extra_args": base
+                + [
+                    "--ours_final_dmuot_ablation",
+                    f"exp1_lambda_cost_{tag_value}",
+                ],
+            }
+        )
+    for value in ("0.25", "0.5", "1.0", "2.0", "inf"):
+        tag_value = value.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_dmuot_exp2_tau_marg_{tag_value}",
+                "checkpoint_tag": f"dmuot_exp2_tau_marg_{tag_value}",
+                "label": f"DM-UOT exp2: discriminative token marginals tau_marg={value}",
+                "extra_args": base
+                + [
+                    "--ours_final_dmuot_ablation",
+                    f"exp2_tau_marg_{tag_value}",
+                ],
+            }
+        )
+    return variants
+
+
 def restricted_ours_final_rho_grid_pairs(samples_list, shots):
     allowed_pairs = {(60, 5), (240, 1)}
     return [
@@ -1525,16 +1573,21 @@ def parse_ours_final_variant_filter(variants_str):
         name = token.strip().lower().replace("-", "_")
         if not name:
             continue
-        if name.startswith("rho_") and not name.startswith("ours_final_rho_"):
+        if name.startswith("dmuot_") and not name.startswith("ours_final_dmuot_"):
+            tag = "ours_final_" + name
+        elif name.startswith("ours_final_dmuot_"):
+            tag = name
+        elif name.startswith("rho_") and not name.startswith("ours_final_rho_"):
             name = "ours_final_" + name
-        if name.startswith("ours_final_rho_"):
+            tag = name.replace(".", "p")
+        elif name.startswith("ours_final_rho_"):
             tag = name.replace(".", "p")
         else:
             tag = aliases.get(name)
         if tag is None:
             raise ValueError(
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
-                "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, rho_<value>, or exact tags."
+                "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, rho_<value>, dmuot_<name>, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)
@@ -1748,13 +1801,17 @@ def main():
         contrib_variants = build_ours_final_ablation_variants()
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
+        dmuot_variants = build_ours_final_dmuot_variants()
         contrib_variants = filter_ours_final_variants(contrib_variants, ours_final_variant_filter)
         rho_grid_variants = filter_ours_final_variants(rho_grid_variants, ours_final_variant_filter)
         tau_shot_off_variants = filter_ours_final_variants(tau_shot_off_variants, ours_final_variant_filter)
+        dmuot_variants = filter_ours_final_variants(dmuot_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
             ablation_variants = tau_shot_off_variants
+        elif suite_name == "dmuot":
+            ablation_variants = dmuot_variants
         elif suite_name == "complete":
             ablation_variants = contrib_variants + rho_grid_variants
         else:
@@ -1838,6 +1895,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in tau_shot_off_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "dmuot":
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in dmuot_variants
                 for samples in samples_list
                 for shot in shots
             )

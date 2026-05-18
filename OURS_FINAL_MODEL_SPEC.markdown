@@ -400,6 +400,16 @@ python run_all_experiments.py \
   --ours_final_ablation_suite complete
 ```
 
+DM-UOT incremental flag:
+
+```text
+--ours_final_dmuot_ablation {off,exp0_g_episode_mean_dist,exp0_g_token_norm_pre_l2,exp1_lambda_cost_*,exp2_tau_marg_*}
+Default: off, so Ours-Final keeps the current transport and score path unchanged.
+exp0 values compute and log token_g_query/support only.
+exp1 values enable cost modulation with the encoded lambda_cost.
+exp2 values enable discriminative token marginals with the encoded tau_marg.
+```
+
 Minimum evidence needed for a credible claim:
 
 ```text
@@ -462,6 +472,13 @@ ecot_shot_transport_cost_bank
 ecot_shot_transported_mass_bank
 ecot_diagnostics
 transport_cost_threshold
+token_g_query
+token_g_support
+cost_modulator
+transport_plan_modulated
+marginal_query
+marginal_support
+marginal_l1_drift
 ```
 
 Good diagnostic signs:

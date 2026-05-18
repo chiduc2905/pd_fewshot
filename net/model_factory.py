@@ -78,6 +78,42 @@ M2_LIKE_MODEL_NAMES = frozenset(
 CANONICAL_M2_MODEL_NAME = "m2"
 M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
 HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES))
+OURS_FINAL_DMUOT_ABLATION_CONFIGS = {
+    "off": {
+        "token_g_kind": "none",
+        "lambda_cost": 0.0,
+        "marginal_kind": "uniform",
+        "tau_marg": 1.0,
+    },
+    "exp0_g_episode_mean_dist": {
+        "token_g_kind": "episode_mean_dist",
+        "lambda_cost": 0.0,
+        "marginal_kind": "uniform",
+        "tau_marg": 1.0,
+    },
+    "exp0_g_token_norm_pre_l2": {
+        "token_g_kind": "token_norm_pre_l2",
+        "lambda_cost": 0.0,
+        "marginal_kind": "uniform",
+        "tau_marg": 1.0,
+    },
+}
+for _lambda_cost in (0.0, 0.5, 1.0, 2.0, 5.0):
+    _suffix = f"{_lambda_cost:.6g}".replace(".", "p")
+    OURS_FINAL_DMUOT_ABLATION_CONFIGS[f"exp1_lambda_cost_{_suffix}"] = {
+        "token_g_kind": "episode_mean_dist",
+        "lambda_cost": _lambda_cost,
+        "marginal_kind": "uniform",
+        "tau_marg": 1.0,
+    }
+for _tau_marg in (0.25, 0.5, 1.0, 2.0, float("inf")):
+    _suffix = "inf" if _tau_marg == float("inf") else f"{_tau_marg:.6g}".replace(".", "p")
+    OURS_FINAL_DMUOT_ABLATION_CONFIGS[f"exp2_tau_marg_{_suffix}"] = {
+        "token_g_kind": "episode_mean_dist",
+        "lambda_cost": 0.0,
+        "marginal_kind": "discriminative",
+        "tau_marg": _tau_marg,
+    }
 
 
 def resolve_hrot_ecot_enable_egsm(args) -> str:
@@ -105,6 +141,43 @@ def resolve_hrot_ecot_enable_egsm(args) -> str:
     if model in OURS_MODEL_NAMES or model in OURS_CPM_MODEL_NAMES:
         return "true"
     return "false"
+
+
+def get_ours_final_dmuot_choices() -> tuple[str, ...]:
+    return tuple(OURS_FINAL_DMUOT_ABLATION_CONFIGS.keys())
+
+
+def normalize_ours_final_dmuot_ablation(value) -> str:
+    name = "off" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "none": "off",
+        "false": "off",
+        "0": "off",
+        "g_episode_mean_dist": "exp0_g_episode_mean_dist",
+        "g_token_norm_pre_l2": "exp0_g_token_norm_pre_l2",
+    }
+    name = aliases.get(name, name)
+    if name not in OURS_FINAL_DMUOT_ABLATION_CONFIGS:
+        raise ValueError(
+            f"Unsupported ours_final_dmuot_ablation: {value}. "
+            f"Expected one of {sorted(OURS_FINAL_DMUOT_ABLATION_CONFIGS)}"
+        )
+    return name
+
+
+def resolve_ours_final_dmuot_config(args) -> dict:
+    ablation = normalize_ours_final_dmuot_ablation(
+        getattr(args, "ours_final_dmuot_ablation", "off")
+    )
+    return dict(OURS_FINAL_DMUOT_ABLATION_CONFIGS[ablation])
+
+
+def validate_dmuot_scope(args) -> None:
+    ablation = normalize_ours_final_dmuot_ablation(
+        getattr(args, "ours_final_dmuot_ablation", "off")
+    )
+    if ablation != "off" and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError("--ours_final_dmuot_ablation is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -582,6 +655,7 @@ def resolve_fewshot_backbone(args):
 
 
 def build_model_from_args(args):
+    validate_dmuot_scope(args)
     external_smnet_models = {
         "uscmamba",
         "conv64f_token_sw_metric_net",
@@ -2391,6 +2465,7 @@ def build_model_from_args(args):
                     "dm_debug": str(getattr(args, "dm_debug", "auto")),
                     "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
+                    **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
                 }
                 if is_ours_entrypoint_model
                 else {}

@@ -43,8 +43,10 @@ from net.model_factory import (
     OURS_ENTRYPOINT_MODEL_NAMES,
     OURS_FINAL_MODEL_NAMES,
     build_model_from_args,
+    get_ours_final_dmuot_choices,
     get_model_choices,
     get_model_metadata,
+    resolve_ours_final_dmuot_config,
     resolve_fewshot_backbone,
     resolve_hrot_ecot_enable_egsm,
     resolve_hrot_token_dim,
@@ -1174,6 +1176,17 @@ def get_args():
         type=float,
         default=0.5,
         help="MNCR refinement strength lambda (default 0.5).",
+    )
+    parser.add_argument(
+        "--ours_final_dmuot_ablation",
+        type=str,
+        default="off",
+        choices=get_ours_final_dmuot_choices(),
+        help=(
+            "Ours-Final only: one DM-UOT ablation selector. "
+            "off preserves current ours_final byte path; exp0 logs g only; "
+            "exp1 enables cost modulation; exp2 enables discriminative marginals."
+        ),
     )
     parser.add_argument(
         "--ours_ablation",
@@ -2724,12 +2737,21 @@ def get_model(args):
                 if _bool_flag(getattr(args, "use_differential_mode", "false"), default=False)
                 else "DMT off"
             )
+            dmuot_text = (
+                (
+                    f"DM-UOT ablation={getattr(args, 'ours_final_dmuot_ablation', 'off')}, "
+                    f"resolved={resolve_ours_final_dmuot_config(args)}"
+                )
+                if args.model in OURS_FINAL_MODEL_NAMES
+                else "DM-UOT unavailable for legacy ours"
+            )
             print(
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
                 f"active_design={token_text}+{transport_text}+{evidence_text}+{score_text}, "
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
+                f"{dmuot_text}, "
                 f"full_defaults={default_text}"
             )
         if args.model in OURS_CPM_MODEL_NAMES:
