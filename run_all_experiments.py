@@ -910,8 +910,12 @@ def build_ours_final_dmuot_variants():
             "extra_args": base + ["--ours_final_dmuot_ablation", "exp0_g_token_norm_pre_l2"],
         },
     ]
-    for value in ("0.0", "0.5", "1.0", "2.0", "5.0"):
-        tag_value = value.replace(".", "p")
+    for value, tag_value in (
+        ("0.5", "0p5"),
+        ("1.0", "1"),
+        ("2.0", "2"),
+        ("5.0", "5"),
+    ):
         variants.append(
             {
                 "tag": f"ours_final_dmuot_exp1_lambda_cost_{tag_value}",
@@ -924,8 +928,12 @@ def build_ours_final_dmuot_variants():
                 ],
             }
         )
-    for value in ("0.25", "0.5", "1.0", "2.0", "inf"):
-        tag_value = value.replace(".", "p")
+    for value, tag_value in (
+        ("0.25", "0p25"),
+        ("0.5", "0p5"),
+        ("1.0", "1"),
+        ("2.0", "2"),
+    ):
         variants.append(
             {
                 "tag": f"ours_final_dmuot_exp2_tau_marg_{tag_value}",
