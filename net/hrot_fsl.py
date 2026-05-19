@@ -452,6 +452,7 @@ class HROTFSL(BaseConv64FewShotModel):
         egtw_learn_tau: bool = False,
         egtw_learn_lambda: bool = False,
         pre_transport_shot_pool: bool = False,
+        pre_transport_shot_pool_mode: str = "mean",
         hrot_tsw_enable: bool = False,
         hrot_tsw_share_gate: bool = True,
         hlm_min_mass: float = 0.1,
@@ -927,6 +928,9 @@ class HROTFSL(BaseConv64FewShotModel):
         self.egtw_learn_tau = bool(egtw_learn_tau)
         self.egtw_learn_lambda = bool(egtw_learn_lambda)
         self.pre_transport_shot_pool = bool(pre_transport_shot_pool)
+        self.pre_transport_shot_pool_mode = str(pre_transport_shot_pool_mode).strip().lower().replace("-", "_")
+        if self.pre_transport_shot_pool_mode not in {"mean", "concat"}:
+            raise ValueError("pre_transport_shot_pool_mode must be one of {'mean', 'concat'}")
         self.hrot_tsw_enable = bool(hrot_tsw_enable)
         self.hrot_tsw_share_gate = bool(hrot_tsw_share_gate)
         self.hlm_min_mass = float(hlm_min_mass)
@@ -4330,8 +4334,14 @@ class HROTFSL(BaseConv64FewShotModel):
             matching_shot_num = shot_num
             if self.uses_ecot and self.pre_transport_shot_pool:
                 matching_shot_num = 1
-                flat_support_euclidean = merge_support_tokens(support_euclidean, merge_mode="mean")
-                flat_support_hyperbolic = merge_support_tokens(support_hyperbolic, merge_mode="mean")
+                flat_support_euclidean = merge_support_tokens(
+                    support_euclidean,
+                    merge_mode=self.pre_transport_shot_pool_mode,
+                )
+                flat_support_hyperbolic = merge_support_tokens(
+                    support_hyperbolic,
+                    merge_mode=self.pre_transport_shot_pool_mode,
+                )
             else:
                 flat_support_euclidean = support_euclidean.reshape(
                     way_num * shot_num,
@@ -5153,8 +5163,14 @@ class HROTFSL(BaseConv64FewShotModel):
                 outputs.update(transport_probe_payload)
         if return_aux:
             if self.uses_ecot and self.pre_transport_shot_pool:
-                payload_support_euclidean = merge_support_tokens(support_euclidean, merge_mode="mean")
-                payload_support_hyperbolic = merge_support_tokens(support_hyperbolic, merge_mode="mean")
+                payload_support_euclidean = merge_support_tokens(
+                    support_euclidean,
+                    merge_mode=self.pre_transport_shot_pool_mode,
+                )
+                payload_support_hyperbolic = merge_support_tokens(
+                    support_hyperbolic,
+                    merge_mode=self.pre_transport_shot_pool_mode,
+                )
             else:
                 payload_support_euclidean = support_euclidean if self.uses_shot_decomposed_transport else class_euclidean
                 payload_support_hyperbolic = (

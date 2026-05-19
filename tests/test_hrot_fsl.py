@@ -364,6 +364,8 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     full = build_model_from_args(SimpleNamespace(model="ours_final", ours_ablation="full", **base_args))
     assert full.variant == "J_ECOT_M2"
     assert full.ours_ablation == "full"
+    assert not full.pre_transport_shot_pool
+    assert full.pre_transport_shot_pool_mode == "mean"
     assert full.ecot_rho_bank == (0.8,)
     assert full.ecot_base_rho == 0.8
     assert full.ecot_transport_mode == "unbalanced"
@@ -406,6 +408,20 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     assert egsm_on.egsm_marginal is not None
     assert egsm_on.egsm_marginal.kappa_max == 0.35
 
+    class_pooled = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            hrot_pre_transport_shot_pool="true",
+            hrot_pre_transport_shot_pool_mode="concat",
+            **base_args,
+        )
+    )
+    assert class_pooled.pre_transport_shot_pool
+    assert class_pooled.pre_transport_shot_pool_mode == "concat"
+    assert not class_pooled.ecot_m2_ablate_threshold_mass
+    assert not class_pooled.uses_ecot_egsm_marginal
+
 
 def test_ours_final_cost_margin_aux_forward_exposes_loss():
     torch.manual_seed(392)
@@ -437,6 +453,38 @@ def test_ours_final_cost_margin_aux_forward_exposes_loss():
     assert outputs["cost_margin_aux_loss"] >= 0.0
     assert torch.isfinite(outputs["cost_matrix"]).all()
     assert torch.all(outputs["cost_matrix"] >= 0.0)
+
+
+def test_ours_final_class_pooled_ablation_concats_support_before_transport():
+    torch.manual_seed(417)
+    model = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            device="cpu",
+            image_size=64,
+            fewshot_backbone="conv64f",
+            hrot_token_dim=16,
+            hrot_eam_hidden_dim=16,
+            hrot_sinkhorn_iterations=6,
+            hrot_sinkhorn_tolerance=1e-5,
+            hrot_pre_transport_shot_pool="true",
+            hrot_pre_transport_shot_pool_mode="concat",
+        )
+    )
+    model.eval()
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    query_tokens = outputs["query_euclidean_tokens"].shape[-2]
+    support_tokens = outputs["support_euclidean_tokens"].shape[-2]
+    assert support_tokens == 2 * query_tokens
+    assert outputs["cost_matrix"].shape == (2, 3, 1, query_tokens, support_tokens)
+    assert outputs["shot_logits"].shape == (2, 3, 1)
+    assert outputs["shot_pool_weights"].shape == (2, 3, 1)
 
 
 def test_ours_gap_ablation_forward_uses_gap_descriptor_cost_and_uot():

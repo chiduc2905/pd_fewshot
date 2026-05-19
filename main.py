@@ -1033,6 +1033,15 @@ def get_args():
         choices=["true", "false"],
     )
     parser.add_argument(
+        "--hrot_pre_transport_shot_pool_mode",
+        "--ecot_pre_transport_shot_pool_mode",
+        dest="hrot_pre_transport_shot_pool_mode",
+        type=str,
+        default="mean",
+        choices=["mean", "concat"],
+        help="When pre-transport shot pooling is enabled, mean aligned tokens or concat all class tokens.",
+    )
+    parser.add_argument(
         "--hrot_tsw_enable",
         type=str,
         default="false",
@@ -2662,6 +2671,7 @@ def get_model(args):
             f"egtw_uniform_mix={getattr(args, 'hrot_egtw_uniform_mix', 0.25)}, "
             f"egtw_detach={getattr(args, 'hrot_egtw_detach_masses', 'true')}, "
             f"pre_transport_shot_pool={getattr(args, 'hrot_pre_transport_shot_pool', 'false')}, "
+            f"pre_transport_shot_pool_mode={getattr(args, 'hrot_pre_transport_shot_pool_mode', 'mean')}, "
             f"tsw_enable={getattr(args, 'hrot_tsw_enable', 'false')}, "
             f"tsw_share_gate={getattr(args, 'hrot_tsw_share_gate', 'true')}, "
             f"ecot_rho_bank={hrot_ecot_rho_bank}, "
@@ -3153,6 +3163,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
                 overrides[egtw_key] = checkpoint_args[egtw_key]
         for ecot_key in (
             "hrot_pre_transport_shot_pool",
+            "hrot_pre_transport_shot_pool_mode",
             "hrot_ecot_rho_bank",
             "hrot_ecot_base_rho",
             "hrot_ecot_budget_tau",

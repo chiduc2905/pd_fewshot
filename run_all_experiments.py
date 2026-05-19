@@ -210,7 +210,17 @@ def get_args():
         "--ours_final_ablation_suite",
         type=str,
         default="none",
-        choices=["none", "contrib", "rho_grid", "complete", "tau_shot_off", "dmuot", "mass_on", "pst_dm"],
+        choices=[
+            "none",
+            "contrib",
+            "rho_grid",
+            "complete",
+            "tau_shot_off",
+            "pooling",
+            "dmuot",
+            "mass_on",
+            "pst_dm",
+        ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
             "contrib=full, ccem_uot, full_ot, gap, mass_off; "
@@ -218,6 +228,7 @@ def get_args():
             "--ours_final_rho_values is set; "
             "complete=contrib over all modes/shots plus restricted rho_grid; "
             "tau_shot_off=Ours-Final with ECOT tau-shot pooling disabled; "
+            "pooling=class-pooled support before OT plus fixed shot pooling; "
             "dmuot=token-g, cost modulation, and discriminative marginal sweeps; "
             "mass_on=shot-consensus threshold-mass score variants."
         ),
@@ -238,8 +249,30 @@ def get_args():
         help=(
             "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
             "Aliases: full/original/uot, ccem_uot/evidence, full_ot/ot/balanced_ot, "
-            "gap, mass_off, tau_shot_off, rho_<value>. "
+            "gap, mass_off, class_pooled, fixed_shot_pooling, tau_shot_off, rho_<value>. "
             "Default all keeps the suite's normal variants."
+        ),
+    )
+    parser.add_argument(
+        "--spot_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "core", "runtime", "sweep", "controller", "complete"],
+        help=(
+            "Expand MM-SPOT-FSL multi-mass POT runs with tagged variants. "
+            "core=single s=0.4 vs K=3 mass bank; runtime=K/iteration cost checks; "
+            "sweep=mass/epsilon/aggregation ablations; controller=learned mass selector ablation; "
+            "complete=core+runtime+sweep."
+        ),
+    )
+    parser.add_argument(
+        "--spot_ablation_variants",
+        type=str,
+        default="all",
+        help=(
+            "Comma-separated MM-SPOT-FSL variant subset for --spot_ablation_suite. "
+            "Aliases: default/k3, single/s04, iter60, iter120, k5, eps003, eps005, eps010, "
+            "mean, controller. Default all keeps the suite's normal variants."
         ),
     )
     parser.add_argument(
@@ -349,6 +382,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "m2",
     "ours",
     "ours_final",
+    "mm_spot_fsl",
     "m2_uot",
     "m2_full_ot",
     "jecot_m2",
@@ -895,6 +929,29 @@ def build_ours_final_tau_shot_off_variants():
     ]
 
 
+def build_ours_final_pooling_variants():
+    return [
+        {
+            "tag": "ours_final_class_pooled",
+            "checkpoint_tag": "ablation_class_pooled",
+            "label": "Ours-Final ablation: class-pooled support tokens before OT",
+            "extra_args": _ours_final_base_args()
+            + [
+                "--hrot_pre_transport_shot_pool",
+                "true",
+                "--hrot_pre_transport_shot_pool_mode",
+                "concat",
+            ],
+        },
+        {
+            "tag": "ours_final_fixed_shot_pooling",
+            "checkpoint_tag": "ablation_fixed_shot_pooling",
+            "label": "Ours-Final ablation: fixed log-mean-exp shot pooling disables ECOT tau-shot",
+            "extra_args": _ours_final_base_args() + ["--hrot_ecot_enable_tau_shot", "false"],
+        },
+    ]
+
+
 def build_ours_final_mass_on_variants():
     base = _ours_final_base_args()
     variants = []
@@ -1046,6 +1103,174 @@ def build_ours_final_dmuot_variants():
             }
         )
     return variants
+
+
+MM_SPOT_MODEL_NAME = "mm_spot_fsl"
+
+
+def _mm_spot_base_args(
+    mass_bank="0.3,0.4,0.5",
+    epsilon="0.05",
+    iterations="120",
+    aggregation="softmax",
+    temperature="1.0",
+    use_controller="false",
+    proto_weight="0.0",
+):
+    """Explicit MM-SPOT-FSL defaults; variant args are appended after passthrough args."""
+    return [
+        "--spot_mass_bank",
+        str(mass_bank),
+        "--spot_sinkhorn_epsilon",
+        str(epsilon),
+        "--spot_sinkhorn_iterations",
+        str(iterations),
+        "--spot_sinkhorn_tolerance",
+        "1e-6",
+        "--spot_score_scale",
+        "16.0",
+        "--spot_mass_aggregation",
+        str(aggregation),
+        "--spot_mass_temperature",
+        str(temperature),
+        "--spot_use_controller",
+        str(use_controller),
+        "--spot_proto_weight",
+        str(proto_weight),
+    ]
+
+
+def build_mm_spot_core_variants():
+    return [
+        {
+            "tag": "mm_spot_k3_softmax",
+            "checkpoint_tag": "k3_softmax",
+            "label": "MM-SPOT-FSL: K=3 mass bank [0.3,0.4,0.5], softmax score aggregation",
+            "extra_args": _mm_spot_base_args(),
+        },
+        {
+            "tag": "mm_spot_single_s04",
+            "checkpoint_tag": "single_s04",
+            "label": "MM-SPOT-FSL control: single fixed mass s=0.4",
+            "extra_args": _mm_spot_base_args(mass_bank="0.4"),
+        },
+        {
+            "tag": "mm_spot_k3_mean",
+            "checkpoint_tag": "k3_mean",
+            "label": "MM-SPOT-FSL ablation: K=3 bank with mean score aggregation",
+            "extra_args": _mm_spot_base_args(aggregation="mean"),
+        },
+    ]
+
+
+def build_mm_spot_runtime_variants():
+    return [
+        {
+            "tag": "mm_spot_k3_iter60",
+            "checkpoint_tag": "k3_iter60",
+            "label": "MM-SPOT-FSL runtime: K=3 mass bank, 60 POT iterations",
+            "extra_args": _mm_spot_base_args(iterations="60"),
+        },
+        {
+            "tag": "mm_spot_k3_iter120",
+            "checkpoint_tag": "k3_iter120",
+            "label": "MM-SPOT-FSL runtime: K=3 mass bank, 120 POT iterations",
+            "extra_args": _mm_spot_base_args(iterations="120"),
+        },
+        {
+            "tag": "mm_spot_k5_iter60",
+            "checkpoint_tag": "k5_iter60",
+            "label": "MM-SPOT-FSL runtime: K=5 mass bank [0.2,0.3,0.4,0.5,0.6], 60 POT iterations",
+            "extra_args": _mm_spot_base_args(mass_bank="0.2,0.3,0.4,0.5,0.6", iterations="60"),
+        },
+        {
+            "tag": "mm_spot_single_s04_iter120",
+            "checkpoint_tag": "single_s04_iter120",
+            "label": "MM-SPOT-FSL runtime control: single s=0.4, 120 POT iterations",
+            "extra_args": _mm_spot_base_args(mass_bank="0.4", iterations="120"),
+        },
+    ]
+
+
+def build_mm_spot_sweep_variants():
+    return [
+        {
+            "tag": "mm_spot_single_s03",
+            "checkpoint_tag": "single_s03",
+            "label": "MM-SPOT-FSL mass sweep: single fixed mass s=0.3",
+            "extra_args": _mm_spot_base_args(mass_bank="0.3"),
+        },
+        {
+            "tag": "mm_spot_single_s04",
+            "checkpoint_tag": "single_s04",
+            "label": "MM-SPOT-FSL mass sweep: single fixed mass s=0.4",
+            "extra_args": _mm_spot_base_args(mass_bank="0.4"),
+        },
+        {
+            "tag": "mm_spot_single_s05",
+            "checkpoint_tag": "single_s05",
+            "label": "MM-SPOT-FSL mass sweep: single fixed mass s=0.5",
+            "extra_args": _mm_spot_base_args(mass_bank="0.5"),
+        },
+        {
+            "tag": "mm_spot_k3_eps003",
+            "checkpoint_tag": "k3_eps003",
+            "label": "MM-SPOT-FSL epsilon sweep: K=3 bank, epsilon=0.03",
+            "extra_args": _mm_spot_base_args(epsilon="0.03"),
+        },
+        {
+            "tag": "mm_spot_k3_eps005",
+            "checkpoint_tag": "k3_eps005",
+            "label": "MM-SPOT-FSL epsilon sweep: K=3 bank, epsilon=0.05",
+            "extra_args": _mm_spot_base_args(epsilon="0.05"),
+        },
+        {
+            "tag": "mm_spot_k3_eps010",
+            "checkpoint_tag": "k3_eps010",
+            "label": "MM-SPOT-FSL epsilon sweep: K=3 bank, epsilon=0.10",
+            "extra_args": _mm_spot_base_args(epsilon="0.10"),
+        },
+    ]
+
+
+def build_mm_spot_controller_variants():
+    return [
+        {
+            "tag": "mm_spot_controller_k3",
+            "checkpoint_tag": "controller_k3",
+            "label": "MM-SPOT-FSL controller ablation: learned selector over K=3 mass bank",
+            "extra_args": _mm_spot_base_args(use_controller="true"),
+        }
+    ]
+
+
+def unique_variants_by_tag(variants):
+    unique = []
+    seen = set()
+    for variant in variants:
+        if variant["tag"] in seen:
+            continue
+        seen.add(variant["tag"])
+        unique.append(variant)
+    return unique
+
+
+def build_mm_spot_ablation_variants(suite_name):
+    core = build_mm_spot_core_variants()
+    runtime = build_mm_spot_runtime_variants()
+    sweep = build_mm_spot_sweep_variants()
+    controller = build_mm_spot_controller_variants()
+    if suite_name == "core":
+        return core
+    if suite_name == "runtime":
+        return runtime
+    if suite_name == "sweep":
+        return sweep
+    if suite_name == "controller":
+        return controller
+    if suite_name == "complete":
+        return unique_variants_by_tag(core + runtime + sweep)
+    raise ValueError(f"Unsupported MM-SPOT-FSL ablation suite: {suite_name}")
 
 
 def restricted_ours_final_rho_grid_pairs(samples_list, shots):
@@ -1671,6 +1896,17 @@ def parse_ours_final_variant_filter(variants_str):
         "cost_only": "ours_final_mass_off",
         "threshold_mass_off": "ours_final_mass_off",
         "ours_final_mass_off": "ours_final_mass_off",
+        "class_pooled": "ours_final_class_pooled",
+        "class_pool": "ours_final_class_pooled",
+        "classpooled": "ours_final_class_pooled",
+        "pooled": "ours_final_class_pooled",
+        "pre_transport_pool": "ours_final_class_pooled",
+        "ours_final_class_pooled": "ours_final_class_pooled",
+        "fixed_shot_pooling": "ours_final_fixed_shot_pooling",
+        "fixed_shot_pool": "ours_final_fixed_shot_pooling",
+        "fixed_pooling": "ours_final_fixed_shot_pooling",
+        "fixed_shot": "ours_final_fixed_shot_pooling",
+        "ours_final_fixed_shot_pooling": "ours_final_fixed_shot_pooling",
         "tau_shot_off": "ours_final_tau_shot_off",
         "ours_final_tau_shot_off": "ours_final_tau_shot_off",
         "pst": "ours_final_pst",
@@ -1717,7 +1953,7 @@ def parse_ours_final_variant_filter(variants_str):
         if tag is None:
             raise ValueError(
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
-                "Use full, ccem_uot, full_ot, gap, mass_off, tau_shot_off, "
+                "Use full, ccem_uot, full_ot, gap, mass_off, class_pooled, fixed_shot_pooling, tau_shot_off, "
                 "mass_scaled_b*, mass_consensus_a*, rho_<value>, dmuot_<name>, or exact tags."
             )
         if tag not in parsed:
@@ -1726,6 +1962,81 @@ def parse_ours_final_variant_filter(variants_str):
 
 
 def filter_ours_final_variants(variants, allowed_tags):
+    if allowed_tags is None:
+        return list(variants)
+    return [variant for variant in variants if variant["tag"] in allowed_tags]
+
+
+def parse_mm_spot_variant_filter(variants_str):
+    if variants_str is None:
+        return None
+    raw = str(variants_str).strip()
+    if not raw or raw.lower() in {"all", "none", "*"}:
+        return None
+
+    aliases = {
+        "default": "mm_spot_k3_softmax",
+        "k3": "mm_spot_k3_softmax",
+        "bank": "mm_spot_k3_softmax",
+        "bank_k3": "mm_spot_k3_softmax",
+        "softmax": "mm_spot_k3_softmax",
+        "mm_spot_k3_softmax": "mm_spot_k3_softmax",
+        "single": "mm_spot_single_s04",
+        "s04": "mm_spot_single_s04",
+        "single_s04": "mm_spot_single_s04",
+        "mm_spot_single_s04": "mm_spot_single_s04",
+        "s03": "mm_spot_single_s03",
+        "single_s03": "mm_spot_single_s03",
+        "mm_spot_single_s03": "mm_spot_single_s03",
+        "s05": "mm_spot_single_s05",
+        "single_s05": "mm_spot_single_s05",
+        "mm_spot_single_s05": "mm_spot_single_s05",
+        "mean": "mm_spot_k3_mean",
+        "k3_mean": "mm_spot_k3_mean",
+        "mm_spot_k3_mean": "mm_spot_k3_mean",
+        "iter60": "mm_spot_k3_iter60",
+        "k3_iter60": "mm_spot_k3_iter60",
+        "mm_spot_k3_iter60": "mm_spot_k3_iter60",
+        "iter120": "mm_spot_k3_iter120",
+        "k3_iter120": "mm_spot_k3_iter120",
+        "mm_spot_k3_iter120": "mm_spot_k3_iter120",
+        "k5": "mm_spot_k5_iter60",
+        "k5_iter60": "mm_spot_k5_iter60",
+        "mm_spot_k5_iter60": "mm_spot_k5_iter60",
+        "single_s04_iter120": "mm_spot_single_s04_iter120",
+        "mm_spot_single_s04_iter120": "mm_spot_single_s04_iter120",
+        "eps003": "mm_spot_k3_eps003",
+        "eps0p03": "mm_spot_k3_eps003",
+        "mm_spot_k3_eps003": "mm_spot_k3_eps003",
+        "eps005": "mm_spot_k3_eps005",
+        "eps0p05": "mm_spot_k3_eps005",
+        "mm_spot_k3_eps005": "mm_spot_k3_eps005",
+        "eps010": "mm_spot_k3_eps010",
+        "eps0p10": "mm_spot_k3_eps010",
+        "mm_spot_k3_eps010": "mm_spot_k3_eps010",
+        "controller": "mm_spot_controller_k3",
+        "controller_k3": "mm_spot_controller_k3",
+        "mm_spot_controller_k3": "mm_spot_controller_k3",
+    }
+
+    parsed = []
+    for token in raw.split(","):
+        name = token.strip().lower().replace("-", "_").replace(".", "p")
+        if not name:
+            continue
+        tag = aliases.get(name, name if name.startswith("mm_spot_") else None)
+        if tag is None:
+            raise ValueError(
+                f"Invalid --spot_ablation_variants token '{token}'. "
+                "Use default/k3, single/s04, s03, s05, mean, iter60, iter120, "
+                "k5, eps003, eps005, eps010, controller, or exact mm_spot_* tags."
+            )
+        if tag not in parsed:
+            parsed.append(tag)
+    return set(parsed) if parsed else None
+
+
+def filter_mm_spot_variants(variants, allowed_tags):
     if allowed_tags is None:
         return list(variants)
     return [variant for variant in variants if variant["tag"] in allowed_tags]
@@ -1794,6 +2105,9 @@ def main():
     ours_final_variant_filter = parse_ours_final_variant_filter(
         getattr(args, "ours_final_ablation_variants", "all")
     )
+    mm_spot_variant_filter = parse_mm_spot_variant_filter(
+        getattr(args, "spot_ablation_variants", "all")
+    )
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
     if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
@@ -1850,6 +2164,7 @@ def main():
             ("--spifce_ablation_suite", args.spifce_ablation_suite),
             ("--ours_ablation_suite", args.ours_ablation_suite),
             ("--ours_final_ablation_suite", args.ours_final_ablation_suite),
+            ("--spot_ablation_suite", args.spot_ablation_suite),
         )
         if value != "none"
     ]
@@ -1932,6 +2247,7 @@ def main():
         contrib_variants = build_ours_final_ablation_variants()
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
+        pooling_variants = build_ours_final_pooling_variants()
         mass_on_variants = build_ours_final_mass_on_variants()
         dmuot_variants = build_ours_final_dmuot_variants()
         pst_dm_variants = build_ours_final_pst_dm_variants()
@@ -1944,6 +2260,7 @@ def main():
         contrib_variants = filter_ours_final_variants(contrib_variants, ours_final_variant_filter)
         rho_grid_variants = filter_ours_final_variants(rho_grid_variants, ours_final_variant_filter)
         tau_shot_off_variants = filter_ours_final_variants(tau_shot_off_variants, ours_final_variant_filter)
+        pooling_variants = filter_ours_final_variants(pooling_variants, ours_final_variant_filter)
         mass_on_variants = filter_ours_final_variants(mass_on_variants, ours_final_variant_filter)
         dmuot_variants = filter_ours_final_variants(dmuot_variants, ours_final_variant_filter)
         pst_dm_variants = filter_ours_final_variants(pst_dm_variants, ours_final_variant_filter)
@@ -1951,6 +2268,8 @@ def main():
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
             ablation_variants = tau_shot_off_variants
+        elif suite_name == "pooling":
+            ablation_variants = pooling_variants
         elif suite_name == "dmuot":
             ablation_variants = dmuot_variants
         elif suite_name == "mass_on":
@@ -2040,6 +2359,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in tau_shot_off_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "pooling":
+            experiments.extend(
+                {
+                    "model": "ours_final",
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in pooling_variants
                 for samples in samples_list
                 for shot in shots
             )
@@ -2173,6 +2509,84 @@ def main():
             f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
             f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, "
             f"test exact={DEEPEMD_5SHOT_TEST_EXACT}, test SFC={DEEPEMD_5SHOT_TEST_SFC}"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print("=" * 72)
+    elif args.spot_ablation_suite != "none":
+        if requested_models != [MM_SPOT_MODEL_NAME]:
+            raise ValueError(
+                f"`--spot_ablation_suite` currently supports only `--models {MM_SPOT_MODEL_NAME}` "
+                f"(got {requested_models})"
+            )
+        suite_name = args.spot_ablation_suite
+        ablation_variants = filter_mm_spot_variants(
+            build_mm_spot_ablation_variants(suite_name),
+            mm_spot_variant_filter,
+        )
+        if not ablation_variants:
+            requested = ", ".join(sorted(mm_spot_variant_filter or [])) or "all"
+            raise ValueError(
+                f"No MM-SPOT-FSL variants selected for suite={suite_name!r} "
+                f"with --spot_ablation_variants={requested}."
+            )
+        if args.mode_id is not None:
+            samples_list = [EXPERIMENT_MODES[args.mode_id]]
+        elif parsed_mode_ids is not None:
+            samples_list = [EXPERIMENT_MODES[mode_id] for mode_id in parsed_mode_ids]
+        else:
+            samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
+        experiments = [
+            {
+                "model": MM_SPOT_MODEL_NAME,
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                "experiment_label": variant["label"],
+                "extra_test_protocols": args.extra_test_protocols,
+                "extra_noise_test_splits": None,
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - MM-SPOT-FSL Multi-Mass POT Suite")
+        print("=" * 72)
+        sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
+        print(f"Samples     : {sample_text}")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.spot_ablation_suite}")
+        if mm_spot_variant_filter is not None:
+            print(f"Variant Pick: {', '.join(sorted(mm_spot_variant_filter))}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            print(f"  - {variant['tag']}: {variant['label']}")
+        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
+            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
+            "augment=off, masks=off, "
+            "MM-SPOT score=-score_scale*C_s/s, full marginals, no aux loss by default"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -2473,6 +2887,7 @@ def main():
         args.spifce_ablation_suite == "none"
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
+        and args.spot_ablation_suite == "none"
         and args.result_artifacts == "all"
     ):
         print("\n" + "=" * 60)
@@ -2489,6 +2904,7 @@ def main():
         args.spifce_ablation_suite == "none"
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
+        and args.spot_ablation_suite == "none"
         and args.result_artifacts != "all"
     ):
         print("\n" + "=" * 60)
@@ -2498,6 +2914,7 @@ def main():
         args.spifce_ablation_suite != "none"
         or args.ours_ablation_suite != "none"
         or args.ours_final_ablation_suite != "none"
+        or args.spot_ablation_suite != "none"
     ):
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")
