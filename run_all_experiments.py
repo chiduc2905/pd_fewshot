@@ -1114,6 +1114,7 @@ def _mm_spot_base_args(
     iterations="120",
     aggregation="softmax",
     temperature="1.0",
+    partial_backend="pot_torch",
     use_controller="false",
     proto_weight="0.0",
 ):
@@ -1133,6 +1134,8 @@ def _mm_spot_base_args(
         str(aggregation),
         "--spot_mass_temperature",
         str(temperature),
+        "--spot_partial_backend",
+        str(partial_backend),
         "--spot_use_controller",
         str(use_controller),
         "--spot_proto_weight",

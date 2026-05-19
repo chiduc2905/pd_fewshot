@@ -811,6 +811,12 @@ def get_args():
         choices=["softmax", "mean", "logmeanexp", "max"],
     )
     parser.add_argument("--spot_mass_temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--spot_partial_backend",
+        type=str,
+        default="native",
+        choices=["native", "pot", "pot_torch"],
+    )
     parser.add_argument("--spot_use_controller", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--spot_controller_hidden_dim", type=int, default=32)
     parser.add_argument("--spot_proto_weight", type=float, default=0.0)
@@ -2339,6 +2345,7 @@ def get_model(args):
             f"sinkhorn_iters={getattr(args, 'spot_sinkhorn_iterations', 120)}, "
             f"aggregation={getattr(args, 'spot_mass_aggregation', 'softmax')}, "
             f"temperature={getattr(args, 'spot_mass_temperature', 1.0)}, "
+            f"partial_backend={getattr(args, 'spot_partial_backend', 'native')}, "
             f"score_scale={getattr(args, 'spot_score_scale', 16.0)}, "
             f"use_controller={getattr(args, 'spot_use_controller', 'false')}, "
             f"proto_weight={getattr(args, 'spot_proto_weight', 0.0)})"

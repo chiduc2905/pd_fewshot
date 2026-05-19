@@ -69,6 +69,7 @@ class MMSPOTFSL(BaseConv64FewShotModel):
         score_scale: float = 16.0,
         mass_aggregation: str = "softmax",
         mass_temperature: float = 1.0,
+        partial_backend: str = "native",
         use_controller: bool = False,
         controller_hidden_dim: int = 32,
         proto_weight: float = 0.0,
@@ -100,6 +101,16 @@ class MMSPOTFSL(BaseConv64FewShotModel):
         mass_aggregation = str(mass_aggregation).lower()
         if mass_aggregation not in self.VALID_AGGREGATIONS:
             raise ValueError(f"mass_aggregation must be one of {sorted(self.VALID_AGGREGATIONS)}")
+        partial_backend = str(partial_backend).lower().replace("-", "_")
+        partial_backend_aliases = {
+            "native": "native",
+            "pot": "pot",
+            "pot_torch": "pot",
+            "torch_pot": "pot",
+        }
+        if partial_backend not in partial_backend_aliases:
+            raise ValueError("partial_backend must be one of {'native', 'pot', 'pot_torch'}")
+        partial_backend = partial_backend_aliases[partial_backend]
         if support_merge_mode not in {"concat", "mean"}:
             raise ValueError("support_merge_mode must be 'concat' or 'mean'")
         if int(controller_hidden_dim) <= 0:
@@ -115,6 +126,7 @@ class MMSPOTFSL(BaseConv64FewShotModel):
         self.score_scale = float(score_scale)
         self.mass_aggregation = mass_aggregation
         self.mass_temperature = float(mass_temperature)
+        self.partial_backend = partial_backend
         self.use_controller = bool(use_controller)
         self.proto_weight = float(proto_weight)
         self.support_merge_mode = str(support_merge_mode)
@@ -265,7 +277,7 @@ class MMSPOTFSL(BaseConv64FewShotModel):
             flat_a,
             flat_b,
             transport_mass=flat_mass,
-            backend="native",
+            backend=self.partial_backend,
             reg=self.sinkhorn_epsilon,
             max_iter=self.sinkhorn_iterations,
             tol=self.sinkhorn_tolerance,

@@ -961,6 +961,7 @@ def build_model_from_args(args):
             score_scale=float(getattr(args, "spot_score_scale", 16.0)),
             mass_aggregation=str(getattr(args, "spot_mass_aggregation", "softmax")),
             mass_temperature=float(getattr(args, "spot_mass_temperature", 1.0)),
+            partial_backend=str(getattr(args, "spot_partial_backend", "native")),
             use_controller=_bool_flag(getattr(args, "spot_use_controller", "false"), default=False),
             controller_hidden_dim=int(getattr(args, "spot_controller_hidden_dim", 32)),
             proto_weight=float(getattr(args, "spot_proto_weight", 0.0)),
