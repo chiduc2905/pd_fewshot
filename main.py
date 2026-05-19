@@ -814,7 +814,7 @@ def get_args():
     parser.add_argument(
         "--spot_partial_backend",
         type=str,
-        default="native",
+        default="pot",
         choices=["native", "pot", "pot_torch"],
     )
     parser.add_argument("--spot_use_controller", type=str, default="false", choices=["true", "false"])
@@ -823,6 +823,38 @@ def get_args():
     parser.add_argument("--spot_support_merge_mode", type=str, default="concat", choices=["concat", "mean"])
     parser.add_argument("--spot_return_transport_plan", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--spot_eps", type=float, default=1e-8)
+    parser.add_argument(
+        "--pare_mass_ratio_bank",
+        type=str,
+        default="0.35,0.5,0.65",
+        help="PARE-FSL: comma-separated fractions in (0,1] for partial transported mass vs min(sum a, sum b).",
+    )
+    parser.add_argument("--pare_sinkhorn_epsilon", type=float, default=0.04)
+    parser.add_argument("--pare_sinkhorn_iterations", type=int, default=80)
+    parser.add_argument("--pare_sinkhorn_tolerance", type=float, default=1e-6)
+    parser.add_argument("--pare_score_scale", type=float, default=16.0)
+    parser.add_argument(
+        "--pare_marginal_mode",
+        type=str,
+        default="discriminative",
+        choices=["uniform", "discriminative"],
+    )
+    parser.add_argument("--pare_marginal_temperature", type=float, default=0.15)
+    parser.add_argument(
+        "--pare_mass_aggregation",
+        type=str,
+        default="softmax",
+        choices=["softmax", "mean", "logmeanexp", "max"],
+    )
+    parser.add_argument("--pare_mass_temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--pare_shot_pooling",
+        type=str,
+        default="logsumexp",
+        choices=["mean", "logsumexp"],
+    )
+    parser.add_argument("--pare_shot_temperature", type=float, default=1.0)
+    parser.add_argument("--pare_eps", type=float, default=1e-8)
     parser.add_argument("--spif_otccls_feature_dim", type=int, default=256)
     parser.add_argument("--spif_otccls_gate_hidden", type=int, default=128)
     parser.add_argument("--spif_otccls_num_projections", type=int, default=64)
@@ -2345,10 +2377,21 @@ def get_model(args):
             f"sinkhorn_iters={getattr(args, 'spot_sinkhorn_iterations', 120)}, "
             f"aggregation={getattr(args, 'spot_mass_aggregation', 'softmax')}, "
             f"temperature={getattr(args, 'spot_mass_temperature', 1.0)}, "
-            f"partial_backend={getattr(args, 'spot_partial_backend', 'native')}, "
+            f"partial_backend={getattr(args, 'spot_partial_backend', 'pot')}, "
             f"score_scale={getattr(args, 'spot_score_scale', 16.0)}, "
             f"use_controller={getattr(args, 'spot_use_controller', 'false')}, "
             f"proto_weight={getattr(args, 'spot_proto_weight', 0.0)})"
+        )
+    if args.model == "pare_fsl":
+        print(
+            "  pare_fsl: backbone tokens -> discriminative marginals (sum=1) -> "
+            "shot-wise native partial OT -> mass-ratio response -> partial discrepancy score "
+            f"(mass_ratio_bank={getattr(args, 'pare_mass_ratio_bank', '0.35,0.5,0.65')}, "
+            f"sinkhorn_eps={getattr(args, 'pare_sinkhorn_epsilon', 0.04)}, "
+            f"sinkhorn_iters={getattr(args, 'pare_sinkhorn_iterations', 80)}, "
+            f"marginal_mode={getattr(args, 'pare_marginal_mode', 'discriminative')}, "
+            f"mass_aggregation={getattr(args, 'pare_mass_aggregation', 'softmax')}, "
+            f"shot_pooling={getattr(args, 'pare_shot_pooling', 'logsumexp')})"
         )
     if args.model == "spif_otccls":
         print(

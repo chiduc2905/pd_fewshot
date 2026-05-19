@@ -287,6 +287,11 @@ MODEL_REGISTRY = {
         "architecture": "Backbone local tokens + multi-mass partial OT evidence selection + mass-score aggregation",
         "metric": "Multi-Mass Partial Optimal Transport",
     },
+    "pare_fsl": {
+        "display_name": "PARE-FSL",
+        "architecture": "Backbone tokens -> discriminative marginals (sum=1) -> shot-wise native partial OT -> mass-ratio response bank -> partial discrepancy score",
+        "metric": "Partial Mass-Response Optimal Transport",
+    },
     "dice_emd": {
         "display_name": "DICE-EMD",
         "architecture": "ResNet12 dense descriptors + class-competitive evidence-aware balanced transport",
@@ -648,6 +653,7 @@ RESNET12_ONLY_MODELS = frozenset({"transport_recon_emd", "tardis_emd"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
 EBOT_MODEL_NAMES = frozenset({"evidence_budget_ot", "evidence_budgeted_ot", "ebot", "ebot_scalogram"})
 MM_SPOT_MODEL_NAMES = frozenset({"mm_spot_fsl"})
+PARE_FSL_MODEL_NAMES = frozenset({"pare_fsl"})
 
 
 def model_supports_fewshot_backbone(model_name, backbone_name):
@@ -943,6 +949,30 @@ def build_model_from_args(args):
             weight_budget_high=float(getattr(args, "ebot_weight_budget_high", 0.001)),
             eps=float(getattr(args, "ebot_eps", 1e-6)),
         )
+    if args.model in PARE_FSL_MODEL_NAMES:
+        PAREFSL = _load_symbol("net.pare_fsl", "PAREFSL")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return PAREFSL(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "token_dim", 128) or 128),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            pare_mass_ratio_bank=str(getattr(args, "pare_mass_ratio_bank", "0.35,0.5,0.65")),
+            sinkhorn_epsilon=float(getattr(args, "pare_sinkhorn_epsilon", 0.04)),
+            sinkhorn_iterations=int(getattr(args, "pare_sinkhorn_iterations", 80)),
+            sinkhorn_tolerance=float(getattr(args, "pare_sinkhorn_tolerance", 1e-6)),
+            score_scale=float(getattr(args, "pare_score_scale", 16.0)),
+            marginal_mode=str(getattr(args, "pare_marginal_mode", "discriminative")),
+            marginal_temperature=float(getattr(args, "pare_marginal_temperature", 0.15)),
+            mass_aggregation=str(getattr(args, "pare_mass_aggregation", "softmax")),
+            mass_temperature=float(getattr(args, "pare_mass_temperature", 1.0)),
+            shot_pooling=str(getattr(args, "pare_shot_pooling", "logsumexp")),
+            shot_temperature_init=float(getattr(args, "pare_shot_temperature", 1.0)),
+            eps=float(getattr(args, "pare_eps", 1e-8)),
+        )
     if args.model in MM_SPOT_MODEL_NAMES:
         MMSPOTFSL = _load_symbol("net.mm_spot_fsl", "MMSPOTFSL")
         hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
@@ -961,7 +991,7 @@ def build_model_from_args(args):
             score_scale=float(getattr(args, "spot_score_scale", 16.0)),
             mass_aggregation=str(getattr(args, "spot_mass_aggregation", "softmax")),
             mass_temperature=float(getattr(args, "spot_mass_temperature", 1.0)),
-            partial_backend=str(getattr(args, "spot_partial_backend", "native")),
+            partial_backend=str(getattr(args, "spot_partial_backend", "pot")),
             use_controller=_bool_flag(getattr(args, "spot_use_controller", "false"), default=False),
             controller_hidden_dim=int(getattr(args, "spot_controller_hidden_dim", 32)),
             proto_weight=float(getattr(args, "spot_proto_weight", 0.0)),

@@ -276,6 +276,30 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--pare_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "core", "runtime", "sweep", "marginal", "complete"],
+        help=(
+            "Expand PARE-FSL native partial-OT runs with tagged variants. "
+            "core=K=3 mass-ratio bank vs single-alpha vs uniform marginals; "
+            "runtime=iteration budget checks; sweep=alpha/epsilon/pooling ablations; "
+            "marginal=discriminative temperature ablations; "
+            "complete=core+runtime+sweep."
+        ),
+    )
+    parser.add_argument(
+        "--pare_ablation_variants",
+        type=str,
+        default="all",
+        help=(
+            "Comma-separated PARE-FSL variant subset for --pare_ablation_suite. "
+            "Aliases: default/k3, single/a05, uniform, iter60, iter80, iter120, "
+            "a035, a045, a055, a065, eps002, eps004, eps006, shot_mean, mass_mean, "
+            "tau010, tau020. Default all keeps the suite's normal variants."
+        ),
+    )
+    parser.add_argument(
         "--export_uot_evidence_figure",
         type=str,
         default="false",
@@ -383,6 +407,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "ours",
     "ours_final",
     "mm_spot_fsl",
+    "pare_fsl",
     "m2_uot",
     "m2_full_ot",
     "jecot_m2",
@@ -1114,7 +1139,7 @@ def _mm_spot_base_args(
     iterations="120",
     aggregation="softmax",
     temperature="1.0",
-    partial_backend="pot_torch",
+    partial_backend="pot",
     use_controller="false",
     proto_weight="0.0",
 ):
@@ -1274,6 +1299,193 @@ def build_mm_spot_ablation_variants(suite_name):
     if suite_name == "complete":
         return unique_variants_by_tag(core + runtime + sweep)
     raise ValueError(f"Unsupported MM-SPOT-FSL ablation suite: {suite_name}")
+
+
+PARE_FSL_MODEL_NAME = "pare_fsl"
+
+
+def _pare_base_args(
+    mass_ratio_bank="0.35,0.5,0.65",
+    epsilon="0.04",
+    iterations="80",
+    marginal_mode="discriminative",
+    marginal_temperature="0.15",
+    aggregation="softmax",
+    temperature="1.0",
+    shot_pooling="logsumexp",
+    shot_temperature="1.0",
+):
+    """Explicit PARE-FSL defaults; variant args are appended after passthrough args."""
+    return [
+        "--pare_mass_ratio_bank",
+        str(mass_ratio_bank),
+        "--pare_sinkhorn_epsilon",
+        str(epsilon),
+        "--pare_sinkhorn_iterations",
+        str(iterations),
+        "--pare_sinkhorn_tolerance",
+        "1e-6",
+        "--pare_score_scale",
+        "16.0",
+        "--pare_marginal_mode",
+        str(marginal_mode),
+        "--pare_marginal_temperature",
+        str(marginal_temperature),
+        "--pare_mass_aggregation",
+        str(aggregation),
+        "--pare_mass_temperature",
+        str(temperature),
+        "--pare_shot_pooling",
+        str(shot_pooling),
+        "--pare_shot_temperature",
+        str(shot_temperature),
+    ]
+
+
+def build_pare_core_variants():
+    return [
+        {
+            "tag": "pare_k3_disc",
+            "checkpoint_tag": "k3_disc",
+            "label": "PARE-FSL: K=3 mass-ratio bank [0.35,0.5,0.65], discriminative marginals, native POT",
+            "extra_args": _pare_base_args(),
+        },
+        {
+            "tag": "pare_single_a05",
+            "checkpoint_tag": "single_a05",
+            "label": "PARE-FSL control: single mass ratio alpha=0.5",
+            "extra_args": _pare_base_args(mass_ratio_bank="0.5"),
+        },
+        {
+            "tag": "pare_k3_uniform",
+            "checkpoint_tag": "k3_uniform",
+            "label": "PARE-FSL ablation: K=3 bank with uniform token marginals",
+            "extra_args": _pare_base_args(marginal_mode="uniform"),
+        },
+    ]
+
+
+def build_pare_runtime_variants():
+    return [
+        {
+            "tag": "pare_k3_iter60",
+            "checkpoint_tag": "k3_iter60",
+            "label": "PARE-FSL runtime: K=3 mass-ratio bank, 60 POT iterations",
+            "extra_args": _pare_base_args(iterations="60"),
+        },
+        {
+            "tag": "pare_k3_iter80",
+            "checkpoint_tag": "k3_iter80",
+            "label": "PARE-FSL runtime: K=3 mass-ratio bank, 80 POT iterations (default budget)",
+            "extra_args": _pare_base_args(iterations="80"),
+        },
+        {
+            "tag": "pare_k3_iter120",
+            "checkpoint_tag": "k3_iter120",
+            "label": "PARE-FSL runtime: K=3 mass-ratio bank, 120 POT iterations",
+            "extra_args": _pare_base_args(iterations="120"),
+        },
+        {
+            "tag": "pare_k4_iter80",
+            "checkpoint_tag": "k4_iter80",
+            "label": "PARE-FSL runtime: K=4 mass-ratio bank [0.3,0.45,0.6,0.75], 80 iterations",
+            "extra_args": _pare_base_args(mass_ratio_bank="0.3,0.45,0.6,0.75", iterations="80"),
+        },
+    ]
+
+
+def build_pare_sweep_variants():
+    return [
+        {
+            "tag": "pare_single_a035",
+            "checkpoint_tag": "single_a035",
+            "label": "PARE-FSL alpha sweep: single mass ratio 0.35",
+            "extra_args": _pare_base_args(mass_ratio_bank="0.35"),
+        },
+        {
+            "tag": "pare_single_a045",
+            "checkpoint_tag": "single_a045",
+            "label": "PARE-FSL alpha sweep: single mass ratio 0.45",
+            "extra_args": _pare_base_args(mass_ratio_bank="0.45"),
+        },
+        {
+            "tag": "pare_single_a055",
+            "checkpoint_tag": "single_a055",
+            "label": "PARE-FSL alpha sweep: single mass ratio 0.55",
+            "extra_args": _pare_base_args(mass_ratio_bank="0.55"),
+        },
+        {
+            "tag": "pare_single_a065",
+            "checkpoint_tag": "single_a065",
+            "label": "PARE-FSL alpha sweep: single mass ratio 0.65",
+            "extra_args": _pare_base_args(mass_ratio_bank="0.65"),
+        },
+        {
+            "tag": "pare_k3_eps002",
+            "checkpoint_tag": "k3_eps002",
+            "label": "PARE-FSL epsilon sweep: K=3 bank, epsilon=0.02",
+            "extra_args": _pare_base_args(epsilon="0.02"),
+        },
+        {
+            "tag": "pare_k3_eps004",
+            "checkpoint_tag": "k3_eps004",
+            "label": "PARE-FSL epsilon sweep: K=3 bank, epsilon=0.04",
+            "extra_args": _pare_base_args(epsilon="0.04"),
+        },
+        {
+            "tag": "pare_k3_eps006",
+            "checkpoint_tag": "k3_eps006",
+            "label": "PARE-FSL epsilon sweep: K=3 bank, epsilon=0.06",
+            "extra_args": _pare_base_args(epsilon="0.06"),
+        },
+        {
+            "tag": "pare_shot_mean",
+            "checkpoint_tag": "shot_mean",
+            "label": "PARE-FSL pooling ablation: mean shot pooling",
+            "extra_args": _pare_base_args(shot_pooling="mean"),
+        },
+        {
+            "tag": "pare_mass_mean",
+            "checkpoint_tag": "mass_mean",
+            "label": "PARE-FSL aggregation ablation: mean over mass-ratio bank",
+            "extra_args": _pare_base_args(aggregation="mean"),
+        },
+    ]
+
+
+def build_pare_marginal_variants():
+    return [
+        {
+            "tag": "pare_disc_tau010",
+            "checkpoint_tag": "disc_tau010",
+            "label": "PARE-FSL marginal ablation: discriminative temperature 0.10",
+            "extra_args": _pare_base_args(marginal_temperature="0.10"),
+        },
+        {
+            "tag": "pare_disc_tau020",
+            "checkpoint_tag": "disc_tau020",
+            "label": "PARE-FSL marginal ablation: discriminative temperature 0.20",
+            "extra_args": _pare_base_args(marginal_temperature="0.20"),
+        },
+    ]
+
+
+def build_pare_ablation_variants(suite_name):
+    core = build_pare_core_variants()
+    runtime = build_pare_runtime_variants()
+    sweep = build_pare_sweep_variants()
+    marginal = build_pare_marginal_variants()
+    if suite_name == "core":
+        return core
+    if suite_name == "runtime":
+        return runtime
+    if suite_name == "sweep":
+        return sweep
+    if suite_name == "marginal":
+        return marginal
+    if suite_name == "complete":
+        return unique_variants_by_tag(core + runtime + sweep)
+    raise ValueError(f"Unsupported PARE-FSL ablation suite: {suite_name}")
 
 
 def restricted_ours_final_rho_grid_pairs(samples_list, shots):
@@ -2039,6 +2251,77 @@ def parse_mm_spot_variant_filter(variants_str):
     return set(parsed) if parsed else None
 
 
+def parse_pare_variant_filter(variants_str):
+    if variants_str is None or str(variants_str).strip().lower() in {"", "all", "*"}:
+        return None
+    aliases = {
+        "default": "pare_k3_disc",
+        "k3": "pare_k3_disc",
+        "disc": "pare_k3_disc",
+        "pare_k3_disc": "pare_k3_disc",
+        "single": "pare_single_a05",
+        "a05": "pare_single_a05",
+        "single_a05": "pare_single_a05",
+        "pare_single_a05": "pare_single_a05",
+        "uniform": "pare_k3_uniform",
+        "pare_k3_uniform": "pare_k3_uniform",
+        "iter60": "pare_k3_iter60",
+        "pare_k3_iter60": "pare_k3_iter60",
+        "iter80": "pare_k3_iter80",
+        "pare_k3_iter80": "pare_k3_iter80",
+        "iter120": "pare_k3_iter120",
+        "pare_k3_iter120": "pare_k3_iter120",
+        "k4": "pare_k4_iter80",
+        "pare_k4_iter80": "pare_k4_iter80",
+        "a035": "pare_single_a035",
+        "pare_single_a035": "pare_single_a035",
+        "a045": "pare_single_a045",
+        "pare_single_a045": "pare_single_a045",
+        "a055": "pare_single_a055",
+        "pare_single_a055": "pare_single_a055",
+        "a065": "pare_single_a065",
+        "pare_single_a065": "pare_single_a065",
+        "eps002": "pare_k3_eps002",
+        "eps0p02": "pare_k3_eps002",
+        "pare_k3_eps002": "pare_k3_eps002",
+        "eps004": "pare_k3_eps004",
+        "eps0p04": "pare_k3_eps004",
+        "pare_k3_eps004": "pare_k3_eps004",
+        "eps006": "pare_k3_eps006",
+        "eps0p06": "pare_k3_eps006",
+        "pare_k3_eps006": "pare_k3_eps006",
+        "shot_mean": "pare_shot_mean",
+        "pare_shot_mean": "pare_shot_mean",
+        "mass_mean": "pare_mass_mean",
+        "pare_mass_mean": "pare_mass_mean",
+        "tau010": "pare_disc_tau010",
+        "pare_disc_tau010": "pare_disc_tau010",
+        "tau020": "pare_disc_tau020",
+        "pare_disc_tau020": "pare_disc_tau020",
+    }
+    parsed = []
+    for token in str(variants_str).split(","):
+        name = token.strip().lower().replace("-", "_")
+        if not name:
+            continue
+        tag = aliases.get(name, name if name.startswith("pare_") else None)
+        if tag is None:
+            raise ValueError(
+                f"Invalid --pare_ablation_variants token '{token}'. "
+                "Use aliases such as default, single, uniform, iter60, a045, eps004, "
+                "shot_mean, tau010, or exact pare_* tags."
+            )
+        if tag not in parsed:
+            parsed.append(tag)
+    return set(parsed) if parsed else None
+
+
+def filter_pare_variants(variants, allowed_tags):
+    if allowed_tags is None:
+        return list(variants)
+    return [variant for variant in variants if variant["tag"] in allowed_tags]
+
+
 def filter_mm_spot_variants(variants, allowed_tags):
     if allowed_tags is None:
         return list(variants)
@@ -2111,6 +2394,9 @@ def main():
     mm_spot_variant_filter = parse_mm_spot_variant_filter(
         getattr(args, "spot_ablation_variants", "all")
     )
+    pare_variant_filter = parse_pare_variant_filter(
+        getattr(args, "pare_ablation_variants", "all")
+    )
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
     if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
@@ -2168,6 +2454,7 @@ def main():
             ("--ours_ablation_suite", args.ours_ablation_suite),
             ("--ours_final_ablation_suite", args.ours_final_ablation_suite),
             ("--spot_ablation_suite", args.spot_ablation_suite),
+            ("--pare_ablation_suite", args.pare_ablation_suite),
         )
         if value != "none"
     ]
@@ -2601,6 +2888,84 @@ def main():
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
         print(f"Total       : {len(experiments)} ablation experiment(s)")
         print("=" * 72)
+    elif args.pare_ablation_suite != "none":
+        if requested_models != [PARE_FSL_MODEL_NAME]:
+            raise ValueError(
+                f"`--pare_ablation_suite` currently supports only `--models {PARE_FSL_MODEL_NAME}` "
+                f"(got {requested_models})"
+            )
+        suite_name = args.pare_ablation_suite
+        ablation_variants = filter_pare_variants(
+            build_pare_ablation_variants(suite_name),
+            pare_variant_filter,
+        )
+        if not ablation_variants:
+            requested = ", ".join(sorted(pare_variant_filter or [])) or "all"
+            raise ValueError(
+                f"No PARE-FSL variants selected for suite={suite_name!r} "
+                f"with --pare_ablation_variants={requested}."
+            )
+        if args.mode_id is not None:
+            samples_list = [EXPERIMENT_MODES[args.mode_id]]
+        elif parsed_mode_ids is not None:
+            samples_list = [EXPERIMENT_MODES[mode_id] for mode_id in parsed_mode_ids]
+        else:
+            samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
+        experiments = [
+            {
+                "model": PARE_FSL_MODEL_NAME,
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                "experiment_label": variant["label"],
+                "extra_test_protocols": args.extra_test_protocols,
+                "extra_noise_test_splits": None,
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - PARE-FSL Partial Mass-Response Suite")
+        print("=" * 72)
+        sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
+        print(f"Samples     : {sample_text}")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.pare_ablation_suite}")
+        if pare_variant_filter is not None:
+            print(f"Variant Pick: {', '.join(sorted(pare_variant_filter))}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            print(f"  - {variant['tag']}: {variant['label']}")
+        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
+            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
+            "augment=off, masks=off, "
+            "PARE-FSL: native POT, sum(a)=sum(b)=1, score=-scale*C/M, shot-wise transport"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print("=" * 72)
     elif args.spifce_ablation_suite != "none":
         if requested_models != ["spifce"]:
             raise ValueError(
@@ -2891,6 +3256,7 @@ def main():
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
         and args.spot_ablation_suite == "none"
+        and args.pare_ablation_suite == "none"
         and args.result_artifacts == "all"
     ):
         print("\n" + "=" * 60)
@@ -2908,6 +3274,7 @@ def main():
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
         and args.spot_ablation_suite == "none"
+        and args.pare_ablation_suite == "none"
         and args.result_artifacts != "all"
     ):
         print("\n" + "=" * 60)
@@ -2918,6 +3285,7 @@ def main():
         or args.ours_ablation_suite != "none"
         or args.ours_final_ablation_suite != "none"
         or args.spot_ablation_suite != "none"
+        or args.pare_ablation_suite != "none"
     ):
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")
