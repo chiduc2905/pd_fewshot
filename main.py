@@ -799,6 +799,24 @@ def get_args():
     parser.add_argument("--ebot_weight_budget_low", type=float, default=0.01)
     parser.add_argument("--ebot_weight_budget_high", type=float, default=0.001)
     parser.add_argument("--ebot_eps", type=float, default=1e-6)
+    parser.add_argument("--spot_mass_bank", type=str, default="0.3,0.4,0.5")
+    parser.add_argument("--spot_sinkhorn_epsilon", type=float, default=0.05)
+    parser.add_argument("--spot_sinkhorn_iterations", type=int, default=120)
+    parser.add_argument("--spot_sinkhorn_tolerance", type=float, default=1e-6)
+    parser.add_argument("--spot_score_scale", type=float, default=16.0)
+    parser.add_argument(
+        "--spot_mass_aggregation",
+        type=str,
+        default="softmax",
+        choices=["softmax", "mean", "logmeanexp", "max"],
+    )
+    parser.add_argument("--spot_mass_temperature", type=float, default=1.0)
+    parser.add_argument("--spot_use_controller", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--spot_controller_hidden_dim", type=int, default=32)
+    parser.add_argument("--spot_proto_weight", type=float, default=0.0)
+    parser.add_argument("--spot_support_merge_mode", type=str, default="concat", choices=["concat", "mean"])
+    parser.add_argument("--spot_return_transport_plan", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--spot_eps", type=float, default=1e-8)
     parser.add_argument("--spif_otccls_feature_dim", type=int, default=256)
     parser.add_argument("--spif_otccls_gate_hidden", type=int, default=128)
     parser.add_argument("--spif_otccls_num_projections", type=int, default=64)
@@ -2311,6 +2329,19 @@ def get_model(args):
             f"cross_ref={getattr(args, 'ebot_use_cross_reference', 'true')}, "
             f"kshot_reweight={getattr(args, 'ebot_use_kshot_reweighting', 'true')}, "
             f"symmetric={getattr(args, 'ebot_symmetric_matching', 'false')})"
+        )
+    if args.model == "mm_spot_fsl":
+        print(
+            "  mm_spot_fsl: backbone tokens -> multi-mass partial OT evidence selection -> "
+            "normalized POT-cost aggregation "
+            f"(mass_bank={getattr(args, 'spot_mass_bank', '0.3,0.4,0.5')}, "
+            f"sinkhorn_eps={getattr(args, 'spot_sinkhorn_epsilon', 0.05)}, "
+            f"sinkhorn_iters={getattr(args, 'spot_sinkhorn_iterations', 120)}, "
+            f"aggregation={getattr(args, 'spot_mass_aggregation', 'softmax')}, "
+            f"temperature={getattr(args, 'spot_mass_temperature', 1.0)}, "
+            f"score_scale={getattr(args, 'spot_score_scale', 16.0)}, "
+            f"use_controller={getattr(args, 'spot_use_controller', 'false')}, "
+            f"proto_weight={getattr(args, 'spot_proto_weight', 0.0)})"
         )
     if args.model == "spif_otccls":
         print(

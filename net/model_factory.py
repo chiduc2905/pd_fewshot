@@ -282,6 +282,11 @@ MODEL_REGISTRY = {
         "architecture": "Alias for Evidence-Budgeted Optimal Transport with scalogram reliability priors",
         "metric": "Reliability-Budgeted Partial Optimal Transport",
     },
+    "mm_spot_fsl": {
+        "display_name": "MM-SPOT-FSL",
+        "architecture": "Backbone local tokens + multi-mass partial OT evidence selection + mass-score aggregation",
+        "metric": "Multi-Mass Partial Optimal Transport",
+    },
     "dice_emd": {
         "display_name": "DICE-EMD",
         "architecture": "ResNet12 dense descriptors + class-competitive evidence-aware balanced transport",
@@ -642,6 +647,7 @@ PAPER_BASELINE_BACKBONE_MODELS = frozenset(
 RESNET12_ONLY_MODELS = frozenset({"transport_recon_emd", "tardis_emd"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
 EBOT_MODEL_NAMES = frozenset({"evidence_budget_ot", "evidence_budgeted_ot", "ebot", "ebot_scalogram"})
+MM_SPOT_MODEL_NAMES = frozenset({"mm_spot_fsl"})
 
 
 def model_supports_fewshot_backbone(model_name, backbone_name):
@@ -936,6 +942,34 @@ def build_model_from_args(args):
             weight_budget_low=float(getattr(args, "ebot_weight_budget_low", 0.01)),
             weight_budget_high=float(getattr(args, "ebot_weight_budget_high", 0.001)),
             eps=float(getattr(args, "ebot_eps", 1e-6)),
+        )
+    if args.model in MM_SPOT_MODEL_NAMES:
+        MMSPOTFSL = _load_symbol("net.mm_spot_fsl", "MMSPOTFSL")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return MMSPOTFSL(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "token_dim", 128) or 128),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            spot_mass_bank=str(getattr(args, "spot_mass_bank", "0.3,0.4,0.5")),
+            sinkhorn_epsilon=float(getattr(args, "spot_sinkhorn_epsilon", 0.05)),
+            sinkhorn_iterations=int(getattr(args, "spot_sinkhorn_iterations", 120)),
+            sinkhorn_tolerance=float(getattr(args, "spot_sinkhorn_tolerance", 1e-6)),
+            score_scale=float(getattr(args, "spot_score_scale", 16.0)),
+            mass_aggregation=str(getattr(args, "spot_mass_aggregation", "softmax")),
+            mass_temperature=float(getattr(args, "spot_mass_temperature", 1.0)),
+            use_controller=_bool_flag(getattr(args, "spot_use_controller", "false"), default=False),
+            controller_hidden_dim=int(getattr(args, "spot_controller_hidden_dim", 32)),
+            proto_weight=float(getattr(args, "spot_proto_weight", 0.0)),
+            support_merge_mode=str(getattr(args, "spot_support_merge_mode", "concat")),
+            return_transport_plan=_bool_flag(
+                getattr(args, "spot_return_transport_plan", "false"),
+                default=False,
+            ),
+            eps=float(getattr(args, "spot_eps", 1e-8)),
         )
     if args.model == "dice_emd":
         DICEEMD = _load_symbol("net.dice_emd", "DICEEMD")
