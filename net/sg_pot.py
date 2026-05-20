@@ -101,9 +101,11 @@ class DualEvidenceScore(nn.Module):
     """Score = exp(log_scale) * (alpha * cost_score + beta * residual_gini).
 
     Uses learnable log_scale (initialized to log(10)) instead of a fixed
-    multiplier to let the model self-calibrate logit magnitude.
-    cost_score is normalized by (Lq * Ls) — a constant per episode —
-    instead of dividing by transported mass M which fluctuates with s.
+    multiplier so the model self-calibrates logit magnitude.
+
+    cost_score = -C / M  (average transport cost per unit mass).
+    Because the POT plan is solved under ``torch.no_grad()``, M is a
+    per-sample constant — no gradient instability from dividing by it.
     """
 
     _INIT_LOG_SCALE = 2.3  # ~log(10)
@@ -127,9 +129,9 @@ class DualEvidenceScore(nn.Module):
         s: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """
-        plan:        [B, Lq, Ls]
-        cost_matrix: [B, Lq, Ls]
-        a:           [B, Lq]
+        plan:        [B, Lq, Ls]  (detached — no gradient through solver)
+        cost_matrix: [B, Lq, Ls]  (live — gradient flows to encoder)
+        a:           [B, Lq]       (live — gradient flows to saliency gate)
         s:           [B, 1]
         Returns E [B] and diagnostics dict.
         """
@@ -137,18 +139,16 @@ class DualEvidenceScore(nn.Module):
         beta = F.softplus(self.raw_beta)
         scale = self.effective_scale
 
-        Lq, Ls = plan.shape[1], plan.shape[2]
-        normalizer = float(Lq * Ls)
-
         C = (plan * cost_matrix).sum(dim=(-2, -1))
         M = plan.sum(dim=(-2, -1))
-        cost_score = -C / normalizer
+        cost_score = -C / (M + 1e-8)
 
         q_transported = plan.sum(dim=-1)
         q_residual = (a - q_transported).clamp(min=0)
         residual_sum = q_residual.sum(dim=-1, keepdim=True) + 1e-8
         residual_dist = q_residual / residual_sum
 
+        Lq = plan.shape[1]
         sorted_res, _ = torch.sort(residual_dist, dim=-1)
         idx = torch.arange(1, Lq + 1, device=plan.device, dtype=plan.dtype)
         gini = (
