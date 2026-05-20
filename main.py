@@ -823,12 +823,6 @@ def get_args():
     parser.add_argument("--spot_support_merge_mode", type=str, default="concat", choices=["concat", "mean"])
     parser.add_argument("--spot_return_transport_plan", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--spot_eps", type=float, default=1e-8)
-    parser.add_argument(
-        "--pare_mass_ratio_bank",
-        type=str,
-        default="0.35,0.5,0.65",
-        help="PARE-FSL: comma-separated fractions in (0,1] for partial transported mass vs min(sum a, sum b).",
-    )
     parser.add_argument("--pare_sinkhorn_epsilon", type=float, default=0.04)
     parser.add_argument("--pare_sinkhorn_iterations", type=int, default=80)
     parser.add_argument("--pare_sinkhorn_tolerance", type=float, default=1e-6)
@@ -836,22 +830,36 @@ def get_args():
     parser.add_argument(
         "--pare_marginal_mode",
         type=str,
-        default="discriminative",
-        choices=["uniform", "discriminative"],
+        default="egsm",
+        choices=["egsm", "uniform"],
     )
-    parser.add_argument("--pare_marginal_temperature", type=float, default=0.15)
+    parser.add_argument("--pare_egsm_hidden_dim", type=int, default=32)
+    parser.add_argument("--pare_egsm_kappa_min", type=float, default=0.05)
+    parser.add_argument("--pare_egsm_kappa_max", type=float, default=0.35)
+    parser.add_argument("--pare_egsm_candidate_tau_q", type=float, default=1.0)
+    parser.add_argument("--pare_egsm_candidate_tau_b", type=float, default=1.0)
     parser.add_argument(
-        "--pare_mass_aggregation",
+        "--pare_enable_learned_alpha",
         type=str,
-        default="softmax",
-        choices=["softmax", "mean", "logmeanexp", "max"],
+        default="true",
+        choices=["true", "false"],
     )
-    parser.add_argument("--pare_mass_temperature", type=float, default=1.0)
+    parser.add_argument("--pare_alpha_min", type=float, default=0.30)
+    parser.add_argument("--pare_alpha_max", type=float, default=0.70)
+    parser.add_argument("--pare_alpha_prior", type=float, default=0.50)
+    parser.add_argument(
+        "--pare_fixed_alpha",
+        type=float,
+        default=None,
+        help="If set, disables learned alpha and fixes the partial transport fraction.",
+    )
+    parser.add_argument("--pare_alpha_reg_lambda", type=float, default=0.01)
+    parser.add_argument("--pare_alpha_head_hidden_dim", type=int, default=32)
     parser.add_argument(
         "--pare_shot_pooling",
         type=str,
-        default="logsumexp",
-        choices=["mean", "logsumexp"],
+        default="discrepancy",
+        choices=["mean", "logsumexp", "discrepancy"],
     )
     parser.add_argument("--pare_shot_temperature", type=float, default=1.0)
     parser.add_argument("--pare_eps", type=float, default=1e-8)
@@ -1356,6 +1364,32 @@ def get_args():
         default=5,
         help="Maximum Ours DMT debug episodes to export; 0 means no cap.",
     )
+
+    # SG-POT arguments
+    parser.add_argument("--pot_epsilon", type=float, default=0.05,
+                        help="SG-POT: entropic regularization for POT solver")
+    parser.add_argument("--pot_iterations", type=int, default=100,
+                        help="SG-POT: Sinkhorn iterations for POT solver")
+    parser.add_argument("--pot_s_min", type=float, default=0.3,
+                        help="SG-POT: minimum adaptive mass fraction")
+    parser.add_argument("--pot_s_max", type=float, default=0.8,
+                        help="SG-POT: maximum adaptive mass fraction")
+    parser.add_argument("--pot_entropy_reg", type=float, default=0.05,
+                        help="SG-POT: saliency entropy regularization weight")
+    parser.add_argument("--pot_entropy_target", type=float, default=0.7,
+                        help="SG-POT: target entropy ratio (0=peaked, 1=uniform)")
+    parser.add_argument("--pot_ablate_uniform_marginals", type=str, default="false",
+                        choices=["true", "false"],
+                        help="SG-POT ablation: disable saliency, use uniform marginals")
+    parser.add_argument("--pot_ablate_fixed_s", type=float, default=None,
+                        help="SG-POT ablation: use fixed s instead of adaptive (e.g. 0.5)")
+    parser.add_argument("--pot_ablate_cost_only_score", type=str, default="false",
+                        choices=["true", "false"],
+                        help="SG-POT ablation: use only cost score, no residual Gini")
+    parser.add_argument("--pot_ablate_no_entropy_reg", type=str, default="false",
+                        choices=["true", "false"],
+                        help="SG-POT ablation: disable saliency entropy regularization")
+
     parser.add_argument(
         "--hrot_ecot_identity_reg",
         "--ecot_identity_reg",
@@ -2384,14 +2418,14 @@ def get_model(args):
         )
     if args.model == "pare_fsl":
         print(
-            "  pare_fsl: backbone tokens -> discriminative marginals (sum=1) -> "
-            "shot-wise native partial OT -> mass-ratio response -> partial discrepancy score "
-            f"(mass_ratio_bank={getattr(args, 'pare_mass_ratio_bank', '0.35,0.5,0.65')}, "
+            "  pare_fsl: backbone tokens -> EGSM marginals (sum=1) -> learned alpha per shot -> "
+            "native partial OT -> partial discrepancy score "
+            f"(marginal_mode={getattr(args, 'pare_marginal_mode', 'egsm')}, "
+            f"learned_alpha={getattr(args, 'pare_enable_learned_alpha', 'true')}, "
+            f"alpha_range=[{getattr(args, 'pare_alpha_min', 0.30)}, {getattr(args, 'pare_alpha_max', 0.70)}], "
             f"sinkhorn_eps={getattr(args, 'pare_sinkhorn_epsilon', 0.04)}, "
             f"sinkhorn_iters={getattr(args, 'pare_sinkhorn_iterations', 80)}, "
-            f"marginal_mode={getattr(args, 'pare_marginal_mode', 'discriminative')}, "
-            f"mass_aggregation={getattr(args, 'pare_mass_aggregation', 'softmax')}, "
-            f"shot_pooling={getattr(args, 'pare_shot_pooling', 'logsumexp')})"
+            f"shot_pooling={getattr(args, 'pare_shot_pooling', 'discrepancy')})"
         )
     if args.model == "spif_otccls":
         print(
@@ -4371,6 +4405,19 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "ecot_ccem_uniform_mix",
         "ecot_ccem_tau_q",
         "ecot_ccem_tau_s",
+        "sgpot_saliency_q_entropy",
+        "sgpot_saliency_s_entropy",
+        "sgpot_saliency_q_max",
+        "sgpot_saliency_q_min",
+        "sgpot_adaptive_s_mean",
+        "sgpot_adaptive_s_std",
+        "sgpot_cost_score",
+        "sgpot_residual_gini",
+        "sgpot_transported_cost",
+        "sgpot_transported_mass",
+        "sgpot_alpha",
+        "sgpot_beta",
+        "sgpot_pot_plan_sparsity",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -4770,6 +4817,19 @@ def format_diagnostic_summary(metrics):
         "ecot_ccem_query_entropy",
         "ecot_ccem_support_entropy",
         "logit_scale",
+        "sgpot_saliency_q_entropy",
+        "sgpot_saliency_s_entropy",
+        "sgpot_saliency_q_max",
+        "sgpot_saliency_q_min",
+        "sgpot_adaptive_s_mean",
+        "sgpot_adaptive_s_std",
+        "sgpot_cost_score",
+        "sgpot_residual_gini",
+        "sgpot_transported_cost",
+        "sgpot_transported_mass",
+        "sgpot_alpha",
+        "sgpot_beta",
+        "sgpot_pot_plan_sparsity",
     ]
     chunks = []
     emitted = set()

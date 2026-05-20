@@ -71,13 +71,16 @@ OURS_MODEL_NAMES = frozenset({"ours"})
 OURS_FINAL_MODEL_NAMES = frozenset({"ours_final"})
 OURS_ENTRYPOINT_MODEL_NAMES = frozenset(set(OURS_MODEL_NAMES) | set(OURS_FINAL_MODEL_NAMES))
 OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
+SGPOT_MODEL_NAMES = frozenset({"sg_pot"})
 M2_LIKE_MODEL_NAMES = frozenset(
-    set(M2_MODEL_NAMES) | set(OURS_ENTRYPOINT_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES)
+    set(M2_MODEL_NAMES) | set(OURS_ENTRYPOINT_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES) | set(SGPOT_MODEL_NAMES)
 )
 # Registry name for the single canonical SB-ECOT entrypoint (aliases share the same class but different CLI defaults).
 CANONICAL_M2_MODEL_NAME = "m2"
 M2_FULL_OT_MODEL_NAMES = frozenset({"m2_full_ot", "jecot_m2_full_ot"})
-HROT_FSL_MODEL_NAMES = frozenset({"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES))
+HROT_FSL_MODEL_NAMES = frozenset(
+    {"hrot_fsl"} | set(M2_LIKE_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES) | set(SGPOT_MODEL_NAMES)
+)
 OURS_FINAL_DMUOT_ABLATION_CONFIGS = {
     "off": {
         "token_g_kind": "none",
@@ -289,8 +292,8 @@ MODEL_REGISTRY = {
     },
     "pare_fsl": {
         "display_name": "PARE-FSL",
-        "architecture": "Backbone tokens -> discriminative marginals (sum=1) -> shot-wise native partial OT -> mass-ratio response bank -> partial discrepancy score",
-        "metric": "Partial Mass-Response Optimal Transport",
+        "architecture": "Backbone tokens -> EGSM marginals (sum=1) -> learned partial mass alpha per shot -> native POT -> partial discrepancy pooling",
+        "metric": "Partial Adaptive Relational Evidence Transport",
     },
     "dice_emd": {
         "display_name": "DICE-EMD",
@@ -582,6 +585,12 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> EGSM marginals -> 3-budget UOT (rho=0.7,0.8,0.9) -> cost/mass scoring with detached denominator -> episode budget policy -> shot pooling",
         "metric": "Multi-Budget Cost-Per-Mass UOT",
     },
+    "sg_pot": {
+        "display_name": "SG-POT",
+        "paper_name": "Saliency-Guided Partial Optimal Transport",
+        "architecture": "Backbone local descriptors -> cross-conditioned saliency marginals -> adaptive mass fraction -> entropic partial OT -> dual evidence score (cost + residual Gini) -> shot pooling",
+        "metric": "Saliency-Guided Entropic Partial Wasserstein Transport",
+    },
     "ec_mrot": {
         "display_name": "EC-MROT",
         "paper_name": "Episode-Conditioned Mass-Response Optimal Transport",
@@ -624,6 +633,33 @@ MODEL_REGISTRY = {
         "metric": "Transport Evidence Matching",
     },
 }
+
+
+def _build_sgpot_kwargs(args) -> dict:
+    """Build constructor kwargs for SGPOT from CLI args."""
+    return {
+        "ours_ablation": "full",
+        "pot_epsilon": float(getattr(args, "pot_epsilon", 0.05)),
+        "pot_iterations": int(getattr(args, "pot_iterations", 100)),
+        "pot_s_min": float(getattr(args, "pot_s_min", 0.3)),
+        "pot_s_max": float(getattr(args, "pot_s_max", 0.8)),
+        "pot_entropy_reg": float(getattr(args, "pot_entropy_reg", 0.05)),
+        "pot_entropy_target": float(getattr(args, "pot_entropy_target", 0.7)),
+        "pot_ablate_uniform_marginals": _bool_flag(
+            getattr(args, "pot_ablate_uniform_marginals", "false"), default=False,
+        ),
+        "pot_ablate_fixed_s": (
+            float(args.pot_ablate_fixed_s)
+            if getattr(args, "pot_ablate_fixed_s", None) is not None
+            else None
+        ),
+        "pot_ablate_cost_only_score": _bool_flag(
+            getattr(args, "pot_ablate_cost_only_score", "false"), default=False,
+        ),
+        "pot_ablate_no_entropy_reg": _bool_flag(
+            getattr(args, "pot_ablate_no_entropy_reg", "false"), default=False,
+        ),
+    }
 
 
 def get_model_choices():
@@ -960,16 +996,24 @@ def build_model_from_args(args):
             image_size=image_size,
             resnet12_drop_rate=0.0,
             resnet12_dropblock_size=5,
-            pare_mass_ratio_bank=str(getattr(args, "pare_mass_ratio_bank", "0.35,0.5,0.65")),
             sinkhorn_epsilon=float(getattr(args, "pare_sinkhorn_epsilon", 0.04)),
             sinkhorn_iterations=int(getattr(args, "pare_sinkhorn_iterations", 80)),
             sinkhorn_tolerance=float(getattr(args, "pare_sinkhorn_tolerance", 1e-6)),
             score_scale=float(getattr(args, "pare_score_scale", 16.0)),
-            marginal_mode=str(getattr(args, "pare_marginal_mode", "discriminative")),
-            marginal_temperature=float(getattr(args, "pare_marginal_temperature", 0.15)),
-            mass_aggregation=str(getattr(args, "pare_mass_aggregation", "softmax")),
-            mass_temperature=float(getattr(args, "pare_mass_temperature", 1.0)),
-            shot_pooling=str(getattr(args, "pare_shot_pooling", "logsumexp")),
+            marginal_mode=str(getattr(args, "pare_marginal_mode", "egsm")),
+            egsm_hidden_dim=int(getattr(args, "pare_egsm_hidden_dim", 32)),
+            egsm_kappa_min=float(getattr(args, "pare_egsm_kappa_min", 0.05)),
+            egsm_kappa_max=float(getattr(args, "pare_egsm_kappa_max", 0.35)),
+            egsm_candidate_tau_q=float(getattr(args, "pare_egsm_candidate_tau_q", 1.0)),
+            egsm_candidate_tau_b=float(getattr(args, "pare_egsm_candidate_tau_b", 1.0)),
+            enable_learned_alpha=_bool_flag(getattr(args, "pare_enable_learned_alpha", "true"), default=True),
+            alpha_min=float(getattr(args, "pare_alpha_min", 0.30)),
+            alpha_max=float(getattr(args, "pare_alpha_max", 0.70)),
+            alpha_prior=float(getattr(args, "pare_alpha_prior", 0.50)),
+            fixed_alpha=getattr(args, "pare_fixed_alpha", None),
+            alpha_reg_lambda=float(getattr(args, "pare_alpha_reg_lambda", 0.01)),
+            alpha_head_hidden_dim=int(getattr(args, "pare_alpha_head_hidden_dim", 32)),
+            shot_pooling=str(getattr(args, "pare_shot_pooling", "discrepancy")),
             shot_temperature_init=float(getattr(args, "pare_shot_temperature", 1.0)),
             eps=float(getattr(args, "pare_eps", 1e-8)),
         )
@@ -2504,7 +2548,11 @@ def build_model_from_args(args):
         is_m2_like_model = args.model in M2_LIKE_MODEL_NAMES
         is_m2_full_ot = args.model in M2_FULL_OT_MODEL_NAMES
         is_ours_cpm_model = args.model in OURS_CPM_MODEL_NAMES
+        is_sgpot_model = args.model in SGPOT_MODEL_NAMES
         HROTFSL = (
+            _load_symbol("net.sg_pot", "SGPOT")
+            if is_sgpot_model
+            else
             _load_symbol("net.ours_cpm", "OursCPM")
             if is_ours_cpm_model
             else
@@ -2544,6 +2592,9 @@ def build_model_from_args(args):
             resnet12_dropblock_size=5,
             variant="J_ECOT_M2" if is_m2_like_model else str(getattr(args, "hrot_variant", "E")),
             **(
+                _build_sgpot_kwargs(args)
+                if is_sgpot_model
+                else
                 {
                     "cpm_ablation": str(getattr(args, "cpm_ablation", "full")),
                     "cpm_alpha": float(getattr(args, "cpm_alpha", 1.0)),
