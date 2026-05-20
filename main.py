@@ -1298,6 +1298,38 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--enable_pot_guide",
+        action="store_true",
+        default=False,
+        help="Enable POT-guided non-uniform marginals for UOT",
+    )
+    parser.add_argument(
+        "--pot_guide_s",
+        type=float,
+        default=0.5,
+        help="Fixed mass fraction for POT guide",
+    )
+    parser.add_argument(
+        "--pot_guide_adaptive_s",
+        action="store_true",
+        default=False,
+        help="Predict s per pair from cost statistics",
+    )
+    parser.add_argument("--pot_guide_s_min", type=float, default=0.2)
+    parser.add_argument("--pot_guide_s_max", type=float, default=0.8)
+    parser.add_argument(
+        "--pot_guide_epsilon",
+        type=float,
+        default=0.05,
+        help="Entropic reg for POT guide solver",
+    )
+    parser.add_argument(
+        "--pot_guide_max_iter",
+        type=int,
+        default=50,
+        help="Max iterations for POT guide (no gradient, cheap)",
+    )
+    parser.add_argument(
         "--ours_ablation",
         type=str,
         default="full",
@@ -4418,6 +4450,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "sgpot_alpha",
         "sgpot_beta",
         "sgpot_pot_plan_sparsity",
+        "pot_guide/alpha",
+        "pot_guide/temperature",
+        "pot_guide/s_mean",
+        "pot_guide/pot_sparsity",
+        "pot_guide/marginal_q_max",
+        "pot_guide/marginal_q_min",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))

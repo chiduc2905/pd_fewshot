@@ -24,6 +24,19 @@ from net.fewshot_common import feature_map_to_tokens
 from net.hrot_fsl import HROTFSLResult
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.jecot_m2 import JECOTM2
+from net.modules.partial_ot import (
+    compute_partial_transport_cost,
+    compute_partial_transported_mass,
+    solve_partial_transport,
+)
+from net.modules.unbalanced_ot import (
+    compute_transport_cost,
+    compute_transported_mass,
+    sinkhorn_balanced_log,
+    sinkhorn_balanced_pot,
+    sinkhorn_unbalanced_log,
+    sinkhorn_unbalanced_pot,
+)
 
 
 OURS_ABLATIONS = frozenset({"full", "full_ot", "no_egsm", "gap"})
@@ -216,6 +229,13 @@ class OursM2(JECOTM2):
         dmuot_shot_strength: str = "none",
         **kwargs,
     ) -> None:
+        enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
+        pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
+        pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
+        pot_guide_s_min = float(kwargs.pop("pot_guide_s_min", 0.2))
+        pot_guide_s_max = float(kwargs.pop("pot_guide_s_max", 0.8))
+        pot_guide_epsilon = float(kwargs.pop("pot_guide_epsilon", 0.05))
+        pot_guide_max_iter = int(kwargs.pop("pot_guide_max_iter", 50))
         if not 0.0 <= float(dm_alpha) <= 1.0:
             raise ValueError("dm_alpha must be in [0, 1]")
         if int(dm_debug_max_episodes) < 0:
@@ -249,6 +269,20 @@ class OursM2(JECOTM2):
             transport_mode=kwargs["ecot_transport_mode"],
             **kwargs,
         )
+        self.enable_pot_guide = bool(enable_pot_guide)
+        if self.enable_pot_guide:
+            from net.modules.pot_guide import POTGuideMarginals
+
+            self.pot_guide_module = POTGuideMarginals(
+                fixed_s=pot_guide_s,
+                adaptive_s=pot_guide_adaptive_s,
+                s_min=pot_guide_s_min,
+                s_max=pot_guide_s_max,
+                epsilon=pot_guide_epsilon,
+                max_iter=pot_guide_max_iter,
+                eps=self.eps,
+            )
+            self._last_pot_guide_diagnostics: dict[str, torch.Tensor] | None = None
         self.token_attention_query = (
             torch.nn.Parameter(torch.randn(self.token_dim) * 0.01)
             if self.token_g_kind == "learned_attention"
@@ -434,6 +468,128 @@ class OursM2(JECOTM2):
             1.0 - strength.to(device=prob.device, dtype=prob.dtype)
         ) * uniform
 
+    def _transport_match(
+        self,
+        cost: torch.Tensor,
+        rho: torch.Tensor,
+        a: torch.Tensor | None = None,
+        b: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_query, num_way, query_tokens, class_tokens = cost.shape
+        partial_transport_mass = None
+        if self.enable_pot_guide and a is None and b is None:
+            a, b, pot_guide_diagnostics = self.pot_guide_module(cost, rho)
+            self._last_pot_guide_diagnostics = pot_guide_diagnostics
+        else:
+            if a is None:
+                base_a = cost.new_full((num_query, query_tokens), 1.0 / float(query_tokens))
+                a = base_a.unsqueeze(1).expand(-1, num_way, -1)
+                if self.uses_partial_transport:
+                    partial_transport_mass = rho.to(device=cost.device, dtype=cost.dtype)
+                elif self.uses_unbalanced_transport:
+                    a = a * rho.unsqueeze(-1)
+            else:
+                if tuple(a.shape) != (num_query, num_way, query_tokens):
+                    raise ValueError(
+                        "a must have shape (NumQuery, NumPairs, QueryTokens), "
+                        f"got {tuple(a.shape)}"
+                    )
+                a = a.to(device=cost.device, dtype=cost.dtype)
+
+            if b is None:
+                base_b = cost.new_full((num_way, class_tokens), 1.0 / float(class_tokens))
+                b = base_b.unsqueeze(0).expand(num_query, -1, -1)
+                if self.uses_partial_transport:
+                    partial_transport_mass = rho.to(device=cost.device, dtype=cost.dtype)
+                elif self.uses_unbalanced_transport:
+                    b = b * rho.unsqueeze(-1)
+            else:
+                if tuple(b.shape) != (num_query, num_way, class_tokens):
+                    raise ValueError(
+                        "b must have shape (NumQuery, NumPairs, SupportTokens), "
+                        f"got {tuple(b.shape)}"
+                    )
+                b = b.to(device=cost.device, dtype=cost.dtype)
+
+        pair_cost = cost.reshape(num_query * num_way, query_tokens, class_tokens)
+        pair_a = a.reshape(num_query * num_way, query_tokens)
+        pair_b = b.reshape(num_query * num_way, class_tokens)
+
+        if self.uses_partial_transport:
+            max_mass = torch.minimum(pair_a.sum(dim=-1), pair_b.sum(dim=-1))
+            if partial_transport_mass is None:
+                pair_transport_mass = max_mass
+            else:
+                pair_transport_mass = partial_transport_mass.reshape(num_query * num_way).to(
+                    device=cost.device,
+                    dtype=cost.dtype,
+                )
+                pair_transport_mass = torch.minimum(pair_transport_mass, max_mass)
+            pair_plan = solve_partial_transport(
+                pair_cost,
+                pair_a,
+                pair_b,
+                transport_mass=pair_transport_mass,
+                backend=self.partial_backend,
+                reg=self.sinkhorn_epsilon,
+                max_iter=self.sinkhorn_iterations,
+                tol=self.sinkhorn_tolerance,
+                exact=self.partial_exact,
+                eps=self.eps,
+            )
+            pair_transport_cost = compute_partial_transport_cost(pair_plan, pair_cost)
+            pair_transport_mass = compute_partial_transported_mass(pair_plan)
+        elif self.ot_backend == "pot":
+            if self.uses_unbalanced_transport:
+                pair_plan = sinkhorn_unbalanced_pot(
+                    pair_cost,
+                    pair_a,
+                    pair_b,
+                    tau_q=self.tau_q,
+                    tau_c=self.tau_c,
+                    eps=self.sinkhorn_epsilon,
+                    max_iter=self.sinkhorn_iterations,
+                    tol=self.sinkhorn_tolerance,
+                )
+            else:
+                pair_plan = sinkhorn_balanced_pot(
+                    pair_cost,
+                    pair_a,
+                    pair_b,
+                    eps=self.sinkhorn_epsilon,
+                    max_iter=self.sinkhorn_iterations,
+                    tol=self.sinkhorn_tolerance,
+                )
+            pair_transport_cost = compute_transport_cost(pair_plan, pair_cost)
+            pair_transport_mass = compute_transported_mass(pair_plan)
+        else:
+            if self.uses_unbalanced_transport:
+                pair_plan = sinkhorn_unbalanced_log(
+                    pair_cost,
+                    pair_a,
+                    pair_b,
+                    tau_q=self.tau_q,
+                    tau_c=self.tau_c,
+                    eps=self.sinkhorn_epsilon,
+                    max_iter=self.sinkhorn_iterations,
+                    tol=self.sinkhorn_tolerance,
+                )
+            else:
+                pair_plan = sinkhorn_balanced_log(
+                    pair_cost,
+                    pair_a,
+                    pair_b,
+                    eps=self.sinkhorn_epsilon,
+                    max_iter=self.sinkhorn_iterations,
+                    tol=self.sinkhorn_tolerance,
+                )
+            pair_transport_cost = compute_transport_cost(pair_plan, pair_cost)
+            pair_transport_mass = compute_transported_mass(pair_plan)
+        plan = pair_plan.reshape(num_query, num_way, query_tokens, class_tokens)
+        transport_cost = pair_transport_cost.reshape(num_query, num_way)
+        transport_mass = pair_transport_mass.reshape(num_query, num_way)
+        return plan, transport_cost, transport_mass
+
     def _forward_ecot_budget_bank(
         self,
         flat_cost: torch.Tensor,
@@ -450,6 +606,8 @@ class OursM2(JECOTM2):
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
+        if self.enable_pot_guide:
+            self._last_pot_guide_diagnostics = None
 
         if self.token_g_kind != "none":
             if query_tokens is None or support_tokens is None:
@@ -539,6 +697,8 @@ class OursM2(JECOTM2):
                     + dmuot_payload["marginal_support_l1_drift"]
                 )
             payload.update(dmuot_payload)
+        if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
+            payload.update(self._last_pot_guide_diagnostics)
         return payload
 
     def _update_differential_mode_template(self, episode_template: torch.Tensor) -> None:
@@ -756,6 +916,12 @@ class OursM2(JECOTM2):
             "marginal_l1_drift",
             "dmuot_shot_strength",
             "lambda_cost_effective",
+            "pot_guide/alpha",
+            "pot_guide/temperature",
+            "pot_guide/s_mean",
+            "pot_guide/pot_sparsity",
+            "pot_guide/marginal_q_max",
+            "pot_guide/marginal_q_min",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

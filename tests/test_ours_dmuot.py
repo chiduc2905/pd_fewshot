@@ -52,6 +52,70 @@ def test_token_g_none_matches_ours_final_baseline_logits():
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
 
+def test_pot_guide_flag_off_creates_no_module_and_matches_logits():
+    torch.manual_seed(509)
+    baseline = _tiny_ours_final()
+    flag_off = _tiny_ours_final(enable_pot_guide=False)
+    flag_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    flag_off.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = flag_off(query, support)
+
+    assert not baseline.enable_pot_guide
+    assert not hasattr(baseline, "pot_guide_module")
+    assert not flag_off.enable_pot_guide
+    assert not hasattr(flag_off, "pot_guide_module")
+    assert torch.equal(actual, expected)
+
+
+def test_pot_guide_enabled_exposes_diagnostics_and_nonuniform_marginals():
+    torch.manual_seed(513)
+    model = _tiny_ours_final(enable_pot_guide=True, pot_guide_max_iter=4)
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.enable_pot_guide
+    assert hasattr(model, "pot_guide_module")
+    for key in (
+        "pot_guide/alpha",
+        "pot_guide/temperature",
+        "pot_guide/s_mean",
+        "pot_guide/pot_sparsity",
+        "pot_guide/marginal_q_max",
+        "pot_guide/marginal_q_min",
+    ):
+        assert key in outputs
+        assert torch.isfinite(outputs[key])
+    uniform = model.ecot_base_rho / float(outputs["transport_plan"].shape[-2])
+    assert not torch.isclose(outputs["pot_guide/marginal_q_max"], outputs["pot_guide/marginal_q_min"])
+    assert outputs["pot_guide/marginal_q_max"] > uniform
+
+
+def test_pot_guide_adaptive_s_receives_gradient():
+    torch.manual_seed(514)
+    model = _tiny_ours_final(enable_pot_guide=True, pot_guide_adaptive_s=True, pot_guide_max_iter=4)
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].pow(2).sum()
+    loss.backward()
+
+    assert model.pot_guide_module.raw_alpha.grad is not None
+    assert model.pot_guide_module.log_tau.grad is not None
+    assert any(
+        param.grad is not None and torch.isfinite(param.grad).all()
+        for param in model.pot_guide_module.s_predictor.parameters()
+    )
+
+
 def test_lambda_cost_zero_keeps_logits_and_logs_token_g():
     torch.manual_seed(511)
     baseline = _tiny_ours_final()

@@ -212,6 +212,10 @@ def validate_dmuot_scope(args) -> None:
     )
     if ablation != "off" and str(getattr(args, "model", "")).strip().lower() != "ours_final":
         raise ValueError("--ours_final_dmuot_ablation is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_pot_guide", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_pot_guide is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2613,6 +2617,23 @@ def build_model_from_args(args):
                     "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
+                    **(
+                        {
+                            "enable_pot_guide": True,
+                            "pot_guide_s": float(getattr(args, "pot_guide_s", 0.5)),
+                            "pot_guide_adaptive_s": _bool_flag(
+                                getattr(args, "pot_guide_adaptive_s", False),
+                                default=False,
+                            ),
+                            "pot_guide_s_min": float(getattr(args, "pot_guide_s_min", 0.2)),
+                            "pot_guide_s_max": float(getattr(args, "pot_guide_s_max", 0.8)),
+                            "pot_guide_epsilon": float(getattr(args, "pot_guide_epsilon", 0.05)),
+                            "pot_guide_max_iter": int(getattr(args, "pot_guide_max_iter", 50)),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_pot_guide", False), default=False)
+                        else {}
+                    ),
                 }
                 if is_ours_entrypoint_model
                 else {}
