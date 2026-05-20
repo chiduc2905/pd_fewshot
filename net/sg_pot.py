@@ -19,7 +19,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from net.hrot_fsl import HROTFSLResult
-from net.modules.partial_ot import entropic_partial_wasserstein
+from net.modules.partial_ot import entropic_partial_wasserstein, resolve_partial_transport_mass
+from net.modules.fast_partial_ot import fast_partial_wasserstein
 from net.ours import OursM2
 
 
@@ -57,14 +58,21 @@ class SaliencyGate(nn.Module):
 
 
 class AdaptiveMassFraction(nn.Module):
-    """Predict per-pair mass fraction s from cost-matrix statistics."""
+    """Predict per-pair mass fraction s from cost-matrix statistics.
+
+    Input features are normalized via LayerNorm before the MLP to prevent
+    distribution shift in the cost statistics from destabilizing training.
+    """
+
+    _NUM_FEATURES = 6
 
     def __init__(self, s_min: float = 0.3, s_max: float = 0.8):
         super().__init__()
         self.s_min = s_min
         self.s_max = s_max
+        self.feat_norm = nn.LayerNorm(self._NUM_FEATURES)
         self.predictor = nn.Sequential(
-            nn.Linear(6, 16),
+            nn.Linear(self._NUM_FEATURES, 16),
             nn.ReLU(inplace=True),
             nn.Linear(16, 1),
         )
@@ -84,18 +92,32 @@ class AdaptiveMassFraction(nn.Module):
             [feat_mean, feat_std, feat_min, feat_max, feat_gap, feat_cv],
             dim=-1,
         )
+        features = self.feat_norm(features)
         raw = self.predictor(features)
         return self.s_min + (self.s_max - self.s_min) * torch.sigmoid(raw)
 
 
 class DualEvidenceScore(nn.Module):
-    """Score = scale * (alpha * cost_score + beta * residual_gini)."""
+    """Score = exp(log_scale) * (alpha * cost_score + beta * residual_gini).
+
+    Uses learnable log_scale (initialized to log(10)) instead of a fixed
+    multiplier to let the model self-calibrate logit magnitude.
+    cost_score is normalized by (Lq * Ls) — a constant per episode —
+    instead of dividing by transported mass M which fluctuates with s.
+    """
+
+    _INIT_LOG_SCALE = 2.3  # ~log(10)
 
     def __init__(self, score_scale: float = 16.0):
         super().__init__()
-        self.score_scale = score_scale
-        self.raw_alpha = nn.Parameter(torch.tensor(1.0))
-        self.raw_beta = nn.Parameter(torch.tensor(-1.0))
+        self.nominal_score_scale = score_scale
+        self.log_scale = nn.Parameter(torch.tensor(self._INIT_LOG_SCALE))
+        self.raw_alpha = nn.Parameter(torch.tensor(0.5))
+        self.raw_beta = nn.Parameter(torch.tensor(-0.5))
+
+    @property
+    def effective_scale(self) -> torch.Tensor:
+        return self.log_scale.exp().clamp(max=50.0)
 
     def forward(
         self,
@@ -108,22 +130,25 @@ class DualEvidenceScore(nn.Module):
         plan:        [B, Lq, Ls]
         cost_matrix: [B, Lq, Ls]
         a:           [B, Lq]
-        s:           [B, 1] (unused directly, kept for API symmetry)
+        s:           [B, 1]
         Returns E [B] and diagnostics dict.
         """
         alpha = F.softplus(self.raw_alpha)
         beta = F.softplus(self.raw_beta)
+        scale = self.effective_scale
+
+        Lq, Ls = plan.shape[1], plan.shape[2]
+        normalizer = float(Lq * Ls)
 
         C = (plan * cost_matrix).sum(dim=(-2, -1))
         M = plan.sum(dim=(-2, -1))
-        cost_score = -C / (M + 1e-8)
+        cost_score = -C / normalizer
 
         q_transported = plan.sum(dim=-1)
         q_residual = (a - q_transported).clamp(min=0)
         residual_sum = q_residual.sum(dim=-1, keepdim=True) + 1e-8
         residual_dist = q_residual / residual_sum
 
-        Lq = plan.shape[1]
         sorted_res, _ = torch.sort(residual_dist, dim=-1)
         idx = torch.arange(1, Lq + 1, device=plan.device, dtype=plan.dtype)
         gini = (
@@ -132,7 +157,7 @@ class DualEvidenceScore(nn.Module):
             - (Lq + 1.0) / Lq
         )
 
-        E = self.score_scale * (alpha * cost_score + beta * gini)
+        E = scale * (alpha * cost_score + beta * gini)
         diag = {
             "cost_score": cost_score.detach(),
             "residual_gini": gini.detach(),
@@ -140,6 +165,7 @@ class DualEvidenceScore(nn.Module):
             "transported_mass": M.detach(),
             "alpha": alpha.detach(),
             "beta": beta.detach(),
+            "score_scale": scale.detach(),
         }
         return E, diag
 
@@ -264,19 +290,29 @@ class SGPOT(OursM2):
         b: torch.Tensor,
         s: torch.Tensor,
     ) -> torch.Tensor:
-        """Call native entropic partial OT solver.
+        """Fast augmented Sinkhorn partial OT solver.
 
         s is [B, 1] — fractional mass to transport.  Marginals a, b sum to 1.0,
         so ``transport_mass_ratio=s`` means the solver transports ``s * min(1, 1) = s``.
+
+        The iterative solver produces a deep compute graph (100 projections)
+        that is numerically fragile for backprop.  We detach the plan;
+        gradients flow through the scorer which re-uses the live cost matrix,
+        marginals, and s alongside the fixed plan geometry.
         """
-        return entropic_partial_wasserstein(
-            cost=cost,
-            a=a,
-            b=b,
-            transport_mass_ratio=s.squeeze(-1),
-            reg=self.pot_epsilon,
-            max_iter=self.pot_iterations,
+        mass = resolve_partial_transport_mass(
+            a, b, transport_mass_ratio=s.squeeze(-1),
         )
+        with torch.no_grad():
+            plan = fast_partial_wasserstein(
+                cost=cost,
+                a=a,
+                b=b,
+                transport_mass=mass,
+                reg=self.pot_epsilon,
+                max_iter=self.pot_iterations,
+            )
+        return plan
 
     # ------------------------------------------------------------------
     # Steps 5-8 combined: per-pair transport & score
@@ -305,8 +341,9 @@ class SGPOT(OursM2):
 
         if self._ablate_cost_only_score:
             alpha = F.softplus(self.scorer.raw_alpha)
+            scale = self.scorer.effective_scale
             cost_score = score_diag["cost_score"].to(dtype=E.dtype, device=E.device)
-            E = self.scorer.score_scale * alpha * cost_score
+            E = scale * alpha * cost_score
 
         self._sgpot_diag.update({k: v.mean().item() if torch.is_tensor(v) else v for k, v in score_diag.items()})
         self._sgpot_diag["pot_plan_sparsity"] = (plan < 1e-6).float().mean().item()

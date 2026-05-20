@@ -902,11 +902,11 @@ class HROTFSL(BaseConv64FewShotModel):
         if self.uses_partial_transport:
             self.ot_backend = ot_backend_name
             partial_pot_backends = HROT_PARTIAL_OT_POT_BACKENDS | HROT_PARTIAL_OT_EXACT_BACKENDS
-            self.partial_backend = "pot" if ot_backend_name in partial_pot_backends else "native"
+            self.partial_backend = "pot" if ot_backend_name in partial_pot_backends else "fast"
             self.partial_exact = ot_backend_name in HROT_PARTIAL_OT_EXACT_BACKENDS
         else:
             self.ot_backend = resolve_ot_backend(ot_backend_name)
-            self.partial_backend = "native"
+            self.partial_backend = "fast"
             self.partial_exact = False
         if self.uses_nuisance_decoupled_transport and self.uses_partial_transport:
             raise ValueError("NCET/W uses KL-relaxed UOT and does not support partial OT backends")

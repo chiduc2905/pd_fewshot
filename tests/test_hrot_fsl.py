@@ -3119,7 +3119,7 @@ def test_hrot_fsl_model_factory_accepts_partial_ot_backend():
 
     assert model.uses_partial_transport
     assert model.ot_backend == "partial_ot"
-    assert model.partial_backend == "native"
+    assert model.partial_backend == "fast"
 
 
 def test_hrot_fsl_model_factory_accepts_sinkhorn_iters_alias():

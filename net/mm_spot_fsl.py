@@ -69,7 +69,7 @@ class MMSPOTFSL(BaseConv64FewShotModel):
         score_scale: float = 16.0,
         mass_aggregation: str = "softmax",
         mass_temperature: float = 1.0,
-        partial_backend: str = "pot",
+        partial_backend: str = "fast",
         use_controller: bool = False,
         controller_hidden_dim: int = 32,
         proto_weight: float = 0.0,

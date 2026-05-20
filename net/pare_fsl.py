@@ -362,7 +362,7 @@ class PAREFSL(BaseConv64FewShotModel):
             flat_a,
             flat_b,
             transport_mass_ratio=flat_alpha,
-            backend="native",
+            backend="fast",
             reg=self.sinkhorn_epsilon,
             max_iter=self.sinkhorn_iterations,
             tol=self.sinkhorn_tolerance,

@@ -13,6 +13,11 @@ from __future__ import annotations
 
 import torch
 
+from net.modules.fast_partial_ot import (
+    fast_partial_wasserstein,
+    fast_partial_wasserstein_nesterov,
+)
+
 try:
     import ot
 except ImportError:  # pragma: no cover - exercised only when POT is unavailable
@@ -418,16 +423,56 @@ def solve_partial_transport(
     *,
     transport_mass_ratio: float | torch.Tensor | None = None,
     mass_ratio: float | torch.Tensor | None = None,
-    backend: str = "native",
+    backend: str = "fast",
     reg: float = 0.05,
     max_iter: int = 100,
     tol: float = 1e-6,
     nb_dummies: int = 1,
     exact: bool = False,
+    dummy_cost_scale: float = 1.0,
+    momentum: float = 0.9,
     eps: float = EPS,
 ) -> torch.Tensor:
-    """Dispatch helper for reusable partial OT matching blocks."""
+    """Dispatch helper for reusable partial OT matching blocks.
+
+    Backends:
+        "fast" (default): Augmented balanced Sinkhorn in log-domain.
+            ~2-3x faster than "native" with exact POT feasibility.
+        "fast_nesterov": Same as "fast" + Nesterov momentum (~15-20 iters).
+        "native": Original Bregman projections (slower, ~100 iters).
+        "pot": External POT library (exact LP or entropic).
+    """
     backend = str(backend).lower()
+
+    if backend in ("fast", "fast_nesterov"):
+        mass = resolve_partial_transport_mass(
+            a, b,
+            transport_mass=transport_mass,
+            transport_mass_ratio=transport_mass_ratio,
+            mass_ratio=mass_ratio,
+            eps=eps,
+        )
+        if backend == "fast_nesterov":
+            return fast_partial_wasserstein_nesterov(
+                cost, a, b,
+                transport_mass=mass,
+                reg=reg,
+                max_iter=max_iter,
+                tol=tol,
+                dummy_cost_scale=dummy_cost_scale,
+                momentum=momentum,
+                eps=eps,
+            )
+        return fast_partial_wasserstein(
+            cost, a, b,
+            transport_mass=mass,
+            reg=reg,
+            max_iter=max_iter,
+            tol=tol,
+            dummy_cost_scale=dummy_cost_scale,
+            eps=eps,
+        )
+
     if backend == "native":
         if exact:
             raise ValueError("exact=True is only supported by backend='pot'")

@@ -1795,7 +1795,7 @@ def run_experiment(
     print("=" * 72)
 
     use_external_smnet = model in EXTERNAL_SMNET_MODELS
-    grad_clip = "0.0"
+    grad_clip = "1.0" if model == SGPOT_MODEL_NAME else "0.0"
     target_script = (
         str(get_smnet_root() / "main.py")
         if use_external_smnet

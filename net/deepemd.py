@@ -181,7 +181,7 @@ class DeepEMD(nn.Module):
         partial_mass_fraction: float = 0.5,
         partial_transport_mass: float | None = None,
         partial_score_normalize: bool = True,
-        partial_backend: str = "native",
+        partial_backend: str = "fast",
         partial_exact: bool = False,
         eps: float = 1e-8,
         sfc_lr: float = 0.1,
