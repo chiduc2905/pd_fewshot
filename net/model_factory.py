@@ -2649,6 +2649,9 @@ def build_model_from_args(args):
                             "context_fusion": str(
                                 getattr(args, "context_fusion", "weighted_sum")
                             ),
+                            "context_gate_max": float(
+                                getattr(args, "context_gate_max", 1.0)
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_context_enrichment", False), default=False)

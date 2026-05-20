@@ -237,6 +237,7 @@ class OursM2(JECOTM2):
         enable_context_enrichment = _bool_config(kwargs.pop("enable_context_enrichment", False))
         context_kernel_sizes_raw = kwargs.pop("context_kernel_sizes", "3,5")
         context_fusion = str(kwargs.pop("context_fusion", "weighted_sum"))
+        context_gate_max = float(kwargs.pop("context_gate_max", 1.0))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -338,6 +339,7 @@ class OursM2(JECOTM2):
                 channels=self.hidden_dim,
                 kernel_sizes=context_ks,
                 fusion=context_fusion,
+                gate_max=context_gate_max,
             )
             self._last_context_diagnostics: dict[str, torch.Tensor] | None = None
 

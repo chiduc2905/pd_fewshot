@@ -1339,6 +1339,12 @@ def get_args():
         help="Fusion strategy for context enrichment branches.",
     )
     parser.add_argument(
+        "--context_gate_max",
+        type=float,
+        default=1.0,
+        help="Clamp gate value to this max (e.g. 0.3). Limits enrichment strength to prevent meta-overfitting.",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3451,6 +3457,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_context_enrichment",
             "context_kernel_sizes",
             "context_fusion",
+            "context_gate_max",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]

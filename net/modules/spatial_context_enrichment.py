@@ -46,6 +46,7 @@ class SpatialContextEnrichment(nn.Module):
         channels: int,
         kernel_sizes: tuple[int, ...] = (3, 5),
         fusion: str = "weighted_sum",
+        gate_max: float = 1.0,
     ) -> None:
         super().__init__()
         fusion = str(fusion).strip().lower().replace("-", "_")
@@ -57,6 +58,7 @@ class SpatialContextEnrichment(nn.Module):
         self.channels = int(channels)
         self.kernel_sizes = tuple(int(k) for k in kernel_sizes)
         self.fusion_mode = fusion
+        self.gate_max = float(gate_max)
 
         self.branches = nn.ModuleList()
         for k in self.kernel_sizes:
@@ -88,7 +90,10 @@ class SpatialContextEnrichment(nn.Module):
     @property
     def gate_value(self) -> torch.Tensor:
         if self.fusion_mode == "weighted_sum":
-            return torch.sigmoid(self.raw_gate - 4.0)
+            g = torch.sigmoid(self.raw_gate - 4.0)
+            if self.gate_max < 1.0:
+                g = g.clamp(max=self.gate_max)
+            return g
         return self.raw_gate.new_tensor(1.0)
 
     def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
@@ -111,6 +116,8 @@ class SpatialContextEnrichment(nn.Module):
             gate = torch.sigmoid(
                 self.raw_gate.to(device=feature_map.device, dtype=feature_map.dtype) - 4.0
             )
+            if self.gate_max < 1.0:
+                gate = gate.clamp(max=self.gate_max)
             return feature_map + gate * (fused - feature_map)
         else:
             concat = torch.cat(branch_outputs, dim=1)
