@@ -435,7 +435,9 @@ def _token_centers_on_canvas(
 def _top_transport_matches(
     pair_plan: torch.Tensor | np.ndarray,
     *,
+    match_scores: torch.Tensor | np.ndarray | None = None,
     max_matches: int = 14,
+    matches_per_query: int = 2,
     min_mass_fraction: float = 0.0,
     eps: float = 1e-8,
 ) -> list[tuple[int, int, float, float]]:
@@ -445,23 +447,65 @@ def _top_transport_matches(
         plan = torch.as_tensor(pair_plan, dtype=torch.float32)
     if plan.dim() != 2:
         raise ValueError(f"pair_plan must be 2-D, got shape={tuple(plan.shape)}")
-    flat = plan.flatten()
-    total = float(flat.sum().item())
-    if total <= eps or flat.numel() == 0:
+    if match_scores is None:
+        scores = plan
+    elif torch.is_tensor(match_scores):
+        scores = match_scores.detach().float().cpu()
+    else:
+        scores = torch.as_tensor(match_scores, dtype=torch.float32)
+    if tuple(scores.shape) != tuple(plan.shape):
+        raise ValueError(f"match_scores must have shape={tuple(plan.shape)}, got {tuple(scores.shape)}")
+    scores = scores.clamp_min(0.0)
+    flat_scores = scores.flatten()
+    total_score = float(flat_scores.sum().item())
+    if total_score <= eps or flat_scores.numel() == 0:
         return []
-    k = min(max(1, int(max_matches)), int(flat.numel()))
-    values, indices = torch.topk(flat, k=k)
     support_tokens = int(plan.shape[1])
+    query_score = scores.sum(dim=-1)
+    support_score = scores.sum(dim=-2)
+    max_matches = min(max(1, int(max_matches)), int(flat_scores.numel()))
+    matches_per_query = min(max(1, int(matches_per_query)), support_tokens)
+
+    candidates: dict[tuple[int, int], tuple[float, float]] = {}
+    query_count = min(max_matches, int((query_score > eps).sum().item()))
+    if query_count > 0:
+        _query_values, query_indices = torch.topk(query_score, k=query_count)
+        for query_token in query_indices.tolist():
+            row = scores[int(query_token)]
+            support_count = min(matches_per_query, int((row > eps).sum().item()))
+            if support_count <= 0:
+                continue
+            score_values, support_indices = torch.topk(row, k=support_count)
+            for score_value, support_token in zip(score_values.tolist(), support_indices.tolist()):
+                q_idx = int(query_token)
+                s_idx = int(support_token)
+                mass = float(plan[q_idx, s_idx].item())
+                score_value = float(score_value)
+                anchor_score = float(query_score[q_idx].item() + support_score[s_idx].item() + score_value)
+                candidates[(q_idx, s_idx)] = (mass, anchor_score)
+
+    support_count = min(max(1, max_matches // 2), int((support_score > eps).sum().item()))
+    if support_count > 0:
+        _support_values, support_indices = torch.topk(support_score, k=support_count)
+        for support_token in support_indices.tolist():
+            column = scores[:, int(support_token)]
+            query_token = int(column.argmax().item())
+            score_value = float(column[query_token].item())
+            if score_value <= eps:
+                continue
+            mass = float(plan[query_token, int(support_token)].item())
+            s_idx = int(support_token)
+            anchor_score = float(query_score[query_token].item() + support_score[s_idx].item() + score_value)
+            candidates[(query_token, s_idx)] = (mass, anchor_score)
+
     matches: list[tuple[int, int, float, float]] = []
-    for value, flat_idx in zip(values.tolist(), indices.tolist()):
-        mass = float(value)
+    sorted_candidates = sorted(candidates.items(), key=lambda item: item[1][1], reverse=True)
+    for (query_token, support_token), (mass, _anchor_score) in sorted_candidates[:max_matches]:
         if mass <= eps:
             continue
-        fraction = mass / max(total, eps)
+        fraction = float(scores[query_token, support_token].item()) / max(total_score, eps)
         if fraction < float(min_mass_fraction):
             continue
-        query_token = int(flat_idx) // support_tokens
-        support_token = int(flat_idx) % support_tokens
         matches.append((query_token, support_token, mass, fraction))
     return matches
 
@@ -474,6 +518,7 @@ def _plot_transport_correspondence(
     query_heatmap: np.ndarray,
     support_heatmap: np.ndarray,
     *,
+    pair_scores: torch.Tensor | None = None,
     title: str,
     subtitle: str,
     max_matches: int = 14,
@@ -506,13 +551,24 @@ def _plot_transport_correspondence(
         y_offset=s_y,
     )
 
-    matches = _top_transport_matches(pair_plan, max_matches=max_matches)
-    top_match_mass_fraction = float(sum(match[3] for match in matches))
-    max_match_mass_fraction = float(matches[0][3]) if matches else 0.0
+    rank_scores = pair_scores.detach().float().cpu().clamp_min(0.0) if pair_scores is not None else None
+    matches = _top_transport_matches(pair_plan, match_scores=rank_scores, max_matches=max_matches)
+    top_match_score_fraction = float(sum(match[3] for match in matches))
+    max_match_score_fraction = float(matches[0][3]) if matches else 0.0
+    endpoint_scores = rank_scores if rank_scores is not None else pair_plan.detach().float().cpu()
+    query_score = endpoint_scores.sum(dim=-1)
+    support_score = endpoint_scores.sum(dim=-2)
+    query_score_max = float(query_score.max().item()) if query_score.numel() else 0.0
+    support_score_max = float(support_score.max().item()) if support_score.numel() else 0.0
     for rank, (query_token, support_token, _mass, fraction) in enumerate(reversed(matches)):
         qx, qy = query_centers[query_token]
         sx, sy = support_centers[support_token]
-        strength = min(1.0, fraction / max(max_match_mass_fraction, 1e-8))
+        endpoint_strength = max(
+            float(query_score[query_token].item()) / max(query_score_max, 1e-8),
+            float(support_score[support_token].item()) / max(support_score_max, 1e-8),
+        )
+        pair_strength = fraction / max(max_match_score_fraction, 1e-8)
+        strength = min(1.0, max(pair_strength, 0.45 * endpoint_strength))
         alpha = 0.24 + 0.58 * strength
         linewidth = 0.7 + 2.6 * strength
         color = "#14b8a6" if rank >= len(matches) // 2 else "#f59e0b"
@@ -521,7 +577,17 @@ def _plot_transport_correspondence(
     if matches:
         q_points = np.asarray([query_centers[item[0]] for item in matches], dtype=np.float32)
         s_points = np.asarray([support_centers[item[1]] for item in matches], dtype=np.float32)
-        sizes = np.asarray([36.0 + 360.0 * item[3] / max(max_match_mass_fraction, 1e-8) for item in matches])
+        sizes = np.asarray(
+            [
+                36.0
+                + 360.0
+                * max(
+                    float(query_score[item[0]].item()) / max(query_score_max, 1e-8),
+                    float(support_score[item[1]].item()) / max(support_score_max, 1e-8),
+                )
+                for item in matches
+            ]
+        )
         ax.scatter(q_points[:, 0], q_points[:, 1], s=sizes, c="#0f766e", edgecolors="white", linewidths=0.55, alpha=0.9)
         ax.scatter(s_points[:, 0], s_points[:, 1], s=sizes, c="#b45309", edgecolors="white", linewidths=0.55, alpha=0.9)
 
@@ -538,7 +604,7 @@ def _plot_transport_correspondence(
         bbox={"boxstyle": "round,pad=0.25", "facecolor": "black", "alpha": 0.62, "edgecolor": "none"},
     )
     ax.axis("off")
-    return top_match_mass_fraction, max_match_mass_fraction, len(matches)
+    return top_match_score_fraction, max_match_score_fraction, len(matches)
 
 
 def _transport_plan_by_shot(
@@ -560,6 +626,70 @@ def _transport_plan_by_shot(
     if plan.dim() == 4 and plan.shape[1] == way_num:
         return plan.unsqueeze(2)
     return None
+
+
+def _matrix_by_shot(
+    outputs: dict[str, Any] | torch.Tensor,
+    key: str,
+    *,
+    way_num: int,
+    shot_num: int,
+) -> torch.Tensor | None:
+    if not isinstance(outputs, dict):
+        return None
+    tensor = _safe_detach_tensor(outputs.get(key))
+    if tensor is None:
+        return None
+    tensor = tensor.float().cpu()
+    if tensor.dim() == 5 and tensor.shape[1] == way_num and tensor.shape[2] == shot_num:
+        return tensor
+    if tensor.dim() == 4 and tensor.shape[1] == way_num * shot_num:
+        return tensor.view(tensor.shape[0], way_num, shot_num, tensor.shape[-2], tensor.shape[-1])
+    if tensor.dim() == 4 and tensor.shape[1] == way_num:
+        return tensor.unsqueeze(2)
+    return None
+
+
+def _threshold_for_transport_pair(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    query_idx: int,
+    class_idx: int,
+    shot_idx: int,
+) -> float | None:
+    if not isinstance(outputs, dict):
+        return None
+    for key in ("adaptive_transport_cost_threshold", "transport_cost_threshold"):
+        tensor = _safe_detach_tensor(outputs.get(key))
+        if tensor is None:
+            continue
+        tensor = tensor.detach().float().cpu()
+        if tensor.numel() == 1:
+            return float(tensor.reshape(-1)[0].item())
+        if tensor.dim() == 3 and query_idx < tensor.shape[0]:
+            shot_idx_clamped = min(shot_idx, int(tensor.shape[2]) - 1)
+            return float(tensor[query_idx, class_idx, shot_idx_clamped].item())
+        if tensor.dim() == 2 and query_idx < tensor.shape[0]:
+            return float(tensor[query_idx, class_idx].item())
+        if tensor.dim() == 1 and query_idx < tensor.shape[0]:
+            return float(tensor[query_idx].item())
+    return None
+
+
+def _positive_transport_evidence(
+    *,
+    pair_plan: torch.Tensor,
+    pair_cost: torch.Tensor | None,
+    threshold: float | None,
+) -> torch.Tensor | None:
+    if pair_cost is None or threshold is None:
+        return None
+    pair_cost = pair_cost.detach().float().cpu()
+    pair_plan = pair_plan.detach().float().cpu()
+    if tuple(pair_cost.shape) != tuple(pair_plan.shape):
+        return None
+    threshold_tensor = pair_cost.new_tensor(float(threshold))
+    return pair_plan * (threshold_tensor - pair_cost).clamp_min(0.0)
 
 
 def _shot_tensor_by_class(
@@ -704,6 +834,7 @@ def export_uot_evidence_figure(
     plan = _transport_plan_by_shot(outputs, way_num=way_num, shot_num=shot_num)
     if plan is None:
         return []
+    cost_matrix = _matrix_by_shot(outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
     query_evidence_tokens = _query_evidence_tokens(outputs)
     support_evidence_tokens = _support_evidence_tokens(outputs, way_num=way_num, shot_num=shot_num)
     has_evidence = query_evidence_tokens is not None and support_evidence_tokens is not None
@@ -771,8 +902,32 @@ def export_uot_evidence_figure(
         support_np = _ensure_numpy_image(support_images[true_class, shot_idx])
         image_hw = tuple(int(dim) for dim in query_np.shape)
         support_hw = tuple(int(dim) for dim in support_np.shape)
-        query_heat = _token_values_to_heatmap(query_mass, image_hw)
-        support_heat = _token_values_to_heatmap(support_mass, support_hw)
+        pair_cost = None
+        if cost_matrix is not None and query_idx < cost_matrix.shape[0]:
+            pair_cost = cost_matrix[query_idx, true_class, shot_idx]
+        transport_threshold = _threshold_for_transport_pair(
+            outputs,
+            query_idx=query_idx,
+            class_idx=true_class,
+            shot_idx=shot_idx,
+        )
+        positive_evidence = _positive_transport_evidence(
+            pair_plan=pair_plan,
+            pair_cost=pair_cost,
+            threshold=transport_threshold,
+        )
+        if positive_evidence is not None:
+            query_visual_values = positive_evidence.sum(dim=-1)
+            support_visual_values = positive_evidence.sum(dim=-2)
+            visual_source = "positive_evidence"
+            positive_evidence_total = float(positive_evidence.sum().item())
+        else:
+            query_visual_values = query_mass
+            support_visual_values = support_mass
+            visual_source = "transport_mass"
+            positive_evidence_total = None
+        query_heat = _token_values_to_heatmap(query_visual_values, image_hw)
+        support_heat = _token_values_to_heatmap(support_visual_values, support_hw)
         query_ref = _token_values_to_heatmap(torch.ones_like(query_mass), image_hw)
         support_ref = _token_values_to_heatmap(torch.ones_like(support_mass), support_hw)
         query_evidence = None
@@ -853,13 +1008,19 @@ def export_uot_evidence_figure(
             title="(b) Balanced OT reference",
             subtitle="Full token marginals; background still participates",
         )
-        if has_evidence and evidence_bg_mass_ratio is not None:
+        if visual_source == "positive_evidence":
+            threshold_text = f", T={transport_threshold:.4f}" if transport_threshold is not None else ""
+            uot_subtitle = f"positive evidence={positive_evidence_total:.4f}{threshold_text}, shot={shot_idx + 1}"
+            uot_title = f"(c) Positive {method_title} evidence"
+        elif has_evidence and evidence_bg_mass_ratio is not None:
             uot_subtitle = (
                 f"evidence-gated mass={transported_mass:.3f}, bg-mass={evidence_bg_mass_ratio:.1%}, "
                 f"sink={sink_mass:.3f}"
             )
+            uot_title = f"(c) {method_title} mass"
         else:
             uot_subtitle = f"mass={transported_mass:.3f}, unmatched={unmatched_fraction:.1%}, shot={shot_idx + 1}"
+            uot_title = f"(c) {method_title} mass"
 
         _plot_transport_pair(
             ax_uot,
@@ -867,20 +1028,26 @@ def export_uot_evidence_figure(
             support_np,
             query_heat,
             support_heat,
-            title=f"(c) {method_title}",
+            title=uot_title,
             subtitle=uot_subtitle,
             query_outline=query_evidence_heat,
             support_outline=support_evidence_heat,
         )
-        top_match_mass_fraction, max_match_mass_fraction, top_match_count = _plot_transport_correspondence(
+        correspondence_subtitle = (
+            "points/lines scale with positive evidence"
+            if visual_source == "positive_evidence"
+            else "points mark high-mass tokens; lines show strongest pairings"
+        )
+        top_match_score_fraction, max_match_score_fraction, top_match_count = _plot_transport_correspondence(
             ax_match,
             query_np,
             support_np,
             pair_plan,
             query_heat,
             support_heat,
+            pair_scores=positive_evidence,
             title="(d) Top UOT correspondences",
-            subtitle="line width/points scale with transported mass",
+            subtitle=correspondence_subtitle,
         )
 
         rows.append(
@@ -905,9 +1072,14 @@ def export_uot_evidence_figure(
                 "expected_mass": expected_mass,
                 "transported_mass": transported_mass,
                 "unmatched_fraction": unmatched_fraction,
+                "evidence_map_source": visual_source,
+                "positive_evidence_total": positive_evidence_total,
+                "transport_cost_threshold": transport_threshold,
                 "top_match_count": top_match_count,
-                "top_match_mass_fraction": top_match_mass_fraction,
-                "max_match_mass_fraction": max_match_mass_fraction,
+                "top_match_score_fraction": top_match_score_fraction,
+                "max_match_score_fraction": max_match_score_fraction,
+                "top_match_mass_fraction": top_match_score_fraction,
+                "max_match_mass_fraction": max_match_score_fraction,
                 "evidence_background_mass_ratio": evidence_bg_mass_ratio,
                 "evidence_query_background_mass_ratio": query_bg_mass_ratio,
                 "evidence_support_background_mass_ratio": support_bg_mass_ratio,
