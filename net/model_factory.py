@@ -224,6 +224,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_context_enrichment is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_structural_augmentation", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_structural_augmentation is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2655,9 +2659,14 @@ def build_model_from_args(args):
                             "context_change_max": float(
                                 getattr(args, "context_change_max", 0.0)
                             ),
-                            "context_debug": _bool_flag(
-                                getattr(args, "context_debug", False), default=False,
-                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_context_enrichment", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "context_debug": True,
                             "context_debug_dir": str(
                                 getattr(args, "context_debug_dir", "results/context_debug")
                             ),
@@ -2666,7 +2675,16 @@ def build_model_from_args(args):
                             ),
                         }
                         if is_ours_final_model
-                        and _bool_flag(getattr(args, "enable_context_enrichment", False), default=False)
+                        and _bool_flag(getattr(args, "context_debug", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_structural_augmentation": True,
+                            "struct_dim": int(getattr(args, "struct_dim", 16)),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_structural_augmentation", False), default=False)
                         else {}
                     ),
                     **(

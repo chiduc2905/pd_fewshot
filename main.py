@@ -1359,6 +1359,18 @@ def get_args():
     parser.add_argument("--context_debug_dir", type=str, default="results/context_debug")
     parser.add_argument("--context_debug_max_episodes", type=int, default=3)
     parser.add_argument(
+        "--enable_structural_augmentation",
+        action="store_true",
+        default=False,
+        help="Append structural descriptors (position, contrast, rank) to projected tokens before OT.",
+    )
+    parser.add_argument(
+        "--struct_dim",
+        type=int,
+        default=16,
+        help="Dimension of the structural embedding projection (default 16).",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3473,6 +3485,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "context_fusion",
             "context_gate_max",
             "context_change_max",
+            "enable_structural_augmentation",
+            "struct_dim",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -3482,6 +3496,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             overrides.setdefault("multiscale_per_scale_T", True)
         if any(key.startswith("context_enrichment.") for key in state_dict):
             overrides.setdefault("enable_context_enrichment", True)
+        if any(key.startswith("structural_augmentation.") for key in state_dict):
+            overrides.setdefault("enable_structural_augmentation", True)
         if (
             "hrot_ecot_enable_crs_marginal" not in overrides
             and any(key.startswith("crs_marginal.") for key in state_dict)
@@ -4567,6 +4583,10 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "context/branch_weight_conv5",
         "context/branch_weight_conv7",
         "context/token_change_ratio",
+        "struct/token_change_ratio",
+        "struct/struct_weight_norm",
+        "struct/semantic_weight_norm",
+        "struct/struct_vs_semantic_ratio",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -5006,6 +5026,10 @@ def format_diagnostic_summary(metrics):
         "context/branch_weight_conv5",
         "context/branch_weight_conv7",
         "context/token_change_ratio",
+        "struct/token_change_ratio",
+        "struct/struct_weight_norm",
+        "struct/semantic_weight_norm",
+        "struct/struct_vs_semantic_ratio",
     ]
     chunks = []
     emitted = set()

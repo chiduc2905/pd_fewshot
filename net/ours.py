@@ -25,6 +25,7 @@ from net.hrot_fsl import HROTFSLResult, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
+from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.jecot_m2 import JECOTM2
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -242,6 +243,8 @@ class OursM2(JECOTM2):
         context_debug = _bool_config(kwargs.pop("context_debug", False))
         context_debug_dir = str(kwargs.pop("context_debug_dir", "results/context_debug"))
         context_debug_max_episodes = int(kwargs.pop("context_debug_max_episodes", 3))
+        enable_structural_augmentation = _bool_config(kwargs.pop("enable_structural_augmentation", False))
+        struct_dim = int(kwargs.pop("struct_dim", 16))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -337,6 +340,10 @@ class OursM2(JECOTM2):
         self.register_buffer("dm_global_template", torch.empty(0), persistent=False)
         self.register_buffer("dm_template_count", torch.tensor(0.0), persistent=False)
         self.enable_context_enrichment = bool(enable_context_enrichment)
+        self._context_debug = bool(context_debug)
+        self._context_debug_dir = str(context_debug_dir)
+        self._context_debug_max = int(context_debug_max_episodes)
+        self._context_debug_count = 0
         if self.enable_context_enrichment:
             context_ks = parse_context_kernel_sizes(context_kernel_sizes_raw)
             self.context_enrichment = SpatialContextEnrichment(
@@ -347,10 +354,14 @@ class OursM2(JECOTM2):
                 change_max=context_change_max,
             )
             self._last_context_diagnostics: dict[str, torch.Tensor] | None = None
-            self._context_debug = bool(context_debug)
-            self._context_debug_dir = str(context_debug_dir)
-            self._context_debug_max = int(context_debug_max_episodes)
-            self._context_debug_count = 0
+
+        self.enable_structural_augmentation = bool(enable_structural_augmentation)
+        if self.enable_structural_augmentation:
+            self.structural_augmentation = StructuralTokenAugmentation(
+                token_dim=self.token_dim,
+                struct_dim=struct_dim,
+            )
+            self._last_struct_diagnostics: dict[str, torch.Tensor] | None = None
 
     @property
     def uses_ours_gap_control(self) -> bool:
@@ -358,15 +369,31 @@ class OursM2(JECOTM2):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         feature_map = super().encode(x)
+        if self._context_debug and hasattr(self, "_context_debug_images"):
+            self._context_debug_images.append(x.detach().cpu())
         if self.enable_context_enrichment:
-            if self._context_debug and hasattr(self, "_context_debug_images"):
-                self._context_debug_images.append(x.detach().cpu())
             enriched = self.context_enrichment(feature_map)
             self._last_context_diagnostics = self.context_enrichment.diagnostics(
                 feature_map, enriched,
             )
+            if self._context_debug and hasattr(self, "_context_debug_fmaps"):
+                self._context_debug_fmaps.append(feature_map.detach().cpu())
             return enriched
+        if self._context_debug and hasattr(self, "_context_debug_fmaps"):
+            self._context_debug_fmaps.append(feature_map.detach().cpu())
         return feature_map
+
+    def _apply_structural_augmentation(
+        self,
+        projected: torch.Tensor,
+        spatial_hw: tuple[int, int],
+    ) -> torch.Tensor:
+        if not getattr(self, "enable_structural_augmentation", False):
+            return projected
+        before = projected
+        projected = self.structural_augmentation(projected, spatial_hw)
+        self._last_struct_diagnostics = self.structural_augmentation.diagnostics(before, projected)
+        return projected
 
     @property
     def multiscale_transport_cost_thresholds(self) -> torch.Tensor:
@@ -384,6 +411,7 @@ class OursM2(JECOTM2):
         for scale_name, spatial_hw, tokens in self.multi_scale_tokenizer(feature_map):
             projected = self._project_backbone_tokens(tokens)
             projected = self._apply_cata(projected)
+            projected = self._apply_structural_augmentation(projected, spatial_hw)
             euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
             scale_records.append(
                 {
@@ -407,32 +435,43 @@ class OursM2(JECOTM2):
     ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
         if getattr(self, "enable_multiscale_ot", False):
             return self._encode_multiscale_images(images)
-        else:
-            if self.token_g_kind != "token_norm_pre_l2" and not self.uses_ours_gap_control:
-                return super()._encode_images(images)
 
-            feature_map = self.encode(images)
-            spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
-            if self.uses_ours_gap_control:
-                tokens = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1).unsqueeze(1)
-                spatial_hw = (1, 1)
-            else:
-                tokens = feature_map_to_tokens(feature_map)
-            projected = self._project_backbone_tokens(tokens)
-            if not self.uses_ours_gap_control:
-                projected = self._apply_cata(projected)
-            self._record_token_g_prenorm(projected)
-            euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
-            return euclidean_tokens, hyperbolic_tokens, spatial_hw
+        need_local = (
+            self.token_g_kind == "token_norm_pre_l2"
+            or self.uses_ours_gap_control
+            or getattr(self, "enable_structural_augmentation", False)
+        )
+        if not need_local:
+            return super()._encode_images(images)
+
+        feature_map = self.encode(images)
+        spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+        if self.uses_ours_gap_control:
+            tokens = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1).unsqueeze(1)
+            spatial_hw = (1, 1)
+        else:
+            tokens = feature_map_to_tokens(feature_map)
+        projected = self._project_backbone_tokens(tokens)
+        if not self.uses_ours_gap_control:
+            projected = self._apply_cata(projected)
+        projected = self._apply_structural_augmentation(projected, spatial_hw)
+        self._record_token_g_prenorm(projected)
+        euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
+        return euclidean_tokens, hyperbolic_tokens, spatial_hw
 
     def _project_tokens_from_images(self, images: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
-        if self.token_g_kind != "token_norm_pre_l2":
+        need_local = (
+            self.token_g_kind == "token_norm_pre_l2"
+            or getattr(self, "enable_structural_augmentation", False)
+        )
+        if not need_local:
             return super()._project_tokens_from_images(images)
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
         projected = self._project_backbone_tokens(tokens)
         projected = self._apply_cata(projected)
+        projected = self._apply_structural_augmentation(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         return projected, spatial_hw
 
@@ -440,7 +479,11 @@ class OursM2(JECOTM2):
         self,
         images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, int]]:
-        if self.token_g_kind != "token_norm_pre_l2":
+        need_local = (
+            self.token_g_kind == "token_norm_pre_l2"
+            or getattr(self, "enable_structural_augmentation", False)
+        )
+        if not need_local:
             return super()._encode_images_with_amp_norms(images)
         feature_map = self.encode(images)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
@@ -449,6 +492,7 @@ class OursM2(JECOTM2):
         if self.use_cata:
             projected = self._apply_cata(projected)
             pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)
+        projected = self._apply_structural_augmentation(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
@@ -1240,15 +1284,16 @@ class OursM2(JECOTM2):
     def _forward_episode(self, *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
         self._last_dm_diagnostics = None
         use_context_debug = (
-            self.enable_context_enrichment
-            and self._context_debug
+            self._context_debug
             and self._context_debug_count < self._context_debug_max
         )
         if self.enable_context_enrichment:
             self._last_context_diagnostics = None
-            if use_context_debug:
+        if use_context_debug:
+            self._context_debug_images = []
+            self._context_debug_fmaps = []
+            if self.enable_context_enrichment:
                 self.context_enrichment._debug_cache = []
-                self._context_debug_images = []
         use_prenorm_cache = self.token_g_kind == "token_norm_pre_l2"
         use_multiscale_cache = getattr(self, "enable_multiscale_ot", False)
         if use_prenorm_cache:
@@ -1264,8 +1309,10 @@ class OursM2(JECOTM2):
                 self._multiscale_ot_cache = None
             if use_context_debug:
                 self._export_context_debug()
-                self.context_enrichment._debug_cache = None
+                if self.enable_context_enrichment:
+                    self.context_enrichment._debug_cache = None
                 self._context_debug_images = []
+                self._context_debug_fmaps = []
         if isinstance(outputs, dict):
             if self.lambda_cost > 0.0 and "cost_matrix_modulated" in outputs:
                 if "base_cost_matrix" not in outputs and "cost_matrix" in outputs:
@@ -1275,61 +1322,100 @@ class OursM2(JECOTM2):
                 outputs.update(self._last_dm_diagnostics)
             if self.enable_context_enrichment and self._last_context_diagnostics is not None:
                 outputs.update(self._last_context_diagnostics)
+            if getattr(self, "enable_structural_augmentation", False) and self._last_struct_diagnostics is not None:
+                outputs.update(self._last_struct_diagnostics)
         return outputs
 
     def _export_context_debug(self) -> None:
-        from net.modules.spatial_context_enrichment import export_context_debug_figure
+        from net.modules.spatial_context_enrichment import (
+            export_context_debug_figure,
+            export_baseline_debug_figure,
+        )
 
-        cache = getattr(self.context_enrichment, "_debug_cache", None)
-        if not cache:
-            return
+        images = getattr(self, "_context_debug_images", [])
+        fmaps = getattr(self, "_context_debug_fmaps", [])
+
+        if self.enable_context_enrichment:
+            cache = getattr(self.context_enrichment, "_debug_cache", None)
+            if not cache:
+                return
+        else:
+            if not fmaps:
+                return
+            cache = None
+
         self._context_debug_count += 1
         ep_idx = self._context_debug_count
-        images = getattr(self, "_context_debug_images", [])
 
-        bw = None
-        gv = None
-        if self.context_enrichment.fusion_mode == "weighted_sum":
-            bw = (
-                torch.softmax(self.context_enrichment.branch_weights.detach().float(), dim=0)
-                .cpu()
-                .numpy()
-            )
-            gv = float(self.context_enrichment.gate_value.detach().float().cpu().item())
-
-        for call_idx, record in enumerate(cache):
-            batch_size = record["original"].shape[0]
-            flat_images = images[call_idx] if call_idx < len(images) else None
-            for img_idx in range(min(batch_size, 8)):
-                inp = None
-                if flat_images is not None and img_idx < flat_images.shape[0]:
-                    inp = flat_images[img_idx]
-                path = os.path.join(
-                    self._context_debug_dir,
-                    f"ep{ep_idx:03d}_call{call_idx}_img{img_idx:03d}.png",
+        if cache is not None:
+            bw = None
+            gv = None
+            if self.context_enrichment.fusion_mode == "weighted_sum":
+                bw = (
+                    torch.softmax(self.context_enrichment.branch_weights.detach().float(), dim=0)
+                    .cpu()
+                    .numpy()
                 )
-                try:
-                    export_context_debug_figure(
-                        debug_record={
-                            "original": record["original"][img_idx : img_idx + 1],
-                            "enriched": record["enriched"][img_idx : img_idx + 1],
-                            "delta": record["delta"][img_idx : img_idx + 1],
-                            "branches": [b[img_idx : img_idx + 1] for b in record["branches"]],
-                        },
-                        input_image=inp,
-                        kernel_sizes=self.context_enrichment.kernel_sizes,
-                        image_index=0,
-                        save_path=path,
-                        branch_weights=bw,
-                        gate_value=gv,
+                gv = float(self.context_enrichment.gate_value.detach().float().cpu().item())
+
+            for call_idx, record in enumerate(cache):
+                batch_size = record["original"].shape[0]
+                flat_images = images[call_idx] if call_idx < len(images) else None
+                for img_idx in range(min(batch_size, 8)):
+                    inp = None
+                    if flat_images is not None and img_idx < flat_images.shape[0]:
+                        inp = flat_images[img_idx]
+                    path = os.path.join(
+                        self._context_debug_dir,
+                        f"ep{ep_idx:03d}_call{call_idx}_img{img_idx:03d}.png",
                     )
-                except Exception as exc:
-                    print(f"[context-debug] failed to export {path}: {exc}")
-                    return
-        print(
-            f"[context-debug] episode {ep_idx}: exported {len(cache)} calls, "
-            f"gate={gv:.4f}, dir={self._context_debug_dir}"
-        )
+                    try:
+                        export_context_debug_figure(
+                            debug_record={
+                                "original": record["original"][img_idx : img_idx + 1],
+                                "enriched": record["enriched"][img_idx : img_idx + 1],
+                                "delta": record["delta"][img_idx : img_idx + 1],
+                                "branches": [b[img_idx : img_idx + 1] for b in record["branches"]],
+                            },
+                            input_image=inp,
+                            kernel_sizes=self.context_enrichment.kernel_sizes,
+                            image_index=0,
+                            save_path=path,
+                            branch_weights=bw,
+                            gate_value=gv,
+                        )
+                    except Exception as exc:
+                        print(f"[context-debug] failed to export {path}: {exc}")
+                        return
+            print(
+                f"[context-debug] episode {ep_idx}: exported {len(cache)} calls, "
+                f"gate={gv:.4f}, dir={self._context_debug_dir}"
+            )
+        else:
+            for call_idx, fmap in enumerate(fmaps):
+                batch_size = fmap.shape[0]
+                flat_images = images[call_idx] if call_idx < len(images) else None
+                for img_idx in range(min(batch_size, 8)):
+                    inp = None
+                    if flat_images is not None and img_idx < flat_images.shape[0]:
+                        inp = flat_images[img_idx]
+                    path = os.path.join(
+                        self._context_debug_dir,
+                        f"ep{ep_idx:03d}_call{call_idx}_img{img_idx:03d}_baseline.png",
+                    )
+                    try:
+                        export_baseline_debug_figure(
+                            feature_map=fmap[img_idx : img_idx + 1],
+                            input_image=inp,
+                            save_path=path,
+                        )
+                    except Exception as exc:
+                        print(f"[context-debug] failed to export {path}: {exc}")
+                        return
+            print(
+                f"[context-debug] episode {ep_idx} (baseline): exported {len(fmaps)} calls, "
+                f"dir={self._context_debug_dir}"
+            )
 
     def _stack_outputs(self, batch_outputs: list[dict[str, torch.Tensor]]) -> HROTFSLResult:
         stacked = super()._stack_outputs(batch_outputs)
@@ -1383,10 +1469,11 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
-        for key in sorted(k for k in batch_outputs[0] if str(k).startswith("context/")):
-            values = [item[key] for item in batch_outputs]
-            if all(torch.is_tensor(value) for value in values):
-                stacked[key] = torch.stack(values).mean()
+        for prefix in ("context/", "struct/"):
+            for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
+                values = [item[key] for item in batch_outputs if key in item]
+                if values and all(torch.is_tensor(value) for value in values):
+                    stacked[key] = torch.stack(values).mean()
         return stacked
 
 __all__ = ["OursM2", "apply_ours_design_defaults", "OURS_ABLATIONS", "normalize_ours_ablation"]

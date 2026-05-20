@@ -762,3 +762,119 @@ def test_context_enrichment_factory_flags_are_ours_final_only():
                 **common,
             )
         )
+
+
+# ───────── Structural Token Augmentation tests ─────────
+
+
+def test_structural_augmentation_off_matches_baseline_logits():
+    torch.manual_seed(800)
+    baseline = _tiny_ours_final()
+    flag_off = _tiny_ours_final(enable_structural_augmentation=False)
+    flag_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    flag_off.eval()
+    query, support = _episode()
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = flag_off(query, support)
+    assert not baseline.enable_structural_augmentation
+    assert not hasattr(baseline, "structural_augmentation")
+    assert torch.equal(actual, expected)
+
+
+def test_structural_augmentation_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(801)
+    model = _tiny_ours_final(enable_structural_augmentation=True, struct_dim=8)
+    model.train()
+    query, support = _episode()
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+    assert model.enable_structural_augmentation
+    assert hasattr(model, "structural_augmentation")
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    for key in (
+        "struct/token_change_ratio",
+        "struct/struct_weight_norm",
+        "struct/semantic_weight_norm",
+        "struct/struct_vs_semantic_ratio",
+    ):
+        assert key in outputs, f"Missing diagnostic key: {key}"
+
+
+def test_structural_augmentation_gradient_flows():
+    torch.manual_seed(802)
+    model = _tiny_ours_final(enable_structural_augmentation=True, struct_dim=8)
+    model.train()
+    query, support = _episode()
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+    sta = model.structural_augmentation
+    assert sta.fuse.weight.grad is not None
+    assert sta.fuse.weight.grad.abs().sum() > 0
+    for p in sta.struct_proj.parameters():
+        if p.requires_grad:
+            assert p.grad is not None
+
+
+def test_structural_augmentation_init_near_identity():
+    torch.manual_seed(803)
+    model = _tiny_ours_final(enable_structural_augmentation=True, struct_dim=8)
+    sta = model.structural_augmentation
+    w = sta.fuse.weight.detach()
+    semantic_part = w[:, :sta.token_dim]
+    struct_part = w[:, sta.token_dim:]
+    identity = torch.eye(sta.token_dim)
+    assert torch.allclose(semantic_part, identity, atol=1e-6)
+    assert torch.allclose(struct_part, torch.zeros_like(struct_part), atol=1e-6)
+
+
+def test_structural_augmentation_combined_with_multiscale():
+    torch.manual_seed(804)
+    model = _tiny_ours_final(
+        enable_structural_augmentation=True,
+        struct_dim=8,
+        enable_multiscale_ot=True,
+        multiscale_pool_sizes="original,2x2,1x1",
+    )
+    model.train()
+    query, support = _episode()
+    outputs = model(query, support, return_aux=True)
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert "struct/token_change_ratio" in outputs
+
+
+def test_structural_augmentation_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_structural_augmentation=True,
+        struct_dim=8,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "structural_augmentation")
+    assert ours_final.enable_structural_augmentation
+
+    with pytest.raises(ValueError, match="--enable_structural_augmentation is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )

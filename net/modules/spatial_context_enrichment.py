@@ -281,6 +281,63 @@ def export_context_debug_figure(
     plt.close(fig)
 
 
+def export_baseline_debug_figure(
+    *,
+    feature_map: torch.Tensor,
+    input_image: torch.Tensor | None,
+    save_path: str,
+) -> None:
+    """Export a simple figure showing the raw backbone feature map (no enrichment)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    fmap = feature_map
+    if fmap.dim() == 4 and fmap.shape[0] > 1:
+        fmap = fmap[0:1]
+
+    has_input = input_image is not None
+    h, w = int(fmap.shape[-2]), int(fmap.shape[-1])
+
+    energy = _to_spatial_heatmap(fmap)
+    channel_var = fmap.float().squeeze(0).var(dim=0).cpu().numpy()
+    cv_lo, cv_hi = channel_var.min(), channel_var.max()
+    if cv_hi - cv_lo > 1e-8:
+        channel_var = (channel_var - cv_lo) / (cv_hi - cv_lo)
+
+    ncols = 3 if has_input else 2
+    fig, axes = plt.subplots(1, ncols, figsize=(5.0 * ncols, 4.5))
+    fig.patch.set_facecolor("white")
+
+    col = 0
+    if has_input:
+        inp_np = _img_to_numpy(input_image)
+        axes[col].imshow(inp_np, cmap="gray" if inp_np.ndim == 2 else None)
+        axes[col].set_title("Input scalogram", fontsize=11, weight="bold")
+        axes[col].axis("off")
+        col += 1
+
+    im = axes[col].imshow(energy, cmap="inferno", vmin=0, vmax=1)
+    axes[col].set_title(f"Backbone F energy\n||F||/ch, grid={h}x{w}", fontsize=11, weight="bold")
+    axes[col].axis("off")
+    _add_colorbar(fig, axes[col], im)
+    col += 1
+
+    im = axes[col].imshow(channel_var, cmap="viridis", vmin=0, vmax=1)
+    axes[col].set_title("Channel variance\n(high = discriminative)", fontsize=11, weight="bold")
+    axes[col].axis("off")
+    _add_colorbar(fig, axes[col], im)
+
+    fig.suptitle("Baseline (no enrichment)", fontsize=13, weight="bold", y=1.01)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+    fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _add_colorbar(fig, ax, im):
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     divider = make_axes_locatable(ax)
