@@ -2001,7 +2001,13 @@ def get_args():
     parser.add_argument("--q1_num_episodes", type=int, default=8)
     parser.add_argument("--q1_queries_per_episode", type=int, default=1)
     parser.add_argument("--q1_misclassified_only", type=str, default="true", choices=["true", "false"])
-    parser.add_argument("--export_uot_evidence_figure", type=str, default="false", choices=["true", "false"])
+    parser.add_argument(
+        "--export_uot_evidence_figure",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Export UOT evidence figures with query/support mass overlays and top transported-token correspondences.",
+    )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])

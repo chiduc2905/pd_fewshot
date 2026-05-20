@@ -1,0 +1,39 @@
+import torch
+
+from visualization.noise_diagnostics import export_uot_evidence_figure
+
+
+def test_export_uot_evidence_figure_draws_top_transport_correspondences(tmp_path):
+    query_images = torch.rand(2, 1, 16, 16)
+    support_images = torch.rand(2, 1, 1, 16, 16)
+    plan = torch.zeros(2, 2, 1, 4, 4)
+    plan[0, 0, 0, 0, 0] = 0.30
+    plan[0, 0, 0, 1, 2] = 0.18
+    plan[0, 0, 0, 3, 3] = 0.12
+    plan[1, 1, 0, 2, 1] = 0.25
+    outputs = {
+        "transport_plan": plan,
+        "shot_transported_mass": plan.sum(dim=(-1, -2)),
+        "shot_rho": torch.ones(2, 2, 1),
+    }
+    save_path = tmp_path / "uot_evidence.png"
+
+    rows = export_uot_evidence_figure(
+        outputs=outputs,
+        query_images=query_images,
+        support_images=support_images,
+        logits=torch.tensor([[2.0, 0.1], [0.2, 1.5]]),
+        preds=torch.tensor([0, 1]),
+        targets=torch.tensor([0, 1]),
+        class_names=["PD-A", "PD-B"],
+        save_path=str(save_path),
+        episode_index=3,
+        query_indices=[0],
+    )
+
+    assert save_path.exists()
+    assert save_path.stat().st_size > 0
+    assert len(rows) == 1
+    assert rows[0]["top_match_count"] == 3
+    assert 0.0 < rows[0]["top_match_mass_fraction"] <= 1.0
+    assert rows[0]["max_match_mass_fraction"] > 0.0
