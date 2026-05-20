@@ -21,8 +21,9 @@ import torch
 import torch.nn.functional as F
 
 from net.fewshot_common import feature_map_to_tokens
-from net.hrot_fsl import HROTFSLResult
+from net.hrot_fsl import HROTFSLResult, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
+from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.jecot_m2 import JECOTM2
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -229,6 +230,9 @@ class OursM2(JECOTM2):
         dmuot_shot_strength: str = "none",
         **kwargs,
     ) -> None:
+        enable_multiscale_ot = _bool_config(kwargs.pop("enable_multiscale_ot", False))
+        multiscale_pool_sizes = kwargs.pop("multiscale_pool_sizes", "original,2x2,1x1")
+        multiscale_per_scale_T = _bool_config(kwargs.pop("multiscale_per_scale_T", False))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -263,12 +267,45 @@ class OursM2(JECOTM2):
         self._last_dm_diagnostics: dict[str, torch.Tensor] | None = None
         self._token_g_prenorm_cache: list[torch.Tensor] | None = None
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
+        if enable_multiscale_ot:
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_multiscale_ot is not supported with ours_ablation='gap'")
+            if self.token_g_kind != "none":
+                raise ValueError("enable_multiscale_ot currently requires token_g_kind='none'")
+            if _bool_config(kwargs.get("hrot_amp_marginals", False)):
+                raise ValueError("enable_multiscale_ot is not supported with hrot_amp_marginals")
+            if _bool_config(kwargs.get("ecot_episode_feature_normalize", False)):
+                raise ValueError("enable_multiscale_ot is not supported with ecot_episode_feature_normalize")
+            if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
+                raise ValueError("enable_multiscale_ot is not supported with pre_transport_shot_pool")
         super().__init__(
             *args,
             rho=float(kwargs["ecot_base_rho"]),
             transport_mode=kwargs["ecot_transport_mode"],
             **kwargs,
         )
+        if enable_multiscale_ot:
+            self.enable_multiscale_ot = True
+            self.multi_scale_tokenizer = MultiScaleTokenizer(multiscale_pool_sizes)
+            self.num_multiscale_scales = len(self.multi_scale_tokenizer.scale_names)
+            self.scale_weights = torch.nn.Parameter(torch.zeros(self.num_multiscale_scales, dtype=torch.float32))
+            self.multiscale_per_scale_T = bool(multiscale_per_scale_T)
+            if self.multiscale_per_scale_T:
+                if (
+                    len(self.ecot_rho_bank) != 1
+                    or self.ecot_m2_ablate_threshold_mass
+                    or self.ecot_m2_cost_per_mass_score
+                    or self.ecot_m2_per_shot_threshold
+                    or self.ecot_m2_use_swts
+                ):
+                    raise ValueError(
+                        "multiscale_per_scale_T requires single-budget active threshold-mass scoring"
+                    )
+                threshold_init = float(self.transport_cost_threshold.detach().float().cpu().item())
+                raw_threshold = _inverse_softplus(max(threshold_init, float(self.eps)))
+                self.raw_multiscale_transport_cost_thresholds = torch.nn.Parameter(
+                    torch.full((self.num_multiscale_scales,), raw_threshold, dtype=torch.float32)
+                )
         self.enable_pot_guide = bool(enable_pot_guide)
         if self.enable_pot_guide:
             from net.modules.pot_guide import POTGuideMarginals
@@ -295,26 +332,62 @@ class OursM2(JECOTM2):
     def uses_ours_gap_control(self) -> bool:
         return self.ours_ablation == "gap"
 
+    @property
+    def multiscale_transport_cost_thresholds(self) -> torch.Tensor:
+        raw_thresholds = getattr(self, "raw_multiscale_transport_cost_thresholds", None)
+        if raw_thresholds is None:
+            return self.transport_cost_threshold.reshape(1)
+        return F.softplus(raw_thresholds).clamp_min(self.eps)
+
+    def _encode_multiscale_images(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
+        feature_map = self.encode(images)
+        scale_records = []
+        for scale_name, spatial_hw, tokens in self.multi_scale_tokenizer(feature_map):
+            projected = self._project_backbone_tokens(tokens)
+            projected = self._apply_cata(projected)
+            euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
+            scale_records.append(
+                {
+                    "name": scale_name,
+                    "spatial_hw": spatial_hw,
+                    "euclidean": euclidean_tokens,
+                    "hyperbolic": hyperbolic_tokens,
+                }
+            )
+        if not scale_records:
+            raise RuntimeError("Multi-scale tokenizer returned no scales")
+        cache = getattr(self, "_multiscale_ot_cache", None)
+        if cache is not None:
+            cache.append(scale_records)
+        first = scale_records[0]
+        return first["euclidean"], first["hyperbolic"], first["spatial_hw"]
+
     def _encode_images(
         self,
         images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
-        if self.token_g_kind != "token_norm_pre_l2" and not self.uses_ours_gap_control:
-            return super()._encode_images(images)
-
-        feature_map = self.encode(images)
-        spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
-        if self.uses_ours_gap_control:
-            tokens = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1).unsqueeze(1)
-            spatial_hw = (1, 1)
+        if getattr(self, "enable_multiscale_ot", False):
+            return self._encode_multiscale_images(images)
         else:
-            tokens = feature_map_to_tokens(feature_map)
-        projected = self._project_backbone_tokens(tokens)
-        if not self.uses_ours_gap_control:
-            projected = self._apply_cata(projected)
-        self._record_token_g_prenorm(projected)
-        euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
-        return euclidean_tokens, hyperbolic_tokens, spatial_hw
+            if self.token_g_kind != "token_norm_pre_l2" and not self.uses_ours_gap_control:
+                return super()._encode_images(images)
+
+            feature_map = self.encode(images)
+            spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+            if self.uses_ours_gap_control:
+                tokens = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1).unsqueeze(1)
+                spatial_hw = (1, 1)
+            else:
+                tokens = feature_map_to_tokens(feature_map)
+            projected = self._project_backbone_tokens(tokens)
+            if not self.uses_ours_gap_control:
+                projected = self._apply_cata(projected)
+            self._record_token_g_prenorm(projected)
+            euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
+            return euclidean_tokens, hyperbolic_tokens, spatial_hw
 
     def _project_tokens_from_images(self, images: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
         if self.token_g_kind != "token_norm_pre_l2":
@@ -468,6 +541,245 @@ class OursM2(JECOTM2):
             1.0 - strength.to(device=prob.device, dtype=prob.dtype)
         ) * uniform
 
+    def _prepare_multiscale_cost_tokens(
+        self,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cost_query_tokens = query_tokens
+        cost_support_tokens = support_tokens
+        if self.hrot_token_center:
+            support_for_center = cost_support_tokens.reshape(
+                way_num,
+                shot_num,
+                cost_support_tokens.shape[-2],
+                cost_support_tokens.shape[-1],
+            )
+            support_mean = support_for_center.mean(dim=2, keepdim=True)
+            centered_support = support_for_center - support_mean
+            if self.training:
+                centered_norms = centered_support.norm(dim=-1)
+                if (centered_norms < 1e-4).any():
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "Token centering produced near-zero vectors "
+                        "(min norm %.2e)", centered_norms.min().item(),
+                    )
+            cost_support_tokens = centered_support.reshape(
+                way_num * shot_num,
+                cost_support_tokens.shape[-2],
+                cost_support_tokens.shape[-1],
+            )
+            if self.hrot_token_center_query:
+                query_mean = cost_query_tokens.mean(dim=1, keepdim=True)
+                cost_query_tokens = cost_query_tokens - query_mean
+        return cost_query_tokens, cost_support_tokens
+
+    @staticmethod
+    def _weighted_multiscale_value(
+        payloads: list[dict[str, torch.Tensor]],
+        key: str,
+        weights: torch.Tensor,
+    ) -> torch.Tensor | None:
+        values = [payload.get(key) for payload in payloads]
+        if not values or any(not torch.is_tensor(value) for value in values):
+            return None
+        first = values[0]
+        if any(tuple(value.shape) != tuple(first.shape) for value in values):
+            return None
+        stacked = torch.stack(values, dim=0)
+        view_shape = (weights.shape[0],) + (1,) * first.dim()
+        return (weights.reshape(view_shape).to(device=stacked.device, dtype=stacked.dtype) * stacked).sum(dim=0)
+
+    def _forward_multiscale_ecot_budget_bank(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+        support_weight: torch.Tensor | None = None,
+        query_weight: torch.Tensor | None = None,
+        support_tokens: torch.Tensor | None = None,
+        query_tokens: torch.Tensor | None = None,
+        spatial_hw: tuple[int, int] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        del support_tokens, query_tokens, spatial_hw
+        if support_weight is not None or query_weight is not None:
+            raise ValueError("enable_multiscale_ot does not support explicit query/support weights")
+        cache = getattr(self, "_multiscale_ot_cache", None)
+        if cache is None or len(cache) < 2:
+            raise RuntimeError("Multi-scale OT cache was not populated before ECOT scoring")
+        query_scales = cache[0]
+        support_scales = cache[1]
+        if len(query_scales) != len(support_scales):
+            raise ValueError(
+                f"Query/support scale count mismatch: {len(query_scales)} vs {len(support_scales)}"
+            )
+        if len(query_scales) != self.num_multiscale_scales:
+            raise ValueError(
+                f"Expected {self.num_multiscale_scales} multi-scale token sets, got {len(query_scales)}"
+            )
+
+        scale_weights = torch.softmax(self.scale_weights.to(device=flat_cost.device, dtype=flat_cost.dtype), dim=0)
+        threshold_per_scale = self.multiscale_transport_cost_thresholds.to(
+            device=flat_cost.device,
+            dtype=flat_cost.dtype,
+        )
+
+        payloads: list[dict[str, torch.Tensor]] = []
+        scale_shot_logits = []
+        scale_shot_cost = []
+        scale_shot_mass = []
+        for scale_idx, (query_record, support_record) in enumerate(zip(query_scales, support_scales)):
+            if query_record["spatial_hw"] != support_record["spatial_hw"]:
+                raise ValueError(
+                    "Query/support multi-scale token grids must match for "
+                    f"{query_record['name']}: {query_record['spatial_hw']} vs {support_record['spatial_hw']}"
+                )
+            query_euclidean = query_record["euclidean"].to(device=flat_cost.device, dtype=flat_cost.dtype)
+            flat_support_euclidean = support_record["euclidean"].to(
+                device=flat_cost.device,
+                dtype=flat_cost.dtype,
+            )
+            expected_support = int(way_num) * int(shot_num)
+            if flat_support_euclidean.shape[0] != expected_support:
+                raise ValueError(
+                    "Multi-scale support token cache does not match Way*Shot: "
+                    f"{flat_support_euclidean.shape[0]} vs {expected_support}"
+                )
+            cost_query_tokens, cost_support_tokens = self._prepare_multiscale_cost_tokens(
+                query_euclidean,
+                flat_support_euclidean,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            scale_cost = self._ground_cost(cost_query_tokens, cost_support_tokens)
+            scale_cost, _tsw_payload = self._apply_tsw_to_cost(
+                scale_cost,
+                cost_query_tokens,
+                cost_support_tokens,
+            )
+            scale_support_tokens = flat_support_euclidean.reshape(
+                way_num,
+                shot_num,
+                flat_support_euclidean.shape[-2],
+                flat_support_euclidean.shape[-1],
+            )
+            payload = super()._forward_ecot_budget_bank(
+                scale_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+                support_weight=None,
+                query_weight=None,
+                support_tokens=scale_support_tokens,
+                query_tokens=query_euclidean,
+                spatial_hw=support_record["spatial_hw"],
+            )
+            if self.multiscale_per_scale_T:
+                threshold = threshold_per_scale[scale_idx]
+                shot_logits = self.score_scale * (
+                    threshold * payload["shot_transported_mass"] - payload["shot_transport_cost"]
+                )
+                payload = dict(payload)
+                payload["shot_logits"] = shot_logits
+                payload["ecot_base_score"] = shot_logits
+                if "ecot_score" in payload:
+                    payload["ecot_score"] = shot_logits
+                if "ecot_budget_scores" in payload and payload["ecot_budget_scores"].shape[-1] == 1:
+                    payload["ecot_budget_scores"] = shot_logits.unsqueeze(-1)
+            payloads.append(payload)
+            scale_shot_logits.append(payload["shot_logits"])
+            scale_shot_cost.append(payload["shot_transport_cost"])
+            scale_shot_mass.append(payload["shot_transported_mass"])
+
+        def fuse_stack(values: list[torch.Tensor]) -> torch.Tensor:
+            stacked = torch.stack(values, dim=0)
+            view_shape = (scale_weights.shape[0],) + (1,) * values[0].dim()
+            return (scale_weights.reshape(view_shape) * stacked).sum(dim=0)
+
+        fused_shot_logits = fuse_stack(scale_shot_logits)
+        fused_shot_cost = fuse_stack(scale_shot_cost)
+        fused_shot_mass = fuse_stack(scale_shot_mass)
+
+        raw_tau_shot = None
+        fused_budget_scores = self._weighted_multiscale_value(payloads, "ecot_budget_scores", scale_weights)
+        fused_cost_bank = self._weighted_multiscale_value(
+            payloads,
+            "ecot_shot_transport_cost_bank",
+            scale_weights,
+        )
+        fused_mass_bank = self._weighted_multiscale_value(
+            payloads,
+            "ecot_shot_transported_mass_bank",
+            scale_weights,
+        )
+        if (
+            self.episode_controller is not None
+            and fused_budget_scores is not None
+            and fused_cost_bank is not None
+            and fused_mass_bank is not None
+        ):
+            diagnostics = self._compute_ecot_diagnostics(fused_budget_scores, fused_cost_bank, fused_mass_bank)
+            controller_outputs = self.episode_controller(diagnostics)
+            raw_tau_shot = controller_outputs.get("raw_tau_shot")
+
+        logits, transport_cost, transport_mass, shot_pool_weights, tau_shot = self._pool_ecot_shot_scores(
+            fused_shot_logits,
+            fused_shot_cost,
+            fused_shot_mass,
+            raw_tau_shot,
+        )
+
+        fused_payload = dict(payloads[0])
+        fused_payload.update(
+            {
+                "logits": logits,
+                "transport_cost": transport_cost,
+                "transported_mass": transport_mass,
+                "shot_transport_cost": fused_shot_cost,
+                "shot_transported_mass": fused_shot_mass,
+                "shot_logits": fused_shot_logits,
+                "shot_pool_weights": shot_pool_weights,
+            }
+        )
+        if tau_shot is not None:
+            fused_payload["ecot_tau_shot"] = tau_shot
+        for key in (
+            "rho",
+            "shot_rho",
+            "ecot_base_score",
+            "ecot_score",
+            "ecot_budget_scores",
+            "ecot_shot_transport_cost_bank",
+            "ecot_shot_transported_mass_bank",
+            "ecot_m2_mass_for_score_bank",
+            "ecot_m2_mass_consensus_bank",
+            "ecot_aux_loss",
+            "ecot_identity_loss",
+            "ecot_policy_entropy",
+            "ecot_policy_entropy_loss",
+        ):
+            fused_value = self._weighted_multiscale_value(payloads, key, scale_weights)
+            if fused_value is not None:
+                fused_payload[key] = fused_value
+
+        fused_payload["multiscale/scale_weights"] = scale_weights
+        for scale_idx, query_record in enumerate(query_scales):
+            name = str(query_record["name"])
+            fused_payload[f"multiscale/scale_weight_{name}"] = scale_weights[scale_idx]
+            fused_payload[f"multiscale/score_{name}_mean"] = scale_shot_logits[scale_idx].mean()
+            fused_payload[f"multiscale/mass_{name}_mean"] = scale_shot_mass[scale_idx].mean()
+            fused_payload[f"multiscale/cost_{name}_mean"] = scale_shot_cost[scale_idx].mean()
+        if self.multiscale_per_scale_T:
+            for scale_idx, query_record in enumerate(query_scales):
+                name = str(query_record["name"])
+                fused_payload[f"multiscale/T_{name}"] = threshold_per_scale[scale_idx]
+        return fused_payload
+
     def _transport_match(
         self,
         cost: torch.Tensor,
@@ -602,6 +914,17 @@ class OursM2(JECOTM2):
         query_tokens: torch.Tensor | None = None,
         spatial_hw: tuple[int, int] | None = None,
     ) -> dict[str, torch.Tensor]:
+        if getattr(self, "enable_multiscale_ot", False):
+            return self._forward_multiscale_ecot_budget_bank(
+                flat_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+                support_weight=support_weight,
+                query_weight=query_weight,
+                support_tokens=support_tokens,
+                query_tokens=query_tokens,
+                spatial_hw=spatial_hw,
+            )
         dmuot_payload: dict[str, torch.Tensor] = {}
         token_g_query = None
         token_g_support = None
@@ -881,13 +1204,18 @@ class OursM2(JECOTM2):
     def _forward_episode(self, *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
         self._last_dm_diagnostics = None
         use_prenorm_cache = self.token_g_kind == "token_norm_pre_l2"
+        use_multiscale_cache = getattr(self, "enable_multiscale_ot", False)
         if use_prenorm_cache:
             self._token_g_prenorm_cache = []
+        if use_multiscale_cache:
+            self._multiscale_ot_cache = []
         try:
             outputs = super()._forward_episode(*args, **kwargs)
         finally:
             if use_prenorm_cache:
                 self._token_g_prenorm_cache = None
+            if use_multiscale_cache:
+                self._multiscale_ot_cache = None
         if isinstance(outputs, dict):
             if self.lambda_cost > 0.0 and "cost_matrix_modulated" in outputs:
                 if "base_cost_matrix" not in outputs and "cost_matrix" in outputs:
@@ -942,6 +1270,13 @@ class OursM2(JECOTM2):
                 [item["dm_mu_token_norm"] for item in batch_outputs],
                 dim=0,
             )
+        for key in sorted(k for k in batch_outputs[0] if str(k).startswith("multiscale/")):
+            values = [item[key] for item in batch_outputs]
+            if all(torch.is_tensor(value) for value in values):
+                if values[0].dim() == 0:
+                    stacked[key] = torch.stack(values).mean()
+                else:
+                    stacked[key] = torch.stack(values, dim=0).mean(dim=0)
         return stacked
 
 __all__ = ["OursM2", "apply_ours_design_defaults", "OURS_ABLATIONS", "normalize_ours_ablation"]

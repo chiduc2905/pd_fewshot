@@ -1298,6 +1298,28 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--enable_multiscale_ot",
+        action="store_true",
+        default=False,
+        help="Enable multi-scale token OT matching for Ours-Final.",
+    )
+    parser.add_argument(
+        "--multiscale_pool_sizes",
+        type=str,
+        default="original,2x2,1x1",
+        help=(
+            "Comma-separated Ours-Final multi-scale OT pool sizes. "
+            "'original' keeps the backbone grid, '2x2' pools to 2x2, "
+            "'1x1' is global average pooling. Example: 'original,3x3,2x2,1x1'."
+        ),
+    )
+    parser.add_argument(
+        "--multiscale_per_scale_T",
+        action="store_true",
+        default=False,
+        help="Use separate learned threshold T per multi-scale OT scale.",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3404,9 +3426,16 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "care_qesm_tau_e",
             "care_mdr_margin",
             "care_mdr_lambda",
+            "enable_multiscale_ot",
+            "multiscale_pool_sizes",
+            "multiscale_per_scale_T",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
+        if "scale_weights" in state_dict:
+            overrides.setdefault("enable_multiscale_ot", True)
+        if "raw_multiscale_transport_cost_thresholds" in state_dict:
+            overrides.setdefault("multiscale_per_scale_T", True)
         if (
             "hrot_ecot_enable_crs_marginal" not in overrides
             and any(key.startswith("crs_marginal.") for key in state_dict)
@@ -4465,6 +4494,27 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pot_guide/pot_sparsity",
         "pot_guide/marginal_q_max",
         "pot_guide/marginal_q_min",
+        "multiscale/scale_weights",
+        "multiscale/scale_weight_fine",
+        "multiscale/scale_weight_medium",
+        "multiscale/scale_weight_coarse",
+        "multiscale/scale_weight_global",
+        "multiscale/score_fine_mean",
+        "multiscale/score_medium_mean",
+        "multiscale/score_coarse_mean",
+        "multiscale/score_global_mean",
+        "multiscale/mass_fine_mean",
+        "multiscale/mass_medium_mean",
+        "multiscale/mass_coarse_mean",
+        "multiscale/mass_global_mean",
+        "multiscale/cost_fine_mean",
+        "multiscale/cost_medium_mean",
+        "multiscale/cost_coarse_mean",
+        "multiscale/cost_global_mean",
+        "multiscale/T_fine",
+        "multiscale/T_medium",
+        "multiscale/T_coarse",
+        "multiscale/T_global",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -4877,6 +4927,27 @@ def format_diagnostic_summary(metrics):
         "sgpot_alpha",
         "sgpot_beta",
         "sgpot_pot_plan_sparsity",
+        "multiscale/scale_weights",
+        "multiscale/scale_weight_fine",
+        "multiscale/scale_weight_medium",
+        "multiscale/scale_weight_coarse",
+        "multiscale/scale_weight_global",
+        "multiscale/score_fine_mean",
+        "multiscale/score_medium_mean",
+        "multiscale/score_coarse_mean",
+        "multiscale/score_global_mean",
+        "multiscale/mass_fine_mean",
+        "multiscale/mass_medium_mean",
+        "multiscale/mass_coarse_mean",
+        "multiscale/mass_global_mean",
+        "multiscale/cost_fine_mean",
+        "multiscale/cost_medium_mean",
+        "multiscale/cost_coarse_mean",
+        "multiscale/cost_global_mean",
+        "multiscale/T_fine",
+        "multiscale/T_medium",
+        "multiscale/T_coarse",
+        "multiscale/T_global",
     ]
     chunks = []
     emitted = set()

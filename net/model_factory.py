@@ -216,6 +216,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_pot_guide is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_multiscale_ot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_multiscale_ot is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2617,6 +2621,21 @@ def build_model_from_args(args):
                     "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
+                    **(
+                        {
+                            "enable_multiscale_ot": True,
+                            "multiscale_pool_sizes": str(
+                                getattr(args, "multiscale_pool_sizes", "original,2x2,1x1")
+                            ),
+                            "multiscale_per_scale_T": _bool_flag(
+                                getattr(args, "multiscale_per_scale_T", False),
+                                default=False,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_multiscale_ot", False), default=False)
+                        else {}
+                    ),
                     **(
                         {
                             "enable_pot_guide": True,

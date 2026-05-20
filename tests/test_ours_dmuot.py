@@ -72,6 +72,59 @@ def test_pot_guide_flag_off_creates_no_module_and_matches_logits():
     assert torch.equal(actual, expected)
 
 
+def test_multiscale_flag_off_creates_no_module_and_matches_logits():
+    torch.manual_seed(508)
+    baseline = _tiny_ours_final()
+    flag_off = _tiny_ours_final(enable_multiscale_ot=False)
+    flag_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    flag_off.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = flag_off(query, support)
+
+    assert not hasattr(baseline, "multi_scale_tokenizer")
+    assert not hasattr(baseline, "scale_weights")
+    assert not hasattr(flag_off, "multi_scale_tokenizer")
+    assert not hasattr(flag_off, "scale_weights")
+    assert torch.equal(actual, expected)
+
+
+def test_multiscale_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(507)
+    model = _tiny_ours_final(enable_multiscale_ot=True, multiscale_pool_sizes="original,2x2,1x1")
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert hasattr(model, "multi_scale_tokenizer")
+    assert model.scale_weights.shape == (3,)
+    assert outputs["logits"].shape == (2, 2)
+    assert outputs["multiscale/scale_weights"].shape == (3,)
+    assert torch.allclose(
+        outputs["multiscale/scale_weights"],
+        torch.full_like(outputs["multiscale/scale_weights"], 1.0 / 3.0),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    for key in (
+        "multiscale/score_fine_mean",
+        "multiscale/score_medium_mean",
+        "multiscale/score_coarse_mean",
+        "multiscale/mass_fine_mean",
+        "multiscale/cost_medium_mean",
+    ):
+        assert key in outputs
+        assert torch.isfinite(outputs[key])
+    assert model.scale_weights.grad is not None
+    assert torch.isfinite(model.scale_weights.grad).all()
+
+
 def test_pot_guide_enabled_exposes_diagnostics_and_nonuniform_marginals():
     torch.manual_seed(513)
     model = _tiny_ours_final(enable_pot_guide=True, pot_guide_max_iter=4)
@@ -200,6 +253,39 @@ def test_dmuot_factory_flags_are_ours_final_only():
     assert shot_neutral.tau_marg == 2.0
     assert shot_neutral.dmuot_shot_strength == "inverse_sqrt"
     with pytest.raises(ValueError, match="--ours_final_dmuot_ablation is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_multiscale_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_multiscale_ot=True,
+        multiscale_pool_sizes="original,2x2",
+        multiscale_per_scale_T=False,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "multi_scale_tokenizer")
+    assert ours_final.scale_weights.shape == (2,)
+
+    with pytest.raises(ValueError, match="--enable_multiscale_ot is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
                 model="ours",
