@@ -220,6 +220,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_multiscale_ot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_context_enrichment", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_context_enrichment is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2634,6 +2638,20 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_multiscale_ot", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_context_enrichment": True,
+                            "context_kernel_sizes": str(
+                                getattr(args, "context_kernel_sizes", "3,5")
+                            ),
+                            "context_fusion": str(
+                                getattr(args, "context_fusion", "weighted_sum")
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_context_enrichment", False), default=False)
                         else {}
                     ),
                     **(

@@ -24,6 +24,7 @@ from net.fewshot_common import feature_map_to_tokens
 from net.hrot_fsl import HROTFSLResult, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
+from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.jecot_m2 import JECOTM2
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -233,6 +234,9 @@ class OursM2(JECOTM2):
         enable_multiscale_ot = _bool_config(kwargs.pop("enable_multiscale_ot", False))
         multiscale_pool_sizes = kwargs.pop("multiscale_pool_sizes", "original,2x2,1x1")
         multiscale_per_scale_T = _bool_config(kwargs.pop("multiscale_per_scale_T", False))
+        enable_context_enrichment = _bool_config(kwargs.pop("enable_context_enrichment", False))
+        context_kernel_sizes_raw = kwargs.pop("context_kernel_sizes", "3,5")
+        context_fusion = str(kwargs.pop("context_fusion", "weighted_sum"))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -327,10 +331,29 @@ class OursM2(JECOTM2):
         )
         self.register_buffer("dm_global_template", torch.empty(0), persistent=False)
         self.register_buffer("dm_template_count", torch.tensor(0.0), persistent=False)
+        self.enable_context_enrichment = bool(enable_context_enrichment)
+        if self.enable_context_enrichment:
+            context_ks = parse_context_kernel_sizes(context_kernel_sizes_raw)
+            self.context_enrichment = SpatialContextEnrichment(
+                channels=self.hidden_dim,
+                kernel_sizes=context_ks,
+                fusion=context_fusion,
+            )
+            self._last_context_diagnostics: dict[str, torch.Tensor] | None = None
 
     @property
     def uses_ours_gap_control(self) -> bool:
         return self.ours_ablation == "gap"
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        feature_map = super().encode(x)
+        if self.enable_context_enrichment:
+            enriched = self.context_enrichment(feature_map)
+            self._last_context_diagnostics = self.context_enrichment.diagnostics(
+                feature_map, enriched,
+            )
+            return enriched
+        return feature_map
 
     @property
     def multiscale_transport_cost_thresholds(self) -> torch.Tensor:
@@ -1203,6 +1226,8 @@ class OursM2(JECOTM2):
 
     def _forward_episode(self, *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
         self._last_dm_diagnostics = None
+        if self.enable_context_enrichment:
+            self._last_context_diagnostics = None
         use_prenorm_cache = self.token_g_kind == "token_norm_pre_l2"
         use_multiscale_cache = getattr(self, "enable_multiscale_ot", False)
         if use_prenorm_cache:
@@ -1223,6 +1248,8 @@ class OursM2(JECOTM2):
                 outputs["cost_matrix"] = outputs["cost_matrix_modulated"]
             if self._last_dm_diagnostics is not None:
                 outputs.update(self._last_dm_diagnostics)
+            if self.enable_context_enrichment and self._last_context_diagnostics is not None:
+                outputs.update(self._last_context_diagnostics)
         return outputs
 
     def _stack_outputs(self, batch_outputs: list[dict[str, torch.Tensor]]) -> HROTFSLResult:
@@ -1277,6 +1304,10 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
+        for key in sorted(k for k in batch_outputs[0] if str(k).startswith("context/")):
+            values = [item[key] for item in batch_outputs]
+            if all(torch.is_tensor(value) for value in values):
+                stacked[key] = torch.stack(values).mean()
         return stacked
 
 __all__ = ["OursM2", "apply_ours_design_defaults", "OURS_ABLATIONS", "normalize_ours_ablation"]

@@ -554,3 +554,211 @@ def test_pst_and_dm_combined_runs():
     assert torch.isfinite(outputs["logits"]).all()
     assert "marginal_query" in outputs
     assert "dmuot_shot_strength" in outputs
+
+
+# ──────────────────────────────────────────────────────────
+# Spatial Context Enrichment tests
+# ──────────────────────────────────────────────────────────
+
+
+def test_context_enrichment_off_matches_baseline_logits():
+    torch.manual_seed(600)
+    baseline = _tiny_ours_final()
+    flag_off = _tiny_ours_final(enable_context_enrichment=False)
+    flag_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    flag_off.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = flag_off(query, support)
+
+    assert not baseline.enable_context_enrichment
+    assert not hasattr(baseline, "context_enrichment")
+    assert not flag_off.enable_context_enrichment
+    assert not hasattr(flag_off, "context_enrichment")
+    assert torch.equal(actual, expected)
+
+
+def test_context_enrichment_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(601)
+    model = _tiny_ours_final(enable_context_enrichment=True, context_kernel_sizes="3,5")
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.enable_context_enrichment
+    assert hasattr(model, "context_enrichment")
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    for key in (
+        "context/gate_value",
+        "context/branch_weight_original",
+        "context/branch_weight_conv3",
+        "context/branch_weight_conv5",
+        "context/token_change_ratio",
+    ):
+        assert key in outputs, f"Missing diagnostic key: {key}"
+        assert torch.isfinite(outputs[key]), f"Non-finite diagnostic: {key}"
+
+
+def test_context_enrichment_gate_starts_near_zero():
+    torch.manual_seed(602)
+    model = _tiny_ours_final(enable_context_enrichment=True, context_kernel_sizes="3,5")
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    gate = outputs["context/gate_value"].item()
+    assert gate < 0.05, f"Initial gate should be near 0, got {gate}"
+    assert outputs["context/token_change_ratio"].item() < 0.1
+
+
+def test_context_enrichment_gradient_flows_to_gate_and_branches():
+    torch.manual_seed(603)
+    model = _tiny_ours_final(enable_context_enrichment=True, context_kernel_sizes="3,5")
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].pow(2).sum()
+    loss.backward()
+
+    ce = model.context_enrichment
+    assert ce.raw_gate.grad is not None
+    assert torch.isfinite(ce.raw_gate.grad).all()
+    assert ce.branch_weights.grad is not None
+    assert torch.isfinite(ce.branch_weights.grad).all()
+    for branch in ce.branches:
+        for param in branch.parameters():
+            assert param.grad is not None, "Depthwise conv param has no gradient"
+            assert torch.isfinite(param.grad).all()
+
+
+def test_context_enrichment_bottleneck_fusion_runs():
+    torch.manual_seed(604)
+    model = _tiny_ours_final(
+        enable_context_enrichment=True,
+        context_kernel_sizes="3,5",
+        context_fusion="bottleneck",
+    )
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert "context/token_change_ratio" in outputs
+
+
+def test_context_enrichment_bottleneck_gradient_flows():
+    torch.manual_seed(605)
+    model = _tiny_ours_final(
+        enable_context_enrichment=True,
+        context_kernel_sizes="3",
+        context_fusion="bottleneck",
+    )
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].pow(2).sum()
+    loss.backward()
+
+    ce = model.context_enrichment
+    for param in ce.fusion_conv.parameters():
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()
+
+
+def test_context_enrichment_single_kernel():
+    torch.manual_seed(606)
+    model = _tiny_ours_final(enable_context_enrichment=True, context_kernel_sizes="3")
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    assert "context/branch_weight_conv3" in outputs
+    assert "context/branch_weight_conv5" not in outputs
+
+
+def test_context_enrichment_triple_kernel():
+    torch.manual_seed(607)
+    model = _tiny_ours_final(enable_context_enrichment=True, context_kernel_sizes="3,5,7")
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    for key in (
+        "context/branch_weight_conv3",
+        "context/branch_weight_conv5",
+        "context/branch_weight_conv7",
+    ):
+        assert key in outputs
+
+
+def test_context_enrichment_combined_with_multiscale():
+    torch.manual_seed(608)
+    model = _tiny_ours_final(
+        enable_context_enrichment=True,
+        context_kernel_sizes="3,5",
+        enable_multiscale_ot=True,
+        multiscale_pool_sizes="original,2x2,1x1",
+    )
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert "context/gate_value" in outputs
+    assert "multiscale/scale_weights" in outputs
+
+
+def test_context_enrichment_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_context_enrichment=True,
+        context_kernel_sizes="3,5",
+        context_fusion="weighted_sum",
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "context_enrichment")
+    assert ours_final.enable_context_enrichment
+
+    with pytest.raises(ValueError, match="--enable_context_enrichment is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )

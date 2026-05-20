@@ -1320,6 +1320,25 @@ def get_args():
         help="Use separate learned threshold T per multi-scale OT scale.",
     )
     parser.add_argument(
+        "--enable_context_enrichment",
+        action="store_true",
+        default=False,
+        help="Enrich spatial tokens with neighbor context via depthwise conv before OT (Ours-Final only).",
+    )
+    parser.add_argument(
+        "--context_kernel_sizes",
+        type=str,
+        default="3,5",
+        help="Comma-separated odd kernel sizes for context enrichment. E.g. '3,5' or '3,5,7'.",
+    )
+    parser.add_argument(
+        "--context_fusion",
+        type=str,
+        default="weighted_sum",
+        choices=["weighted_sum", "bottleneck"],
+        help="Fusion strategy for context enrichment branches.",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3429,6 +3448,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_multiscale_ot",
             "multiscale_pool_sizes",
             "multiscale_per_scale_T",
+            "enable_context_enrichment",
+            "context_kernel_sizes",
+            "context_fusion",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -3436,6 +3458,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             overrides.setdefault("enable_multiscale_ot", True)
         if "raw_multiscale_transport_cost_thresholds" in state_dict:
             overrides.setdefault("multiscale_per_scale_T", True)
+        if any(key.startswith("context_enrichment.") for key in state_dict):
+            overrides.setdefault("enable_context_enrichment", True)
         if (
             "hrot_ecot_enable_crs_marginal" not in overrides
             and any(key.startswith("crs_marginal.") for key in state_dict)
@@ -4515,6 +4539,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "multiscale/T_medium",
         "multiscale/T_coarse",
         "multiscale/T_global",
+        "context/gate_value",
+        "context/branch_weight_original",
+        "context/branch_weight_conv3",
+        "context/branch_weight_conv5",
+        "context/branch_weight_conv7",
+        "context/token_change_ratio",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -4948,6 +4978,12 @@ def format_diagnostic_summary(metrics):
         "multiscale/T_medium",
         "multiscale/T_coarse",
         "multiscale/T_global",
+        "context/gate_value",
+        "context/branch_weight_original",
+        "context/branch_weight_conv3",
+        "context/branch_weight_conv5",
+        "context/branch_weight_conv7",
+        "context/token_change_ratio",
     ]
     chunks = []
     emitted = set()
