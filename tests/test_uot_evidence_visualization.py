@@ -32,6 +32,7 @@ def test_export_uot_evidence_figure_draws_top_transport_correspondences(tmp_path
     )
 
     assert save_path.exists()
+    assert (tmp_path / "uot_evidence_all_classes.png").exists()
     assert save_path.stat().st_size > 0
     assert len(rows) == 1
     assert rows[0]["top_match_count"] == 3
@@ -72,6 +73,7 @@ def test_export_uot_evidence_figure_prefers_positive_threshold_evidence(tmp_path
     )
 
     assert save_path.exists()
+    assert (tmp_path / "uot_positive_evidence_all_classes.png").exists()
     assert rows[0]["evidence_map_source"] == "positive_evidence"
     assert abs(rows[0]["positive_evidence_total"] - 0.03) < 1e-6
     assert 0.0 < rows[0]["top_match_score_fraction"] <= 1.0

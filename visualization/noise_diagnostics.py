@@ -692,6 +692,11 @@ def _positive_transport_evidence(
     return pair_plan * (threshold_tensor - pair_cost).clamp_min(0.0)
 
 
+def _uot_all_class_match_path(save_path: str) -> str:
+    stem, ext = os.path.splitext(save_path)
+    return f"{stem}_all_classes{ext or '.png'}"
+
+
 def _shot_tensor_by_class(
     outputs: dict[str, Any] | torch.Tensor,
     key: str,
@@ -809,6 +814,124 @@ def _shot_expected_mass(
     return float(fallback_mass)
 
 
+def _export_uot_all_class_match_figure(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    query_images: torch.Tensor,
+    support_images: torch.Tensor,
+    logits: torch.Tensor,
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    class_names: Sequence[str],
+    plan: torch.Tensor,
+    cost_matrix: torch.Tensor | None,
+    save_path: str,
+    episode_index: int,
+    query_indices: Sequence[int],
+    method_title: str,
+    variant_text: str,
+) -> str:
+    way_num, shot_num = support_images.shape[:2]
+    fig, axes = plt.subplots(
+        len(query_indices),
+        way_num,
+        figsize=(5.4 * way_num, max(4.2, 3.9 * len(query_indices))),
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+
+    for row_idx, query_idx_raw in enumerate(query_indices):
+        query_idx = int(query_idx_raw)
+        true_class = int(targets[query_idx].item())
+        pred_class = int(preds[query_idx].item())
+        score_np = logits[query_idx].numpy()
+        query_np = _ensure_numpy_image(query_images[query_idx])
+        image_hw = tuple(int(dim) for dim in query_np.shape)
+
+        for class_idx in range(way_num):
+            shot_idx = _select_transport_shot(
+                outputs,
+                query_idx=query_idx,
+                class_idx=class_idx,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            pair_plan = plan[query_idx, class_idx, shot_idx]
+            pair_cost = None
+            if cost_matrix is not None and query_idx < cost_matrix.shape[0]:
+                pair_cost = cost_matrix[query_idx, class_idx, shot_idx]
+            transport_threshold = _threshold_for_transport_pair(
+                outputs,
+                query_idx=query_idx,
+                class_idx=class_idx,
+                shot_idx=shot_idx,
+            )
+            positive_evidence = _positive_transport_evidence(
+                pair_plan=pair_plan,
+                pair_cost=pair_cost,
+                threshold=transport_threshold,
+            )
+            if positive_evidence is not None:
+                query_values = positive_evidence.sum(dim=-1)
+                support_values = positive_evidence.sum(dim=-2)
+                evidence_total = float(positive_evidence.sum().item())
+                score_label = f"positive evidence={evidence_total:.4f}"
+            else:
+                query_values = pair_plan.sum(dim=-1)
+                support_values = pair_plan.sum(dim=-2)
+                score_label = f"mass={float(pair_plan.sum().item()):.3f}"
+
+            support_np = _ensure_numpy_image(support_images[class_idx, shot_idx])
+            support_hw = tuple(int(dim) for dim in support_np.shape)
+            query_heat = _token_values_to_heatmap(query_values, image_hw)
+            support_heat = _token_values_to_heatmap(support_values, support_hw)
+
+            class_name = class_names[class_idx] if class_idx < len(class_names) else str(class_idx)
+            roles = []
+            if class_idx == true_class:
+                roles.append("true")
+            if class_idx == pred_class:
+                roles.append("pred")
+            role_text = f" ({'/'.join(roles)})" if roles else ""
+            logit_text = f"logit={float(score_np[class_idx]):+.3f}" if class_idx < len(score_np) else "logit=n/a"
+            subtitle = f"{score_label}, {logit_text}, shot={shot_idx + 1}"
+            _plot_transport_correspondence(
+                axes[row_idx, class_idx],
+                query_np,
+                support_np,
+                pair_plan,
+                query_heat,
+                support_heat,
+                pair_scores=positive_evidence,
+                title=f"{class_name}{role_text}",
+                subtitle=subtitle,
+            )
+            if class_idx == 0:
+                axes[row_idx, class_idx].text(
+                    0.02,
+                    0.98,
+                    f"query {query_idx}",
+                    transform=axes[row_idx, class_idx].transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8.5,
+                    color="white",
+                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "black", "alpha": 0.62, "edgecolor": "none"},
+                )
+
+    fig.suptitle(
+        f"Query-to-all-class UOT evidence | Episode {episode_index} | {variant_text} | {method_title}",
+        fontsize=15,
+        weight="bold",
+        y=0.995,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.955))
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=260, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
 def export_uot_evidence_figure(
     *,
     outputs: dict[str, Any] | torch.Tensor,
@@ -859,6 +982,7 @@ def export_uot_evidence_figure(
         squeeze=False,
     )
     fig.patch.set_facecolor("white")
+    all_class_match_path = _uot_all_class_match_path(save_path)
 
     for row_idx, query_idx_raw in enumerate(selected_indices):
         query_idx = int(query_idx_raw)
@@ -1085,6 +1209,7 @@ def export_uot_evidence_figure(
                 "evidence_support_background_mass_ratio": support_bg_mass_ratio,
                 "noise_sink_mass": sink_mass,
                 "save_path": save_path,
+                "all_class_match_path": all_class_match_path,
             }
         )
 
@@ -1115,6 +1240,22 @@ def export_uot_evidence_figure(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig.savefig(save_path, dpi=260, bbox_inches="tight")
     plt.close(fig)
+    _export_uot_all_class_match_figure(
+        outputs=outputs,
+        query_images=query_images,
+        support_images=support_images,
+        logits=logits,
+        preds=preds,
+        targets=targets,
+        class_names=class_names,
+        plan=plan,
+        cost_matrix=cost_matrix,
+        save_path=all_class_match_path,
+        episode_index=episode_index,
+        query_indices=selected_indices,
+        method_title=method_title,
+        variant_text=variant_text,
+    )
     return rows
 
 

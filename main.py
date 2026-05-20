@@ -2006,7 +2006,10 @@ def get_args():
         type=str,
         default="false",
         choices=["true", "false"],
-        help="Export UOT evidence figures with query/support mass overlays and top transported-token correspondences.",
+        help=(
+            "Export UOT evidence figures with positive-evidence overlays, top transported-token correspondences, "
+            "and query-to-all-class support comparison panels."
+        ),
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)

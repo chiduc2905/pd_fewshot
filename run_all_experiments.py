@@ -324,7 +324,7 @@ def get_args():
         type=str,
         default="false",
         choices=["true", "false"],
-        help="Forwarded to main.py to export the four-panel transport evidence figure during final test.",
+        help="Forwarded to main.py to export UOT evidence and query-to-all-class support comparison figures during final test.",
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
