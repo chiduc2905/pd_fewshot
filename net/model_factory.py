@@ -2652,6 +2652,18 @@ def build_model_from_args(args):
                             "context_gate_max": float(
                                 getattr(args, "context_gate_max", 1.0)
                             ),
+                            "context_change_max": float(
+                                getattr(args, "context_change_max", 0.0)
+                            ),
+                            "context_debug": _bool_flag(
+                                getattr(args, "context_debug", False), default=False,
+                            ),
+                            "context_debug_dir": str(
+                                getattr(args, "context_debug_dir", "results/context_debug")
+                            ),
+                            "context_debug_max_episodes": int(
+                                getattr(args, "context_debug_max_episodes", 3)
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_context_enrichment", False), default=False)

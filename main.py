@@ -1345,6 +1345,20 @@ def get_args():
         help="Clamp gate value to this max (e.g. 0.3). Limits enrichment strength to prevent meta-overfitting.",
     )
     parser.add_argument(
+        "--context_change_max",
+        type=float,
+        default=0.0,
+        help="Hard cap on ||delta||/||F|| ratio (e.g. 0.1). 0 = no cap. Prevents conv kernels from compensating for a small gate.",
+    )
+    parser.add_argument(
+        "--context_debug",
+        action="store_true",
+        default=False,
+        help="Export context enrichment debug figures (feature map heatmaps, per-branch, delta).",
+    )
+    parser.add_argument("--context_debug_dir", type=str, default="results/context_debug")
+    parser.add_argument("--context_debug_max_episodes", type=int, default=3)
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3458,6 +3472,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "context_kernel_sizes",
             "context_fusion",
             "context_gate_max",
+            "context_change_max",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]

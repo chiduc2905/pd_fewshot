@@ -238,6 +238,10 @@ class OursM2(JECOTM2):
         context_kernel_sizes_raw = kwargs.pop("context_kernel_sizes", "3,5")
         context_fusion = str(kwargs.pop("context_fusion", "weighted_sum"))
         context_gate_max = float(kwargs.pop("context_gate_max", 1.0))
+        context_change_max = float(kwargs.pop("context_change_max", 0.0))
+        context_debug = _bool_config(kwargs.pop("context_debug", False))
+        context_debug_dir = str(kwargs.pop("context_debug_dir", "results/context_debug"))
+        context_debug_max_episodes = int(kwargs.pop("context_debug_max_episodes", 3))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -340,8 +344,13 @@ class OursM2(JECOTM2):
                 kernel_sizes=context_ks,
                 fusion=context_fusion,
                 gate_max=context_gate_max,
+                change_max=context_change_max,
             )
             self._last_context_diagnostics: dict[str, torch.Tensor] | None = None
+            self._context_debug = bool(context_debug)
+            self._context_debug_dir = str(context_debug_dir)
+            self._context_debug_max = int(context_debug_max_episodes)
+            self._context_debug_count = 0
 
     @property
     def uses_ours_gap_control(self) -> bool:
@@ -350,6 +359,8 @@ class OursM2(JECOTM2):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         feature_map = super().encode(x)
         if self.enable_context_enrichment:
+            if self._context_debug and hasattr(self, "_context_debug_images"):
+                self._context_debug_images.append(x.detach().cpu())
             enriched = self.context_enrichment(feature_map)
             self._last_context_diagnostics = self.context_enrichment.diagnostics(
                 feature_map, enriched,
@@ -1228,8 +1239,16 @@ class OursM2(JECOTM2):
 
     def _forward_episode(self, *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
         self._last_dm_diagnostics = None
+        use_context_debug = (
+            self.enable_context_enrichment
+            and self._context_debug
+            and self._context_debug_count < self._context_debug_max
+        )
         if self.enable_context_enrichment:
             self._last_context_diagnostics = None
+            if use_context_debug:
+                self.context_enrichment._debug_cache = []
+                self._context_debug_images = []
         use_prenorm_cache = self.token_g_kind == "token_norm_pre_l2"
         use_multiscale_cache = getattr(self, "enable_multiscale_ot", False)
         if use_prenorm_cache:
@@ -1243,6 +1262,10 @@ class OursM2(JECOTM2):
                 self._token_g_prenorm_cache = None
             if use_multiscale_cache:
                 self._multiscale_ot_cache = None
+            if use_context_debug:
+                self._export_context_debug()
+                self.context_enrichment._debug_cache = None
+                self._context_debug_images = []
         if isinstance(outputs, dict):
             if self.lambda_cost > 0.0 and "cost_matrix_modulated" in outputs:
                 if "base_cost_matrix" not in outputs and "cost_matrix" in outputs:
@@ -1253,6 +1276,60 @@ class OursM2(JECOTM2):
             if self.enable_context_enrichment and self._last_context_diagnostics is not None:
                 outputs.update(self._last_context_diagnostics)
         return outputs
+
+    def _export_context_debug(self) -> None:
+        from net.modules.spatial_context_enrichment import export_context_debug_figure
+
+        cache = getattr(self.context_enrichment, "_debug_cache", None)
+        if not cache:
+            return
+        self._context_debug_count += 1
+        ep_idx = self._context_debug_count
+        images = getattr(self, "_context_debug_images", [])
+
+        bw = None
+        gv = None
+        if self.context_enrichment.fusion_mode == "weighted_sum":
+            bw = (
+                torch.softmax(self.context_enrichment.branch_weights.detach().float(), dim=0)
+                .cpu()
+                .numpy()
+            )
+            gv = float(self.context_enrichment.gate_value.detach().float().cpu().item())
+
+        for call_idx, record in enumerate(cache):
+            batch_size = record["original"].shape[0]
+            flat_images = images[call_idx] if call_idx < len(images) else None
+            for img_idx in range(min(batch_size, 8)):
+                inp = None
+                if flat_images is not None and img_idx < flat_images.shape[0]:
+                    inp = flat_images[img_idx]
+                path = os.path.join(
+                    self._context_debug_dir,
+                    f"ep{ep_idx:03d}_call{call_idx}_img{img_idx:03d}.png",
+                )
+                try:
+                    export_context_debug_figure(
+                        debug_record={
+                            "original": record["original"][img_idx : img_idx + 1],
+                            "enriched": record["enriched"][img_idx : img_idx + 1],
+                            "delta": record["delta"][img_idx : img_idx + 1],
+                            "branches": [b[img_idx : img_idx + 1] for b in record["branches"]],
+                        },
+                        input_image=inp,
+                        kernel_sizes=self.context_enrichment.kernel_sizes,
+                        image_index=0,
+                        save_path=path,
+                        branch_weights=bw,
+                        gate_value=gv,
+                    )
+                except Exception as exc:
+                    print(f"[context-debug] failed to export {path}: {exc}")
+                    return
+        print(
+            f"[context-debug] episode {ep_idx}: exported {len(cache)} calls, "
+            f"gate={gv:.4f}, dir={self._context_debug_dir}"
+        )
 
     def _stack_outputs(self, batch_outputs: list[dict[str, torch.Tensor]]) -> HROTFSLResult:
         stacked = super()._stack_outputs(batch_outputs)
