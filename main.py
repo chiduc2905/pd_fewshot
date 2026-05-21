@@ -1371,6 +1371,39 @@ def get_args():
         help="Dimension of the structural embedding projection (default 16).",
     )
     parser.add_argument(
+        "--enable_pulse_region_uot",
+        action="store_true",
+        default=False,
+        help="Ours-Final only: guide UOT with bright-pulse saliency marginals and larger region-token costs.",
+    )
+    parser.add_argument(
+        "--pulse_region_kernel_size",
+        type=int,
+        default=5,
+        help="Odd token-window size used for pulse-region descriptors.",
+    )
+    parser.add_argument(
+        "--pulse_region_cost_weight",
+        type=float,
+        default=0.35,
+        help="Blend weight for region-context cost in pulse-region UOT.",
+    )
+    parser.add_argument(
+        "--pulse_saliency_mass_mix",
+        type=float,
+        default=0.50,
+        help="Blend between uniform token mass and pulse saliency mass prior.",
+    )
+    parser.add_argument(
+        "--pulse_saliency_cost_discount",
+        type=float,
+        default=0.10,
+        help="Relative cost discount for salient query-support token pairs.",
+    )
+    parser.add_argument("--pulse_saliency_image_weight", type=float, default=0.45)
+    parser.add_argument("--pulse_saliency_feature_weight", type=float, default=0.35)
+    parser.add_argument("--pulse_saliency_contrast_weight", type=float, default=0.20)
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3487,6 +3520,14 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "context_change_max",
             "enable_structural_augmentation",
             "struct_dim",
+            "enable_pulse_region_uot",
+            "pulse_region_kernel_size",
+            "pulse_region_cost_weight",
+            "pulse_saliency_mass_mix",
+            "pulse_saliency_cost_discount",
+            "pulse_saliency_image_weight",
+            "pulse_saliency_feature_weight",
+            "pulse_saliency_contrast_weight",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -4587,6 +4628,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "struct/struct_weight_norm",
         "struct/semantic_weight_norm",
         "struct/struct_vs_semantic_ratio",
+        "pulse/region_cost_weight",
+        "pulse/saliency_mass_mix",
+        "pulse/saliency_cost_discount",
+        "pulse/query_saliency_peak",
+        "pulse/support_saliency_peak",
+        "pulse/region_cost_delta_ratio",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -5030,6 +5077,12 @@ def format_diagnostic_summary(metrics):
         "struct/struct_weight_norm",
         "struct/semantic_weight_norm",
         "struct/struct_vs_semantic_ratio",
+        "pulse/region_cost_weight",
+        "pulse/saliency_mass_mix",
+        "pulse/saliency_cost_discount",
+        "pulse/query_saliency_peak",
+        "pulse/support_saliency_peak",
+        "pulse/region_cost_delta_ratio",
     ]
     chunks = []
     emitted = set()
@@ -5952,12 +6005,20 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             if row.get("evidence_background_mass_ratio") is not None
         ]
         fg_bg_mean = float(np.mean(fg_bg_values)) if fg_bg_values else None
+        pulse_values = [
+            float(row["pulse_to_pulse_mass_ratio"])
+            for row in uot_evidence_rows
+            if row.get("pulse_to_pulse_mass_ratio") is not None
+        ]
+        pulse_mean = float(np.mean(pulse_values)) if pulse_values else None
         uot_log_payload = {
             "uot_evidence/decision_margin_mean": margin_mean,
             "uot_evidence/unmatched_fraction_mean": unmatched_mean,
         }
         if fg_bg_mean is not None:
             uot_log_payload["uot_evidence/evidence_background_mass_ratio_mean"] = fg_bg_mean
+        if pulse_mean is not None:
+            uot_log_payload["uot_evidence/pulse_to_pulse_mass_ratio_mean"] = pulse_mean
         wandb.log(
             uot_log_payload
         )

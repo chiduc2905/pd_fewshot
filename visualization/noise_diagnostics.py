@@ -692,6 +692,56 @@ def _positive_transport_evidence(
     return pair_plan * (threshold_tensor - pair_cost).clamp_min(0.0)
 
 
+def _token_bright_mask(
+    image: np.ndarray,
+    *,
+    num_tokens: int,
+    quantile: float = 0.80,
+) -> torch.Tensor:
+    token_h, token_w = infer_token_hw(int(num_tokens))
+    image_t = torch.as_tensor(image, dtype=torch.float32).reshape(1, 1, image.shape[0], image.shape[1])
+    token_energy = F.adaptive_avg_pool2d(image_t, output_size=(token_h, token_w)).flatten()
+    threshold = torch.quantile(token_energy, float(quantile))
+    mask = token_energy >= threshold
+    if not bool(mask.any()):
+        mask[token_energy.argmax()] = True
+    return mask
+
+
+def _token_mask_to_heatmap(
+    mask: torch.Tensor,
+    target_hw: tuple[int, int],
+) -> np.ndarray:
+    mask = mask.detach().float().cpu().flatten()
+    token_h, token_w = infer_token_hw(int(mask.numel()))
+    token_map = mask.view(1, 1, token_h, token_w)
+    heatmap = F.interpolate(token_map, size=target_hw, mode="nearest")
+    return heatmap.squeeze(0).squeeze(0).cpu().numpy()
+
+
+def _masked_token_ratio(values: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> float:
+    values = values.detach().float().cpu().flatten().clamp_min(0.0)
+    mask = mask.detach().cpu().bool().flatten()
+    if values.numel() != mask.numel():
+        return 0.0
+    return float(values[mask].sum().item() / max(float(values.sum().item()), eps))
+
+
+def _pulse_to_pulse_ratio(
+    pair_scores: torch.Tensor,
+    query_mask: torch.Tensor,
+    support_mask: torch.Tensor,
+    eps: float = 1e-8,
+) -> float:
+    scores = pair_scores.detach().float().cpu().clamp_min(0.0)
+    query_mask = query_mask.detach().cpu().bool().flatten()
+    support_mask = support_mask.detach().cpu().bool().flatten()
+    if scores.dim() != 2 or scores.shape[0] != query_mask.numel() or scores.shape[1] != support_mask.numel():
+        return 0.0
+    selected = scores[query_mask][:, support_mask].sum()
+    return float(selected.item() / max(float(scores.sum().item()), eps))
+
+
 def _uot_all_class_match_path(save_path: str) -> str:
     stem, ext = os.path.splitext(save_path)
     return f"{stem}_all_classes{ext or '.png'}"
@@ -1026,6 +1076,13 @@ def export_uot_evidence_figure(
         support_np = _ensure_numpy_image(support_images[true_class, shot_idx])
         image_hw = tuple(int(dim) for dim in query_np.shape)
         support_hw = tuple(int(dim) for dim in support_np.shape)
+        query_bright_mask = _token_bright_mask(query_np, num_tokens=int(query_mass.numel()))
+        support_bright_mask = _token_bright_mask(support_np, num_tokens=int(support_mass.numel()))
+        pulse_to_pulse_mass_ratio = _pulse_to_pulse_ratio(
+            pair_plan,
+            query_bright_mask,
+            support_bright_mask,
+        )
         pair_cost = None
         if cost_matrix is not None and query_idx < cost_matrix.shape[0]:
             pair_cost = cost_matrix[query_idx, true_class, shot_idx]
@@ -1045,13 +1102,23 @@ def export_uot_evidence_figure(
             support_visual_values = positive_evidence.sum(dim=-2)
             visual_source = "positive_evidence"
             positive_evidence_total = float(positive_evidence.sum().item())
+            positive_pulse_to_pulse_ratio = _pulse_to_pulse_ratio(
+                positive_evidence,
+                query_bright_mask,
+                support_bright_mask,
+            )
         else:
             query_visual_values = query_mass
             support_visual_values = support_mass
             visual_source = "transport_mass"
             positive_evidence_total = None
+            positive_pulse_to_pulse_ratio = None
+        query_bright_mass_ratio = _masked_token_ratio(query_visual_values, query_bright_mask)
+        support_bright_mass_ratio = _masked_token_ratio(support_visual_values, support_bright_mask)
         query_heat = _token_values_to_heatmap(query_visual_values, image_hw)
         support_heat = _token_values_to_heatmap(support_visual_values, support_hw)
+        query_bright_heat = _token_mask_to_heatmap(query_bright_mask, image_hw)
+        support_bright_heat = _token_mask_to_heatmap(support_bright_mask, support_hw)
         query_ref = _token_values_to_heatmap(torch.ones_like(query_mass), image_hw)
         support_ref = _token_values_to_heatmap(torch.ones_like(support_mass), support_hw)
         query_evidence = None
@@ -1134,16 +1201,22 @@ def export_uot_evidence_figure(
         )
         if visual_source == "positive_evidence":
             threshold_text = f", T={transport_threshold:.4f}" if transport_threshold is not None else ""
-            uot_subtitle = f"positive evidence={positive_evidence_total:.4f}{threshold_text}, shot={shot_idx + 1}"
+            uot_subtitle = (
+                f"positive evidence={positive_evidence_total:.4f}{threshold_text}, "
+                f"pulse-pulse={pulse_to_pulse_mass_ratio:.1%}, shot={shot_idx + 1}"
+            )
             uot_title = f"(c) Positive {method_title} evidence"
         elif has_evidence and evidence_bg_mass_ratio is not None:
             uot_subtitle = (
                 f"evidence-gated mass={transported_mass:.3f}, bg-mass={evidence_bg_mass_ratio:.1%}, "
-                f"sink={sink_mass:.3f}"
+                f"pulse-pulse={pulse_to_pulse_mass_ratio:.1%}, sink={sink_mass:.3f}"
             )
             uot_title = f"(c) {method_title} mass"
         else:
-            uot_subtitle = f"mass={transported_mass:.3f}, unmatched={unmatched_fraction:.1%}, shot={shot_idx + 1}"
+            uot_subtitle = (
+                f"mass={transported_mass:.3f}, pulse-pulse={pulse_to_pulse_mass_ratio:.1%}, "
+                f"unmatched={unmatched_fraction:.1%}, shot={shot_idx + 1}"
+            )
             uot_title = f"(c) {method_title} mass"
 
         _plot_transport_pair(
@@ -1154,8 +1227,10 @@ def export_uot_evidence_figure(
             support_heat,
             title=uot_title,
             subtitle=uot_subtitle,
-            query_outline=query_evidence_heat,
-            support_outline=support_evidence_heat,
+            query_outline=query_bright_heat if query_evidence_heat is None else np.maximum(query_bright_heat, query_evidence_heat),
+            support_outline=(
+                support_bright_heat if support_evidence_heat is None else np.maximum(support_bright_heat, support_evidence_heat)
+            ),
         )
         correspondence_subtitle = (
             "points/lines scale with positive evidence"
@@ -1198,6 +1273,10 @@ def export_uot_evidence_figure(
                 "unmatched_fraction": unmatched_fraction,
                 "evidence_map_source": visual_source,
                 "positive_evidence_total": positive_evidence_total,
+                "pulse_to_pulse_mass_ratio": pulse_to_pulse_mass_ratio,
+                "query_bright_mass_ratio": query_bright_mass_ratio,
+                "support_bright_mass_ratio": support_bright_mass_ratio,
+                "positive_pulse_to_pulse_ratio": positive_pulse_to_pulse_ratio,
                 "transport_cost_threshold": transport_threshold,
                 "top_match_count": top_match_count,
                 "top_match_score_fraction": top_match_score_fraction,

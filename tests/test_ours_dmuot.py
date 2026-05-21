@@ -878,3 +878,72 @@ def test_structural_augmentation_factory_flags_are_ours_final_only():
                 **common,
             )
         )
+
+
+# Pulse-region guided UOT tests
+
+
+def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(900)
+    model = _tiny_ours_final(
+        enable_pulse_region_uot=True,
+        pulse_region_kernel_size=3,
+        pulse_region_cost_weight=0.25,
+        pulse_saliency_mass_mix=0.5,
+    )
+    model.train()
+    query, support = _episode(shot=1)
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.enable_pulse_region_uot
+    assert hasattr(model, "pulse_region_guidance")
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert "pulse_query_saliency" in outputs
+    assert "pulse_support_saliency" in outputs
+    assert "pulse_guided_cost_matrix" in outputs
+    assert "base_cost_matrix" in outputs
+    assert outputs["cost_matrix"].shape == outputs["base_cost_matrix"].shape
+    assert outputs["pulse_query_saliency"].shape[0] == outputs["logits"].shape[0]
+    for key in (
+        "pulse/region_cost_weight",
+        "pulse/saliency_mass_mix",
+        "pulse/query_saliency_peak",
+        "pulse/support_saliency_peak",
+        "pulse/region_cost_delta_ratio",
+    ):
+        assert key in outputs, f"Missing diagnostic key: {key}"
+
+
+def test_pulse_region_uot_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_pulse_region_uot=True,
+        pulse_region_kernel_size=3,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "pulse_region_guidance")
+    assert ours_final.enable_pulse_region_uot
+
+    with pytest.raises(ValueError, match="--enable_pulse_region_uot is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )

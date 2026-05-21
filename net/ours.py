@@ -24,6 +24,7 @@ from net.fewshot_common import feature_map_to_tokens
 from net.hrot_fsl import HROTFSLResult, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
+from net.modules.pulse_region_guidance import PulseRegionGuidance
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.jecot_m2 import JECOTM2
@@ -245,6 +246,14 @@ class OursM2(JECOTM2):
         context_debug_max_episodes = int(kwargs.pop("context_debug_max_episodes", 3))
         enable_structural_augmentation = _bool_config(kwargs.pop("enable_structural_augmentation", False))
         struct_dim = int(kwargs.pop("struct_dim", 16))
+        enable_pulse_region_uot = _bool_config(kwargs.pop("enable_pulse_region_uot", False))
+        pulse_region_kernel_size = int(kwargs.pop("pulse_region_kernel_size", 5))
+        pulse_region_cost_weight = float(kwargs.pop("pulse_region_cost_weight", 0.35))
+        pulse_saliency_mass_mix = float(kwargs.pop("pulse_saliency_mass_mix", 0.50))
+        pulse_saliency_cost_discount = float(kwargs.pop("pulse_saliency_cost_discount", 0.10))
+        pulse_saliency_image_weight = float(kwargs.pop("pulse_saliency_image_weight", 0.45))
+        pulse_saliency_feature_weight = float(kwargs.pop("pulse_saliency_feature_weight", 0.35))
+        pulse_saliency_contrast_weight = float(kwargs.pop("pulse_saliency_contrast_weight", 0.20))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -290,12 +299,33 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_multiscale_ot is not supported with ecot_episode_feature_normalize")
             if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
                 raise ValueError("enable_multiscale_ot is not supported with pre_transport_shot_pool")
+        if enable_pulse_region_uot:
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_pulse_region_uot is not supported with ours_ablation='gap'")
+            if enable_multiscale_ot:
+                raise ValueError("enable_pulse_region_uot is not supported with enable_multiscale_ot")
+            if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
+                raise ValueError("enable_pulse_region_uot is not supported with pre_transport_shot_pool")
         super().__init__(
             *args,
             rho=float(kwargs["ecot_base_rho"]),
             transport_mode=kwargs["ecot_transport_mode"],
             **kwargs,
         )
+        self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
+        self._pulse_saliency_cache: list[torch.Tensor] | None = None
+        self.pulse_saliency_image_weight = float(pulse_saliency_image_weight)
+        self.pulse_saliency_feature_weight = float(pulse_saliency_feature_weight)
+        self.pulse_saliency_contrast_weight = float(pulse_saliency_contrast_weight)
+        if self.enable_pulse_region_uot:
+            self.pulse_region_guidance = PulseRegionGuidance(
+                kernel_size=pulse_region_kernel_size,
+                region_cost_weight=pulse_region_cost_weight,
+                saliency_mass_mix=pulse_saliency_mass_mix,
+                saliency_cost_discount=pulse_saliency_cost_discount,
+                ground_cost=self.ground_cost,
+                eps=self.eps,
+            )
         if enable_multiscale_ot:
             self.enable_multiscale_ot = True
             self.multi_scale_tokenizer = MultiScaleTokenizer(multiscale_pool_sizes)
@@ -366,6 +396,83 @@ class OursM2(JECOTM2):
     @property
     def uses_ours_gap_control(self) -> bool:
         return self.ours_ablation == "gap"
+
+    @staticmethod
+    def _spatial_minmax(values: torch.Tensor, eps: float) -> torch.Tensor:
+        flat = values.flatten(1)
+        v_min = flat.amin(dim=1).reshape(-1, 1, 1, 1)
+        v_max = flat.amax(dim=1).reshape(-1, 1, 1, 1)
+        return (values - v_min) / (v_max - v_min).clamp_min(float(eps))
+
+    def _compute_pulse_saliency(
+        self,
+        images: torch.Tensor,
+        feature_map: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return token-grid saliency for bright/energetic pulse regions."""
+        with torch.no_grad():
+            spatial_hw = feature_map.shape[-2:]
+            image_energy = images.detach().float().abs().mean(dim=1, keepdim=True)
+            image_energy = F.adaptive_avg_pool2d(image_energy, output_size=spatial_hw)
+            feature_energy = feature_map.detach().float().pow(2).sum(dim=1, keepdim=True).sqrt()
+
+            image_norm = self._spatial_minmax(image_energy, self.eps)
+            feature_norm = self._spatial_minmax(feature_energy, self.eps)
+            base = 0.5 * (image_norm + feature_norm)
+            local_mean = F.avg_pool2d(base, kernel_size=3, stride=1, padding=1, count_include_pad=False)
+            contrast = self._spatial_minmax((base - local_mean).clamp_min(0.0), self.eps)
+
+            weights = image_norm.new_tensor(
+                [
+                    max(self.pulse_saliency_image_weight, 0.0),
+                    max(self.pulse_saliency_feature_weight, 0.0),
+                    max(self.pulse_saliency_contrast_weight, 0.0),
+                ]
+            )
+            weights = weights / weights.sum().clamp_min(self.eps)
+            saliency = weights[0] * image_norm + weights[1] * feature_norm + weights[2] * contrast
+            saliency = saliency.clamp_min(0.0)
+            return saliency.flatten(1).to(device=feature_map.device, dtype=feature_map.dtype)
+
+    def _record_pulse_saliency(self, images: torch.Tensor, feature_map: torch.Tensor) -> None:
+        if not getattr(self, "enable_pulse_region_uot", False):
+            return
+        cache = getattr(self, "_pulse_saliency_cache", None)
+        if cache is None:
+            return
+        cache.append(self._compute_pulse_saliency(images, feature_map).detach())
+
+    @staticmethod
+    def _combine_token_weight(
+        current: torch.Tensor | None,
+        pulse_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        if current is None:
+            return pulse_weight
+        return current.to(device=pulse_weight.device, dtype=pulse_weight.dtype) * pulse_weight
+
+    def _pulse_saliency_pair(
+        self,
+        *,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache = getattr(self, "_pulse_saliency_cache", None)
+        if cache is None or len(cache) < 2:
+            query_saliency = query_tokens.detach().norm(dim=-1)
+            support_saliency = support_tokens.detach().norm(dim=-1)
+            return query_saliency, support_saliency
+        query_saliency = cache[0].to(device=query_tokens.device, dtype=query_tokens.dtype)
+        support_saliency = cache[1].to(device=support_tokens.device, dtype=support_tokens.dtype)
+        if tuple(query_saliency.shape) != tuple(query_tokens.shape[:2]):
+            query_saliency = query_tokens.detach().norm(dim=-1)
+        if support_saliency.dim() == 2 and support_saliency.shape[0] == way_num * shot_num:
+            support_saliency = support_saliency.reshape(way_num, shot_num, support_saliency.shape[-1])
+        if tuple(support_saliency.shape) != tuple(support_tokens.shape[:3]):
+            support_saliency = support_tokens.detach().norm(dim=-1)
+        return query_saliency, support_saliency
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         feature_map = super().encode(x)
@@ -440,11 +547,13 @@ class OursM2(JECOTM2):
             self.token_g_kind == "token_norm_pre_l2"
             or self.uses_ours_gap_control
             or getattr(self, "enable_structural_augmentation", False)
+            or getattr(self, "enable_pulse_region_uot", False)
         )
         if not need_local:
             return super()._encode_images(images)
 
         feature_map = self.encode(images)
+        self._record_pulse_saliency(images, feature_map)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         if self.uses_ours_gap_control:
             tokens = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1).unsqueeze(1)
@@ -463,10 +572,12 @@ class OursM2(JECOTM2):
         need_local = (
             self.token_g_kind == "token_norm_pre_l2"
             or getattr(self, "enable_structural_augmentation", False)
+            or getattr(self, "enable_pulse_region_uot", False)
         )
         if not need_local:
             return super()._project_tokens_from_images(images)
         feature_map = self.encode(images)
+        self._record_pulse_saliency(images, feature_map)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
         projected = self._project_backbone_tokens(tokens)
@@ -482,10 +593,12 @@ class OursM2(JECOTM2):
         need_local = (
             self.token_g_kind == "token_norm_pre_l2"
             or getattr(self, "enable_structural_augmentation", False)
+            or getattr(self, "enable_pulse_region_uot", False)
         )
         if not need_local:
             return super()._encode_images_with_amp_norms(images)
         feature_map = self.encode(images)
+        self._record_pulse_saliency(images, feature_map)
         spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
         tokens = feature_map_to_tokens(feature_map)
         projected, pre_proj_norms = self._project_backbone_tokens_with_prenorm(tokens)
@@ -1006,11 +1119,38 @@ class OursM2(JECOTM2):
                 spatial_hw=spatial_hw,
             )
         dmuot_payload: dict[str, torch.Tensor] = {}
+        pulse_payload: dict[str, torch.Tensor] = {}
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
         if self.enable_pot_guide:
             self._last_pot_guide_diagnostics = None
+
+        if getattr(self, "enable_pulse_region_uot", False):
+            if query_tokens is None or support_tokens is None or spatial_hw is None:
+                raise ValueError(
+                    "enable_pulse_region_uot requires query_tokens, support_tokens, and spatial_hw"
+                )
+            query_saliency, support_saliency = self._pulse_saliency_pair(
+                query_tokens=query_tokens,
+                support_tokens=support_tokens,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            cost_for_transport, pulse_query_weight, pulse_support_weight, pulse_payload = (
+                self.pulse_region_guidance(
+                    flat_cost=cost_for_transport,
+                    query_tokens=query_tokens,
+                    support_tokens=support_tokens,
+                    query_saliency=query_saliency,
+                    support_saliency=support_saliency,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    spatial_hw=spatial_hw,
+                )
+            )
+            query_weight = self._combine_token_weight(query_weight, pulse_query_weight)
+            support_weight = self._combine_token_weight(support_weight, pulse_support_weight)
 
         if self.token_g_kind != "none":
             if query_tokens is None or support_tokens is None:
@@ -1047,13 +1187,18 @@ class OursM2(JECOTM2):
 
             base_rho = self._ecot_base_rho_tensor(flat_cost)
             if self.marginal_kind == "discriminative":
-                if query_weight is not None or support_weight is not None:
-                    raise ValueError(
-                        "marginal_kind='discriminative' cannot be combined with explicit query/support weights"
-                    )
                 query_prob, support_prob = self._dmuot_marginal_probs(token_g_query, token_g_support)
                 query_prob = self._blend_dmuot_prob_with_uniform(query_prob, dmuot_strength)
                 support_prob = self._blend_dmuot_prob_with_uniform(support_prob, dmuot_strength)
+                if query_weight is not None:
+                    query_prob = query_prob * query_weight.to(device=query_prob.device, dtype=query_prob.dtype)
+                    query_prob = query_prob / query_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                if support_weight is not None:
+                    support_prob = support_prob * support_weight.to(
+                        device=support_prob.device,
+                        dtype=support_prob.dtype,
+                    )
+                    support_prob = support_prob / support_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
                 query_weight = query_prob
                 support_weight = support_prob
                 dmuot_payload["marginal_query"] = query_prob * base_rho
@@ -1100,6 +1245,8 @@ class OursM2(JECOTM2):
                     + dmuot_payload["marginal_support_l1_drift"]
                 )
             payload.update(dmuot_payload)
+        if pulse_payload:
+            payload.update(pulse_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         return payload
@@ -1296,10 +1443,13 @@ class OursM2(JECOTM2):
                 self.context_enrichment._debug_cache = []
         use_prenorm_cache = self.token_g_kind == "token_norm_pre_l2"
         use_multiscale_cache = getattr(self, "enable_multiscale_ot", False)
+        use_pulse_cache = getattr(self, "enable_pulse_region_uot", False)
         if use_prenorm_cache:
             self._token_g_prenorm_cache = []
         if use_multiscale_cache:
             self._multiscale_ot_cache = []
+        if use_pulse_cache:
+            self._pulse_saliency_cache = []
         try:
             outputs = super()._forward_episode(*args, **kwargs)
         finally:
@@ -1307,6 +1457,8 @@ class OursM2(JECOTM2):
                 self._token_g_prenorm_cache = None
             if use_multiscale_cache:
                 self._multiscale_ot_cache = None
+            if use_pulse_cache:
+                self._pulse_saliency_cache = None
             if use_context_debug:
                 self._export_context_debug()
                 if self.enable_context_enrichment:
@@ -1314,6 +1466,9 @@ class OursM2(JECOTM2):
                 self._context_debug_images = []
                 self._context_debug_fmaps = []
         if isinstance(outputs, dict):
+            if "pulse_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["pulse_guided_cost_matrix"]
             if self.lambda_cost > 0.0 and "cost_matrix_modulated" in outputs:
                 if "base_cost_matrix" not in outputs and "cost_matrix" in outputs:
                     outputs["base_cost_matrix"] = outputs["cost_matrix"]
@@ -1431,6 +1586,20 @@ class OursM2(JECOTM2):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
         for key in (
+            "pulse_query_saliency",
+            "pulse_query_marginal_weight",
+            "pulse_region_cost_matrix",
+            "pulse_guided_cost_matrix",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
+        for key in (
+            "pulse_support_saliency",
+            "pulse_support_marginal_weight",
+        ):
+            if key in batch_outputs[0]:
+                stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
+        for key in (
             "marginal_query_l1_drift",
             "marginal_support_l1_drift",
             "marginal_l1_drift",
@@ -1469,7 +1638,7 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
-        for prefix in ("context/", "struct/"):
+        for prefix in ("context/", "struct/", "pulse/"):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]
                 if values and all(torch.is_tensor(value) for value in values):

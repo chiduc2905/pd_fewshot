@@ -38,6 +38,8 @@ def test_export_uot_evidence_figure_draws_top_transport_correspondences(tmp_path
     assert rows[0]["top_match_count"] == 3
     assert 0.0 < rows[0]["top_match_mass_fraction"] <= 1.0
     assert rows[0]["max_match_mass_fraction"] > 0.0
+    assert "pulse_to_pulse_mass_ratio" in rows[0]
+    assert 0.0 <= rows[0]["pulse_to_pulse_mass_ratio"] <= 1.0
 
 
 def test_export_uot_evidence_figure_prefers_positive_threshold_evidence(tmp_path):
@@ -77,3 +79,4 @@ def test_export_uot_evidence_figure_prefers_positive_threshold_evidence(tmp_path
     assert rows[0]["evidence_map_source"] == "positive_evidence"
     assert abs(rows[0]["positive_evidence_total"] - 0.03) < 1e-6
     assert 0.0 < rows[0]["top_match_score_fraction"] <= 1.0
+    assert rows[0]["positive_pulse_to_pulse_ratio"] is not None

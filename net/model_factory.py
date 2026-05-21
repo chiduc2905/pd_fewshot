@@ -228,6 +228,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_structural_augmentation is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_pulse_region_uot is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2685,6 +2689,29 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_structural_augmentation", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_pulse_region_uot": True,
+                            "pulse_region_kernel_size": int(getattr(args, "pulse_region_kernel_size", 5)),
+                            "pulse_region_cost_weight": float(getattr(args, "pulse_region_cost_weight", 0.35)),
+                            "pulse_saliency_mass_mix": float(getattr(args, "pulse_saliency_mass_mix", 0.50)),
+                            "pulse_saliency_cost_discount": float(
+                                getattr(args, "pulse_saliency_cost_discount", 0.10)
+                            ),
+                            "pulse_saliency_image_weight": float(
+                                getattr(args, "pulse_saliency_image_weight", 0.45)
+                            ),
+                            "pulse_saliency_feature_weight": float(
+                                getattr(args, "pulse_saliency_feature_weight", 0.35)
+                            ),
+                            "pulse_saliency_contrast_weight": float(
+                                getattr(args, "pulse_saliency_contrast_weight", 0.20)
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False)
                         else {}
                     ),
                     **(
