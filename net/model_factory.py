@@ -2709,6 +2709,15 @@ def build_model_from_args(args):
                             "pulse_saliency_contrast_weight": float(
                                 getattr(args, "pulse_saliency_contrast_weight", 0.20)
                             ),
+                            "pulse_region_train_strength": float(
+                                getattr(args, "pulse_region_train_strength", 1.0)
+                            ),
+                            "pulse_region_eval_strength": float(
+                                getattr(args, "pulse_region_eval_strength", 1.0)
+                            ),
+                            "pulse_region_train_schedule": str(
+                                getattr(args, "pulse_region_train_schedule", "constant")
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False)

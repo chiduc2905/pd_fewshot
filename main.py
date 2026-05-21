@@ -1404,6 +1404,25 @@ def get_args():
     parser.add_argument("--pulse_saliency_feature_weight", type=float, default=0.35)
     parser.add_argument("--pulse_saliency_contrast_weight", type=float, default=0.20)
     parser.add_argument(
+        "--pulse_region_train_strength",
+        type=float,
+        default=1.0,
+        help="Training-time multiplier for pulse-region UOT guidance.",
+    )
+    parser.add_argument(
+        "--pulse_region_eval_strength",
+        type=float,
+        default=1.0,
+        help="Eval/test-time multiplier for pulse-region UOT guidance.",
+    )
+    parser.add_argument(
+        "--pulse_region_train_schedule",
+        type=str,
+        default="constant",
+        choices=["constant", "decay", "warmup_decay", "eval_only"],
+        help="Schedule for pulse guidance during training; eval/test uses pulse_region_eval_strength.",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3528,6 +3547,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_saliency_image_weight",
             "pulse_saliency_feature_weight",
             "pulse_saliency_contrast_weight",
+            "pulse_region_train_strength",
+            "pulse_region_eval_strength",
+            "pulse_region_train_schedule",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]

@@ -913,8 +913,34 @@ def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
         "pulse/query_saliency_peak",
         "pulse/support_saliency_peak",
         "pulse/region_cost_delta_ratio",
+        "pulse/effective_strength",
     ):
         assert key in outputs, f"Missing diagnostic key: {key}"
+
+
+def test_pulse_region_train_schedule_reduces_train_guidance_but_not_eval():
+    torch.manual_seed(901)
+    model = _tiny_ours_final(
+        enable_pulse_region_uot=True,
+        pulse_region_kernel_size=3,
+        pulse_region_cost_weight=0.25,
+        pulse_saliency_mass_mix=0.5,
+        pulse_region_train_strength=0.6,
+        pulse_region_eval_strength=1.0,
+        pulse_region_train_schedule="decay",
+    )
+    query, support = _episode(shot=1)
+
+    model.train()
+    model.set_homotopy_progress(0.5)
+    train_outputs = model(query, support, return_aux=True)
+
+    model.eval()
+    with torch.no_grad():
+        eval_outputs = model(query, support, return_aux=True)
+
+    assert train_outputs["pulse/effective_strength"].item() == pytest.approx(0.3, abs=1e-6)
+    assert eval_outputs["pulse/effective_strength"].item() == pytest.approx(1.0, abs=1e-6)
 
 
 def test_pulse_region_uot_factory_flags_are_ours_final_only():
@@ -928,6 +954,9 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
         hrot_sinkhorn_tolerance=1e-5,
         enable_pulse_region_uot=True,
         pulse_region_kernel_size=3,
+        pulse_region_train_schedule="decay",
+        pulse_region_train_strength=0.6,
+        pulse_region_eval_strength=1.0,
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -938,6 +967,9 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
     )
     assert hasattr(ours_final, "pulse_region_guidance")
     assert ours_final.enable_pulse_region_uot
+    assert ours_final.pulse_region_train_schedule == "decay"
+    assert ours_final.pulse_region_train_strength == pytest.approx(0.6)
+    assert ours_final.pulse_region_eval_strength == pytest.approx(1.0)
 
     with pytest.raises(ValueError, match="--enable_pulse_region_uot is supported only with --model ours_final"):
         build_model_from_args(

@@ -47,6 +47,7 @@ OURS_ABLATIONS = frozenset({"full", "full_ot", "no_egsm", "gap"})
 TOKEN_G_KINDS = frozenset({"none", "episode_mean_dist", "token_norm_pre_l2", "learned_attention"})
 DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
 DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
+PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_only"})
 
 
 def normalize_ours_ablation(value: str | None) -> str:
@@ -197,6 +198,26 @@ def _normalize_dmuot_shot_strength(value: str | None) -> str:
     return name
 
 
+def _normalize_pulse_train_schedule(value: str | None) -> str:
+    name = "constant" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "off": "eval_only",
+        "visualize_only": "eval_only",
+        "visualization_only": "eval_only",
+        "cosine_decay": "decay",
+        "linear_decay": "decay",
+        "warmup": "warmup_decay",
+        "warm_up_decay": "warmup_decay",
+    }
+    name = aliases.get(name, name)
+    if name not in PULSE_TRAIN_SCHEDULES:
+        raise ValueError(
+            f"Unsupported pulse_region_train_schedule: {value}. "
+            f"Expected one of {sorted(PULSE_TRAIN_SCHEDULES)}"
+        )
+    return name
+
+
 def _infer_token_hw(num_tokens: int) -> tuple[int, int]:
     if num_tokens <= 0:
         raise ValueError("num_tokens must be positive")
@@ -254,6 +275,11 @@ class OursM2(JECOTM2):
         pulse_saliency_image_weight = float(kwargs.pop("pulse_saliency_image_weight", 0.45))
         pulse_saliency_feature_weight = float(kwargs.pop("pulse_saliency_feature_weight", 0.35))
         pulse_saliency_contrast_weight = float(kwargs.pop("pulse_saliency_contrast_weight", 0.20))
+        pulse_region_train_strength = float(kwargs.pop("pulse_region_train_strength", 1.0))
+        pulse_region_eval_strength = float(kwargs.pop("pulse_region_eval_strength", 1.0))
+        pulse_region_train_schedule = _normalize_pulse_train_schedule(
+            kwargs.pop("pulse_region_train_schedule", "constant")
+        )
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -314,9 +340,19 @@ class OursM2(JECOTM2):
         )
         self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
         self._pulse_saliency_cache: list[torch.Tensor] | None = None
+        self._homotopy_progress = 0.0
         self.pulse_saliency_image_weight = float(pulse_saliency_image_weight)
         self.pulse_saliency_feature_weight = float(pulse_saliency_feature_weight)
         self.pulse_saliency_contrast_weight = float(pulse_saliency_contrast_weight)
+        self.pulse_region_train_strength = float(pulse_region_train_strength)
+        self.pulse_region_eval_strength = float(pulse_region_eval_strength)
+        self.pulse_region_train_schedule = str(pulse_region_train_schedule)
+        for name, value in (
+            ("pulse_region_train_strength", self.pulse_region_train_strength),
+            ("pulse_region_eval_strength", self.pulse_region_eval_strength),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
         if self.enable_pulse_region_uot:
             self.pulse_region_guidance = PulseRegionGuidance(
                 kernel_size=pulse_region_kernel_size,
@@ -441,6 +477,34 @@ class OursM2(JECOTM2):
         if cache is None:
             return
         cache.append(self._compute_pulse_saliency(images, feature_map).detach())
+
+    def set_homotopy_progress(self, progress: float) -> None:
+        parent_setter = getattr(super(), "set_homotopy_progress", None)
+        if parent_setter is not None:
+            parent_setter(progress)
+        self._homotopy_progress = float(min(max(float(progress), 0.0), 1.0))
+
+    def _pulse_region_effective_strength(self, reference: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, "enable_pulse_region_uot", False):
+            return reference.new_tensor(0.0)
+        if not self.training:
+            return reference.new_tensor(self.pulse_region_eval_strength)
+
+        progress = float(min(max(getattr(self, "_homotopy_progress", 0.0), 0.0), 1.0))
+        schedule = getattr(self, "pulse_region_train_schedule", "constant")
+        if schedule == "eval_only":
+            factor = 0.0
+        elif schedule == "decay":
+            factor = 1.0 - progress
+        elif schedule == "warmup_decay":
+            warmup = 0.10
+            if progress <= warmup:
+                factor = progress / warmup
+            else:
+                factor = max(0.0, (1.0 - progress) / (1.0 - warmup))
+        else:
+            factor = 1.0
+        return reference.new_tensor(self.pulse_region_train_strength * factor)
 
     @staticmethod
     def _combine_token_weight(
@@ -1137,9 +1201,10 @@ class OursM2(JECOTM2):
                 way_num=way_num,
                 shot_num=shot_num,
             )
-            cost_for_transport, pulse_query_weight, pulse_support_weight, pulse_payload = (
+            pulse_base_cost = cost_for_transport
+            pulse_guided_cost, pulse_query_weight, pulse_support_weight, pulse_payload = (
                 self.pulse_region_guidance(
-                    flat_cost=cost_for_transport,
+                    flat_cost=pulse_base_cost,
                     query_tokens=query_tokens,
                     support_tokens=support_tokens,
                     query_saliency=query_saliency,
@@ -1149,6 +1214,28 @@ class OursM2(JECOTM2):
                     spatial_hw=spatial_hw,
                 )
             )
+            pulse_strength = self._pulse_region_effective_strength(pulse_base_cost)
+            cost_for_transport = pulse_base_cost + pulse_strength * (pulse_guided_cost - pulse_base_cost)
+            if pulse_strength.item() < 1.0:
+                q_uniform = pulse_query_weight.new_full(
+                    pulse_query_weight.shape,
+                    1.0 / float(pulse_query_weight.shape[-1]),
+                )
+                s_uniform = pulse_support_weight.new_full(
+                    pulse_support_weight.shape,
+                    1.0 / float(pulse_support_weight.shape[-1]),
+                )
+                pulse_query_weight = q_uniform + pulse_strength * (pulse_query_weight - q_uniform)
+                pulse_support_weight = s_uniform + pulse_strength * (pulse_support_weight - s_uniform)
+            pulse_payload["pulse/effective_strength"] = pulse_strength.detach()
+            if pulse_strength.item() < 1.0:
+                pulse_payload["pulse_guided_cost_matrix"] = cost_for_transport.reshape(
+                    flat_cost.shape[0],
+                    way_num,
+                    shot_num,
+                    flat_cost.shape[-2],
+                    flat_cost.shape[-1],
+                )
             query_weight = self._combine_token_weight(query_weight, pulse_query_weight)
             support_weight = self._combine_token_weight(support_weight, pulse_support_weight)
 
@@ -1176,7 +1263,7 @@ class OursM2(JECOTM2):
                 flat_cost.shape[-1],
             )
             if self.lambda_cost > 0.0:
-                cost_for_transport = flat_cost * cost_modulator
+                cost_for_transport = cost_for_transport * cost_modulator
                 dmuot_payload["cost_matrix_modulated"] = cost_for_transport.reshape(
                     flat_cost.shape[0],
                     way_num,
