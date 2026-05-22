@@ -68,7 +68,11 @@ M2_MODEL_NAMES = frozenset(
     {"m2", "m2_uot", "m2_full_ot", "jecot_m2", "jecot_m2_uot", "jecot_m2_full_ot"}
 )
 OURS_MODEL_NAMES = frozenset({"ours"})
-OURS_FINAL_MODEL_NAMES = frozenset({"ours_final"})
+CANONICAL_OURS_FINAL_MODEL_NAMES = frozenset({"ours_final"})
+OURS_FINAL_PARTIAL_OT_MODEL_NAMES = frozenset({"ours_final_partial_ot"})
+OURS_FINAL_MODEL_NAMES = frozenset(
+    set(CANONICAL_OURS_FINAL_MODEL_NAMES) | set(OURS_FINAL_PARTIAL_OT_MODEL_NAMES)
+)
 OURS_ENTRYPOINT_MODEL_NAMES = frozenset(set(OURS_MODEL_NAMES) | set(OURS_FINAL_MODEL_NAMES))
 OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
 SGPOT_MODEL_NAMES = frozenset({"sg_pot"})
@@ -598,6 +602,12 @@ MODEL_REGISTRY = {
         "paper_name": "Ours-Final",
         "architecture": "Backbone local descriptors -> single-budget rho=0.8 UOT -> threshold-mass score T*M-C -> episode-calibrated shot pooling; EGSM is disabled by default",
         "metric": "Single-Budget Threshold-Mass Token UOT",
+    },
+    "ours_final_partial_ot": {
+        "display_name": "Ours-Final-PartialOT",
+        "paper_name": "Ours-Final Partial OT Ablation",
+        "architecture": "Ours-Final ablation with fast partial OT at rho=0.8 and cost-per-transported-mass scoring; EGSM is disabled by default",
+        "metric": "Fast Partial OT Cost-Per-Mass",
     },
     "ours_cpm": {
         "display_name": "Ours-CPM",
@@ -2563,6 +2573,7 @@ def build_model_from_args(args):
         )
     if args.model in HROT_FSL_MODEL_NAMES:
         is_ours_final_model = args.model in OURS_FINAL_MODEL_NAMES
+        is_ours_final_partial_ot_model = args.model in OURS_FINAL_PARTIAL_OT_MODEL_NAMES
         is_ours_entrypoint_model = args.model in OURS_ENTRYPOINT_MODEL_NAMES
         is_m2_model = args.model in M2_MODEL_NAMES
         is_m2_like_model = args.model in M2_LIKE_MODEL_NAMES
@@ -2799,11 +2810,19 @@ def build_model_from_args(args):
             ),
             ecot_m2_pst_hidden=int(getattr(args, "hrot_ecot_m2_pst_hidden", 32)),
             ecot_m2_ablate_threshold_mass=_bool_flag(
-                getattr(args, "hrot_ecot_m2_ablate_threshold_mass", default_m2_ablate_threshold_mass),
+                (
+                    "false"
+                    if is_ours_final_partial_ot_model
+                    else getattr(args, "hrot_ecot_m2_ablate_threshold_mass", default_m2_ablate_threshold_mass)
+                ),
                 default=(not is_ours_final_model and is_m2_like_model),
             ),
             ecot_m2_cost_per_mass_score=_bool_flag(
-                getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"),
+                (
+                    "true"
+                    if is_ours_final_partial_ot_model
+                    else getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false")
+                ),
                 default=False,
             ),
             ecot_m2_cost_per_mass_alpha=float(getattr(args, "hrot_ecot_m2_cost_per_mass_alpha", 1.0)),
@@ -2967,7 +2986,11 @@ def build_model_from_args(args):
             normalize_rho=_bool_flag(getattr(args, "hrot_normalize_rho", "false"), default=False),
             eval_use_float64=_bool_flag(getattr(args, "hrot_eval_use_float64", "true"), default=True),
             hyperbolic_backend=str(getattr(args, "hrot_hyperbolic_backend", "auto")),
-            ot_backend=str(getattr(args, "hrot_ot_backend", "native")),
+            ot_backend=(
+                "partial"
+                if is_ours_final_partial_ot_model
+                else str(getattr(args, "hrot_ot_backend", "native"))
+            ),
             cost_margin_aux_weight=float(getattr(args, "hrot_cost_margin_aux_weight", 0.0)),
             cost_margin_aux_margin=float(getattr(args, "hrot_cost_margin_aux_margin", 0.02)),
             care_enable_fwec=_bool_flag(getattr(args, "care_enable_fwec", "true"), default=True),

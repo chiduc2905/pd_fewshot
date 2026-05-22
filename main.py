@@ -42,6 +42,7 @@ from net.model_factory import (
     OURS_CPM_MODEL_NAMES,
     OURS_ENTRYPOINT_MODEL_NAMES,
     OURS_FINAL_MODEL_NAMES,
+    OURS_FINAL_PARTIAL_OT_MODEL_NAMES,
     build_model_from_args,
     get_ours_final_dmuot_choices,
     get_model_choices,
@@ -3034,11 +3035,12 @@ def get_model(args):
             )
             evidence_text = "EGSM on" if egsm_enabled else "EGSM off"
             base_rho_text = getattr(args, "hrot_ecot_base_rho", None) or 0.8
-            transport_text = (
-                "balanced full OT(rho=1.0)"
-                if normalized_ours_ablation == "full_ot"
-                else f"UOT(rho={base_rho_text})"
-            )
+            if normalized_ours_ablation == "full_ot":
+                transport_text = "balanced full OT(rho=1.0)"
+            elif args.model in OURS_FINAL_PARTIAL_OT_MODEL_NAMES:
+                transport_text = f"fast PartialOT(rho={base_rho_text})"
+            else:
+                transport_text = f"UOT(rho={base_rho_text})"
             token_text = "local descriptors"
             if normalized_ours_ablation == "gap":
                 token_text = "GAP descriptors"
@@ -3062,11 +3064,12 @@ def get_model(args):
                     score_text = f"threshold-mass scaled score(beta*T*M-C, beta={beta})"
                 else:
                     score_text = "threshold-mass score(T*M-C)"
-            default_text = (
-                "local_descriptors+UOT(rho=0.8)+EGSM_off+T*M-C"
-                if args.model in OURS_FINAL_MODEL_NAMES
-                else "local_descriptors+UOT(rho=0.8)+EGSM"
-            )
+            if args.model in OURS_FINAL_PARTIAL_OT_MODEL_NAMES:
+                default_text = "local_descriptors+fast_PartialOT(rho=0.8)+EGSM_off+cost/mass"
+            elif args.model in OURS_FINAL_MODEL_NAMES:
+                default_text = "local_descriptors+UOT(rho=0.8)+EGSM_off+T*M-C"
+            else:
+                default_text = "local_descriptors+UOT(rho=0.8)+EGSM"
             dmt_text = (
                 "DMT on"
                 if _bool_flag(getattr(args, "use_differential_mode", "false"), default=False)
@@ -3697,6 +3700,10 @@ def apply_standalone_m2_defaults(args):
         args.hrot_ecot_base_rho = default_rho
     if getattr(args, "hrot_ecot_transport_mode", None) is None:
         args.hrot_ecot_transport_mode = "balanced" if full_ot else "unbalanced"
+    if getattr(args, "model", None) in OURS_FINAL_PARTIAL_OT_MODEL_NAMES:
+        args.hrot_ot_backend = "partial"
+        args.hrot_ecot_m2_ablate_threshold_mass = "false"
+        args.hrot_ecot_m2_cost_per_mass_score = "true"
     return args
 
 
@@ -5703,7 +5710,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     exported_uot_evidence = 0
     egsm_test_diagnostics = resolve_hrot_ecot_enable_egsm(args) == "true"
     model_name = str(getattr(args, "model", "")).strip().lower()
-    if model_name in {"ours", "ours_final"}:
+    if model_name in OURS_ENTRYPOINT_MODEL_NAMES:
         ours_ablation = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
         if ours_ablation in {"no_egsm", "uniform", "uniform_evidence", "no_evidence", "no_adaptive_evidence"}:
             egsm_test_diagnostics = False
@@ -5718,7 +5725,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     )
     ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
+    ot_backend_name = str(getattr(args, "hrot_ot_backend", "") or "").strip().lower()
     uot_transport_kind = (
+        "partial_ot"
+        if model_name in OURS_FINAL_PARTIAL_OT_MODEL_NAMES or ot_backend_name in {"partial", "partial_ot", "partial_sinkhorn"}
+        else
         "balanced_ot"
         if ours_ablation_name in {"full_ot", "balanced_ot"} or transport_mode_name in {"balanced", "ot", "balanced_ot", "full_ot"}
         else "uot"

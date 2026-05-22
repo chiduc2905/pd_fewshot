@@ -423,6 +423,67 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     assert not class_pooled.uses_ecot_egsm_marginal
 
 
+def test_ours_final_partial_ot_factory_forces_fast_partial_cost_per_mass():
+    args = SimpleNamespace(
+        model="ours_final_partial_ot",
+        ours_ablation="full",
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=16,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=8,
+        hrot_sinkhorn_tolerance=1e-5,
+        hrot_ot_backend="native",
+        hrot_ecot_m2_ablate_threshold_mass="true",
+        hrot_ecot_m2_cost_per_mass_score="false",
+    )
+
+    model = build_model_from_args(args)
+
+    assert model.variant == "J_ECOT_M2"
+    assert model.ours_ablation == "full"
+    assert model.ecot_rho_bank == (0.8,)
+    assert model.ecot_base_rho == 0.8
+    assert model.uses_partial_transport
+    assert model.ot_backend == "partial"
+    assert model.partial_backend == "fast"
+    assert not model.partial_exact
+    assert model.ecot_m2_cost_per_mass_score
+    assert not model.ecot_m2_ablate_threshold_mass
+    assert not model.uses_ecot_egsm_marginal
+
+
+def test_ours_final_partial_ot_forward_uses_fixed_partial_mass():
+    torch.manual_seed(393)
+    model = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final_partial_ot",
+            ours_ablation="full",
+            device="cpu",
+            image_size=64,
+            fewshot_backbone="conv64f",
+            hrot_token_dim=12,
+            hrot_eam_hidden_dim=16,
+            hrot_sinkhorn_epsilon=0.2,
+            hrot_sinkhorn_iterations=60,
+            hrot_sinkhorn_tolerance=1e-6,
+        )
+    )
+    model.eval()
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 2, 1, 3, 64, 64)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.allclose(outputs["shot_transported_mass"], outputs["shot_rho"], atol=5e-4, rtol=5e-4)
+    assert model.ecot_m2_cost_per_mass_score
+    assert model.partial_backend == "fast"
+
+
 def test_ours_final_cost_margin_aux_forward_exposes_loss():
     torch.manual_seed(392)
     model = build_model_from_args(
