@@ -2133,7 +2133,7 @@ def get_args():
         default="false",
         choices=["true", "false"],
         help=(
-            "Export UOT evidence figures with positive-evidence overlays, top transported-token correspondences, "
+            "Export UOT/Partial-OT evidence figures with positive-evidence overlays, top transported-token correspondences, "
             "and query-to-all-class support comparison panels."
         ),
     )
@@ -5882,7 +5882,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                             variant_label=uot_variant_label,
                         )
                     except Exception as exc:
-                        print(f"Skipping UOT evidence figure for episode {episode_idx}: {exc}")
+                        print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")
                         rows = []
                     if rows:
                         uot_evidence_rows.extend(rows)
@@ -6058,8 +6058,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         for idx, figure_path in enumerate(uot_evidence_paths[: min(3, len(uot_evidence_paths))]):
             if os.path.exists(figure_path):
                 wandb.log({f"uot_evidence/example_{idx}": wandb.Image(figure_path)})
-        print(f"Saved UOT evidence summary: {uot_csv_path}")
-        print(f"Saved {len(uot_evidence_paths)} UOT evidence figure(s)")
+        print(f"Saved transport evidence summary: {uot_csv_path}")
+        print(f"Saved {len(uot_evidence_paths)} transport evidence figure(s)")
 
     if save_aux_artifacts and support_distribution_rows:
         support_csv_path = os.path.join(

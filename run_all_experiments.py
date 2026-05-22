@@ -16,6 +16,8 @@ SAMPLES_LIST = [60, 160, 240, None]
 # Ours contribution ablations: only these training-set sizes (ignores --mode_id / --mode_ids).
 OURS_ABLATION_SAMPLE_COUNTS = [60, 240]
 OURS_FINAL_SAMPLE_COUNTS = SAMPLES_LIST
+OURS_FINAL_MODEL_NAME = "ours_final"
+OURS_FINAL_PARTIAL_OT_MODEL_NAME = "ours_final_partial_ot"
 SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
@@ -215,6 +217,7 @@ def get_args():
             "contrib",
             "rho_grid",
             "complete",
+            "partial_ot",
             "tau_shot_off",
             "pooling",
             "dmuot",
@@ -223,7 +226,8 @@ def get_args():
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
-            "contrib=full, ccem_uot, full_ot, gap, mass_off; "
+            "contrib=full, ccem_uot, partial_ot, full_ot, gap, mass_off; "
+            "partial_ot=only the fast Partial OT + cost-per-mass variant; "
             "rho_grid=rho 0.6,0.7,0.8,0.9 at 60/5-shot and 240/1-shot unless "
             "--ours_final_rho_values is set; "
             "complete=contrib over all modes/shots plus restricted rho_grid; "
@@ -249,7 +253,8 @@ def get_args():
         help=(
             "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
             "Aliases: full/original/uot, ccem_uot/evidence, full_ot/ot/balanced_ot, "
-            "gap, mass_off, class_pooled, fixed_shot_pooling, tau_shot_off, rho_<value>. "
+            "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
+            "tau_shot_off, rho_<value>. "
             "Default all keeps the suite's normal variants."
         ),
     )
@@ -324,7 +329,10 @@ def get_args():
         type=str,
         default="false",
         choices=["true", "false"],
-        help="Forwarded to main.py to export UOT evidence and query-to-all-class support comparison figures during final test.",
+        help=(
+            "Forwarded to main.py to export UOT/Partial-OT transport evidence and "
+            "query-to-all-class support comparison figures during final test."
+        ),
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
@@ -425,7 +433,8 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "hrot_fsl",
     "m2",
     "ours",
-    "ours_final",
+    OURS_FINAL_MODEL_NAME,
+    OURS_FINAL_PARTIAL_OT_MODEL_NAME,
     "mm_spot_fsl",
     "pare_fsl",
     "m2_uot",
@@ -895,6 +904,30 @@ def _ours_final_base_args(
     ]
 
 
+def _ours_final_partial_ot_args():
+    """Ours-Final-compatible Partial OT ablation: fast backend with mass-normalized cost."""
+    return [
+        "--ours_ablation",
+        "full",
+        "--hrot_ecot_enable_egsm",
+        "false",
+        "--hrot_ecot_m2_ablate_threshold_mass",
+        "false",
+        "--hrot_ecot_m2_cost_per_mass_score",
+        "true",
+        "--hrot_ecot_rho_bank",
+        "0.8",
+        "--hrot_ecot_base_rho",
+        "0.8",
+        "--hrot_fixed_mass",
+        "0.8",
+        "--hrot_ecot_transport_mode",
+        "unbalanced",
+        "--hrot_ot_backend",
+        "partial",
+    ]
+
+
 def build_ours_final_ablation_variants():
     base = _ours_final_base_args()
     return [
@@ -920,6 +953,14 @@ def build_ours_final_ablation_variants():
                 "--hrot_ecot_noise_sink_cost_init",
                 "0.7",
             ],
+            "mode1_noise": True,
+        },
+        {
+            "tag": "ours_final_partial_ot",
+            "checkpoint_tag": "ablation_partial_ot",
+            "label": "Ours-Final ablation: fast Partial OT + cost-per-mass score",
+            "model": OURS_FINAL_PARTIAL_OT_MODEL_NAME,
+            "extra_args": _ours_final_partial_ot_args(),
             "mode1_noise": True,
         },
         {
@@ -2198,6 +2239,11 @@ def parse_ours_final_variant_filter(variants_str):
         "ccem_uot": "ours_final_ccem_uot",
         "evidence": "ours_final_ccem_uot",
         "ours_final_ccem_uot": "ours_final_ccem_uot",
+        "partial": "ours_final_partial_ot",
+        "partial_ot": "ours_final_partial_ot",
+        "fast_partial": "ours_final_partial_ot",
+        "fast_partial_ot": "ours_final_partial_ot",
+        "ours_final_partial_ot": "ours_final_partial_ot",
         "full_ot": "ours_final_full_ot",
         "ot": "ours_final_full_ot",
         "balanced": "ours_final_full_ot",
@@ -2268,8 +2314,9 @@ def parse_ours_final_variant_filter(variants_str):
         if tag is None:
             raise ValueError(
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
-                "Use full, ccem_uot, full_ot, gap, mass_off, class_pooled, fixed_shot_pooling, tau_shot_off, "
-                "mass_scaled_b*, mass_consensus_a*, rho_<value>, dmuot_<name>, or exact tags."
+                "Use full, ccem_uot, partial_ot, full_ot, gap, mass_off, class_pooled, "
+                "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
+                "rho_<value>, dmuot_<name>, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)
@@ -2628,12 +2675,22 @@ def main():
         print(f"Total       : {len(experiments)} ablation experiment(s)")
         print("=" * 72)
     elif args.ours_final_ablation_suite != "none":
-        if requested_models != ["ours_final"]:
+        suite_name = args.ours_final_ablation_suite
+        allowed_requested_models = [[OURS_FINAL_MODEL_NAME]]
+        if suite_name == "partial_ot":
+            allowed_requested_models.append([OURS_FINAL_PARTIAL_OT_MODEL_NAME])
+        if requested_models not in allowed_requested_models:
             raise ValueError(
-                "`--ours_final_ablation_suite` currently supports only `--models ours_final` "
+                f"`--ours_final_ablation_suite {suite_name}` currently supports only "
+                f"`--models {OURS_FINAL_MODEL_NAME}`"
+                + (
+                    f" or `--models {OURS_FINAL_PARTIAL_OT_MODEL_NAME}`"
+                    if suite_name == "partial_ot"
+                    else ""
+                )
+                + " "
                 f"(got {requested_models})"
             )
-        suite_name = args.ours_final_ablation_suite
         contrib_variants = build_ours_final_ablation_variants()
         rho_grid_variants = build_ours_final_rho_grid_variants(ours_final_rho_values)
         tau_shot_off_variants = build_ours_final_tau_shot_off_variants()
@@ -2666,6 +2723,10 @@ def main():
             ablation_variants = mass_on_variants
         elif suite_name == "pst_dm":
             ablation_variants = pst_dm_variants
+        elif suite_name == "partial_ot":
+            ablation_variants = [
+                variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
+            ]
         elif suite_name == "complete":
             ablation_variants = contrib_variants + rho_grid_variants + pst_dm_variants
         else:
@@ -2684,7 +2745,7 @@ def main():
             samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
         mode1_sample_count = EXPERIMENT_MODES[1]
         enable_mode1_noise_tests = (
-            suite_name in {"contrib", "complete"}
+            suite_name in {"contrib", "complete", "partial_ot"}
             and effective_test_protocol != "noise"
             and mode1_sample_count in samples_list
         )
@@ -2701,10 +2762,11 @@ def main():
             )
             mode1_noise_splits_arg = ",".join(mode1_noise_splits)
         experiments = []
-        if suite_name in {"contrib", "complete"}:
+        if suite_name in {"contrib", "complete", "partial_ot"}:
+            suite_contrib_variants = ablation_variants if suite_name == "partial_ot" else contrib_variants
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2731,14 +2793,14 @@ def main():
                         else None
                     ),
                 }
-                for variant in contrib_variants
+                for variant in suite_contrib_variants
                 for samples in samples_list
                 for shot in shots
             )
         if suite_name == "tau_shot_off":
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2755,7 +2817,7 @@ def main():
         if suite_name == "pooling":
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2772,7 +2834,7 @@ def main():
         if suite_name == "dmuot":
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2789,7 +2851,7 @@ def main():
         if suite_name == "mass_on":
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2806,7 +2868,7 @@ def main():
         if suite_name in {"pst_dm", "complete"} and pst_dm_variants:
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2829,7 +2891,7 @@ def main():
                 )
             experiments.extend(
                 {
-                    "model": "ours_final",
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
                     "samples": samples,
                     "shot": shot,
                     "variant_args": variant["extra_args"],
@@ -2855,7 +2917,9 @@ def main():
             print(f"Variant Pick: {', '.join(sorted(ours_final_variant_filter))}")
         print("Variants    :")
         for variant in ablation_variants:
-            print(f"  - {variant['tag']}: {variant['label']}")
+            variant_model = variant.get("model", OURS_FINAL_MODEL_NAME)
+            model_text = f" [{variant_model}]" if variant_model != OURS_FINAL_MODEL_NAME else ""
+            print(f"  - {variant['tag']}{model_text}: {variant['label']}")
         if suite_name in {"rho_grid", "complete"} and rho_grid_variants:
             rho_pairs_text = ", ".join(
                 f"{samples} samples/{shot}-shot"

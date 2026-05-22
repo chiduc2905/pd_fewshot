@@ -969,8 +969,9 @@ def _export_uot_all_class_match_figure(
                     bbox={"boxstyle": "round,pad=0.25", "facecolor": "black", "alpha": 0.62, "edgecolor": "none"},
                 )
 
+    title_kind = "Partial OT" if "partial" in str(method_title).lower() else ("UOT" if "uot" in str(method_title).lower() else "OT")
     fig.suptitle(
-        f"Query-to-all-class UOT evidence | Episode {episode_index} | {variant_text} | {method_title}",
+        f"Query-to-all-class {title_kind} evidence | Episode {episode_index} | {variant_text} | {method_title}",
         fontsize=15,
         weight="bold",
         y=0.995,
@@ -997,7 +998,7 @@ def export_uot_evidence_figure(
     transport_kind: str = "uot",
     variant_label: str = "",
 ) -> list[dict[str, Any]]:
-    """Export UOT evidence figures with explicit query-support token correspondences."""
+    """Export UOT/Partial-OT evidence figures with explicit query-support token correspondences."""
     if query_images.dim() != 4:
         raise ValueError(f"query_images must have shape (NumQuery, C, H, W), got {tuple(query_images.shape)}")
     if support_images.dim() != 5:
@@ -1020,9 +1021,22 @@ def export_uot_evidence_figure(
     preds = preds.detach().cpu()
     targets = targets.detach().cpu()
     transport_kind = str(transport_kind or "uot").strip().lower()
-    is_uot = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"}
-    method_title = "CCEM-UOT" if has_evidence else ("Proposed UOT" if is_uot else "Balanced OT output")
-    variant_text = str(variant_label or ("Ours_final UOT" if is_uot else "Ours_final full OT"))
+    is_partial_ot = transport_kind in {"partial", "partial_ot", "partial_sinkhorn"}
+    is_uot = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"} and not is_partial_ot
+    if is_partial_ot:
+        method_title = "Fast Partial OT output"
+    elif has_evidence:
+        method_title = "CCEM-UOT"
+    else:
+        method_title = "Proposed UOT" if is_uot else "Balanced OT output"
+    variant_text = str(
+        variant_label
+        or (
+            "Ours_final Partial OT"
+            if is_partial_ot
+            else ("Ours_final UOT" if is_uot else "Ours_final full OT")
+        )
+    )
 
     rows: list[dict[str, Any]] = []
     fig, axes = plt.subplots(
