@@ -21,10 +21,10 @@ import torch
 import torch.nn.functional as F
 
 from net.fewshot_common import feature_map_to_tokens
-from net.hrot_fsl import HROTFSLResult, _inverse_softplus
+from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
-from net.modules.pulse_region_guidance import PulseRegionGuidance
+from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.jecot_m2 import JECOTM2
@@ -277,9 +277,14 @@ class OursM2(JECOTM2):
         pulse_saliency_contrast_weight = float(kwargs.pop("pulse_saliency_contrast_weight", 0.20))
         pulse_region_train_strength = float(kwargs.pop("pulse_region_train_strength", 1.0))
         pulse_region_eval_strength = float(kwargs.pop("pulse_region_eval_strength", 1.0))
+        pulse_region_multishot_train_strength = kwargs.pop("pulse_region_multishot_train_strength", None)
+        pulse_region_multishot_eval_strength = kwargs.pop("pulse_region_multishot_eval_strength", None)
         pulse_region_train_schedule = _normalize_pulse_train_schedule(
             kwargs.pop("pulse_region_train_schedule", "constant")
         )
+        pulse_support_consensus_weight = float(kwargs.pop("pulse_support_consensus_weight", 0.0))
+        pulse_support_consensus_beta = float(kwargs.pop("pulse_support_consensus_beta", 5.0))
+        pulse_support_consensus_eta = float(kwargs.pop("pulse_support_consensus_eta", 0.05))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -346,13 +351,30 @@ class OursM2(JECOTM2):
         self.pulse_saliency_contrast_weight = float(pulse_saliency_contrast_weight)
         self.pulse_region_train_strength = float(pulse_region_train_strength)
         self.pulse_region_eval_strength = float(pulse_region_eval_strength)
+        self.pulse_region_multishot_train_strength = (
+            None if pulse_region_multishot_train_strength is None else float(pulse_region_multishot_train_strength)
+        )
+        self.pulse_region_multishot_eval_strength = (
+            None if pulse_region_multishot_eval_strength is None else float(pulse_region_multishot_eval_strength)
+        )
         self.pulse_region_train_schedule = str(pulse_region_train_schedule)
         for name, value in (
             ("pulse_region_train_strength", self.pulse_region_train_strength),
             ("pulse_region_eval_strength", self.pulse_region_eval_strength),
+            ("pulse_region_multishot_train_strength", self.pulse_region_multishot_train_strength),
+            ("pulse_region_multishot_eval_strength", self.pulse_region_multishot_eval_strength),
         ):
-            if not 0.0 <= value <= 1.0:
+            if value is not None and not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
+        self.pulse_support_consensus_weight = float(pulse_support_consensus_weight)
+        self.pulse_support_consensus_beta = float(pulse_support_consensus_beta)
+        self.pulse_support_consensus_eta = float(pulse_support_consensus_eta)
+        if not 0.0 <= self.pulse_support_consensus_weight <= 1.0:
+            raise ValueError("pulse_support_consensus_weight must be in [0, 1]")
+        if self.pulse_support_consensus_beta <= 0.0:
+            raise ValueError("pulse_support_consensus_beta must be positive")
+        if not 0.0 <= self.pulse_support_consensus_eta <= 1.0:
+            raise ValueError("pulse_support_consensus_eta must be in [0, 1]")
         if self.enable_pulse_region_uot:
             self.pulse_region_guidance = PulseRegionGuidance(
                 kernel_size=pulse_region_kernel_size,
@@ -484,11 +506,23 @@ class OursM2(JECOTM2):
             parent_setter(progress)
         self._homotopy_progress = float(min(max(float(progress), 0.0), 1.0))
 
-    def _pulse_region_effective_strength(self, reference: torch.Tensor) -> torch.Tensor:
+    def _pulse_region_effective_strength(
+        self,
+        reference: torch.Tensor,
+        *,
+        shot_num: int,
+    ) -> torch.Tensor:
         if not getattr(self, "enable_pulse_region_uot", False):
             return reference.new_tensor(0.0)
+        train_strength = self.pulse_region_train_strength
+        eval_strength = self.pulse_region_eval_strength
+        if int(shot_num) > 1:
+            if self.pulse_region_multishot_train_strength is not None:
+                train_strength = self.pulse_region_multishot_train_strength
+            if self.pulse_region_multishot_eval_strength is not None:
+                eval_strength = self.pulse_region_multishot_eval_strength
         if not self.training:
-            return reference.new_tensor(self.pulse_region_eval_strength)
+            return reference.new_tensor(eval_strength)
 
         progress = float(min(max(getattr(self, "_homotopy_progress", 0.0), 0.0), 1.0))
         schedule = getattr(self, "pulse_region_train_schedule", "constant")
@@ -504,7 +538,48 @@ class OursM2(JECOTM2):
                 factor = max(0.0, (1.0 - progress) / (1.0 - warmup))
         else:
             factor = 1.0
-        return reference.new_tensor(self.pulse_region_train_strength * factor)
+        return reference.new_tensor(train_strength * factor)
+
+    def _apply_pulse_support_consensus(
+        self,
+        support_tokens: torch.Tensor,
+        support_saliency: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        weight = float(getattr(self, "pulse_support_consensus_weight", 0.0))
+        if support_tokens.dim() != 4 or support_tokens.shape[1] <= 1 or weight <= 0.0:
+            return support_saliency, {}
+
+        consensus_mass, consistency, sigma = _compute_cross_shot_support_marginals(
+            support_tokens.unsqueeze(0),
+            rho=1.0,
+            beta=float(self.pulse_support_consensus_beta),
+            eta=float(self.pulse_support_consensus_eta),
+            detach=True,
+            distance=self.ground_cost,
+            eps=float(self.eps),
+            min_sigma=float(self.eps),
+        )
+        consensus_prob = normalize_saliency(
+            consensus_mass.squeeze(0).to(device=support_saliency.device, dtype=support_saliency.dtype),
+            eps=float(self.eps),
+        )
+        saliency_prob = normalize_saliency(support_saliency, eps=float(self.eps))
+        mixed = (1.0 - weight) * saliency_prob + weight * consensus_prob
+        entropy = -(consensus_prob * consensus_prob.clamp_min(self.eps).log()).sum(dim=-1).mean()
+        payload = {
+            "pulse/support_consensus_weight": support_saliency.new_tensor(weight),
+            "pulse/support_consensus_peak": consensus_prob.max(dim=-1).values.mean().detach(),
+            "pulse/support_consensus_entropy": entropy.detach(),
+            "pulse/support_consistency_mean": consistency.to(
+                device=support_saliency.device,
+                dtype=support_saliency.dtype,
+            ).mean().detach(),
+            "pulse/support_consistency_sigma_peak": sigma.to(
+                device=support_saliency.device,
+                dtype=support_saliency.dtype,
+            ).max(dim=-1).values.mean().detach(),
+        }
+        return mixed, payload
 
     @staticmethod
     def _combine_token_weight(
@@ -1201,6 +1276,10 @@ class OursM2(JECOTM2):
                 way_num=way_num,
                 shot_num=shot_num,
             )
+            support_saliency, pulse_consensus_payload = self._apply_pulse_support_consensus(
+                support_tokens,
+                support_saliency,
+            )
             pulse_base_cost = cost_for_transport
             pulse_guided_cost, pulse_query_weight, pulse_support_weight, pulse_payload = (
                 self.pulse_region_guidance(
@@ -1214,7 +1293,8 @@ class OursM2(JECOTM2):
                     spatial_hw=spatial_hw,
                 )
             )
-            pulse_strength = self._pulse_region_effective_strength(pulse_base_cost)
+            pulse_payload.update(pulse_consensus_payload)
+            pulse_strength = self._pulse_region_effective_strength(pulse_base_cost, shot_num=shot_num)
             cost_for_transport = pulse_base_cost + pulse_strength * (pulse_guided_cost - pulse_base_cost)
             if pulse_strength.item() < 1.0:
                 q_uniform = pulse_query_weight.new_full(

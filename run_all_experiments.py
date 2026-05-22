@@ -327,16 +327,24 @@ def get_args():
     parser.add_argument(
         "--export_uot_evidence_figure",
         type=str,
-        default="false",
-        choices=["true", "false"],
+        default="auto",
+        choices=["auto", "true", "false"],
         help=(
             "Forwarded to main.py to export UOT/Partial-OT transport evidence and "
-            "query-to-all-class support comparison figures during final test."
+            "query-to-all-class support comparison figures during final test. "
+            "auto follows main.py defaults, which enable the paper figure for Ours-Final."
         ),
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--uot_evidence_visual_style",
+        type=str,
+        default="auto",
+        choices=["auto", "paper", "legacy"],
+        help="Forwarded to main.py. auto uses paper for Ours-Final and legacy for other models.",
+    )
     parser.add_argument(
         "--m2_ablate_T",
         type=str,
@@ -386,10 +394,11 @@ def get_args():
             extra += ["--save_last_checkpoint", "false"]
         if "--jecot_m2_val_save_hist_fig" not in extra:
             extra += ["--jecot_m2_val_save_hist_fig", "false"]
-    if str(getattr(args, "export_uot_evidence_figure", "false")).lower() == "true":
+    export_uot_evidence = str(getattr(args, "export_uot_evidence_figure", "auto")).lower()
+    if export_uot_evidence in {"true", "false"}:
+        extra += ["--export_uot_evidence_figure", export_uot_evidence]
+    if export_uot_evidence == "true":
         extra += [
-            "--export_uot_evidence_figure",
-            "true",
             "--uot_evidence_num_episodes",
             str(args.uot_evidence_num_episodes),
             "--uot_evidence_queries_per_episode",
@@ -397,6 +406,9 @@ def get_args():
             "--uot_evidence_correct_only",
             str(args.uot_evidence_correct_only),
         ]
+    visual_style = str(getattr(args, "uot_evidence_visual_style", "auto")).lower()
+    if visual_style != "auto":
+        extra += ["--uot_evidence_visual_style", visual_style]
     args.passthrough_args = extra
     return args
 
@@ -1704,7 +1716,10 @@ def cli_bool_option(cmd, flag, default=False):
     idx = len(cmd) - 1 - list(reversed(cmd)).index(flag)
     if idx + 1 >= len(cmd) or str(cmd[idx + 1]).startswith("--"):
         return True
-    return str(cmd[idx + 1]).strip().lower() in {"1", "true", "yes", "y", "on"}
+    value = str(cmd[idx + 1]).strip().lower()
+    if value == "auto":
+        return default
+    return value in {"1", "true", "yes", "y", "on"}
 
 
 def uot_evidence_artifacts_exist(
@@ -1988,7 +2003,11 @@ def run_experiment(
         print(f"[pulse_fewshot child CLI] {shlex.join(cmd)}")
 
     primary_complete = all_paths_exist(primary_result_paths)
-    needs_uot_evidence = cli_bool_option(cmd, "--export_uot_evidence_figure", default=False)
+    needs_uot_evidence = cli_bool_option(
+        cmd,
+        "--export_uot_evidence_figure",
+        default=model in {OURS_FINAL_MODEL_NAME, OURS_FINAL_PARTIAL_OT_MODEL_NAME},
+    )
     primary_uot_evidence_complete = (
         not needs_uot_evidence
         or uot_evidence_artifacts_exist(

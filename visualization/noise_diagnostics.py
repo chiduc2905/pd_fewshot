@@ -8,10 +8,12 @@ import os
 from collections import defaultdict
 from typing import Any, Iterable, Sequence
 
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+from matplotlib.patches import Rectangle
 
 
 PROFILE_METRICS = (
@@ -607,6 +609,276 @@ def _plot_transport_correspondence(
     return top_match_score_fraction, max_match_score_fraction, len(matches)
 
 
+def _plot_paper_transport_correspondence(
+    ax: plt.Axes,
+    query_image: np.ndarray,
+    support_image: np.ndarray,
+    pair_plan: torch.Tensor,
+    query_heatmap: np.ndarray,
+    support_heatmap: np.ndarray,
+    *,
+    pair_scores: torch.Tensor | None = None,
+    title: str = "",
+    max_matches: int = 6,
+    accent: str = "#0f766e",
+    muted: bool = False,
+) -> tuple[float, float, int]:
+    """Compact paper-facing UOT panel: only the discriminative correspondences."""
+    pad = 20
+    image_canvas, heat_canvas = _build_pair_canvas(
+        query_image,
+        support_image,
+        query_heatmap,
+        support_heatmap,
+        pad=pad,
+    )
+    ax.imshow(image_canvas, cmap="gray", vmin=0.0, vmax=1.0)
+    ax.imshow(
+        heat_canvas,
+        cmap="inferno",
+        alpha=0.30 if muted else 0.48,
+        vmin=0.0,
+        vmax=1.0,
+    )
+
+    height = max(query_image.shape[0], support_image.shape[0])
+    q_y = (height - query_image.shape[0]) // 2
+    s_y = (height - support_image.shape[0]) // 2
+    s_x = query_image.shape[1] + pad
+    ax.add_patch(
+        Rectangle(
+            (-0.5, q_y - 0.5),
+            query_image.shape[1],
+            query_image.shape[0],
+            fill=False,
+            edgecolor="#111827",
+            linewidth=0.8,
+            alpha=0.75,
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (s_x - 0.5, s_y - 0.5),
+            support_image.shape[1],
+            support_image.shape[0],
+            fill=False,
+            edgecolor=accent if not muted else "#64748b",
+            linewidth=1.4 if not muted else 0.9,
+            alpha=0.9,
+        )
+    )
+
+    query_centers = _token_centers_on_canvas(
+        num_tokens=int(pair_plan.shape[0]),
+        image_hw=tuple(int(dim) for dim in query_image.shape),
+        x_offset=0,
+        y_offset=q_y,
+    )
+    support_centers = _token_centers_on_canvas(
+        num_tokens=int(pair_plan.shape[1]),
+        image_hw=tuple(int(dim) for dim in support_image.shape),
+        x_offset=s_x,
+        y_offset=s_y,
+    )
+
+    rank_scores = pair_scores.detach().float().cpu().clamp_min(0.0) if pair_scores is not None else None
+    if rank_scores is not None and float(rank_scores.sum().item()) <= 1e-8:
+        rank_scores = None
+    matches = _top_transport_matches(
+        pair_plan,
+        match_scores=rank_scores,
+        max_matches=max_matches,
+        matches_per_query=1,
+        min_mass_fraction=0.0,
+    )
+    top_match_score_fraction = float(sum(match[3] for match in matches))
+    max_match_score_fraction = float(matches[0][3]) if matches else 0.0
+
+    endpoint_scores = rank_scores if rank_scores is not None else pair_plan.detach().float().cpu()
+    query_score = endpoint_scores.sum(dim=-1)
+    support_score = endpoint_scores.sum(dim=-2)
+    query_score_max = float(query_score.max().item()) if query_score.numel() else 0.0
+    support_score_max = float(support_score.max().item()) if support_score.numel() else 0.0
+    line_color = "#64748b" if muted else accent
+    dot_color = "#94a3b8" if muted else accent
+
+    for query_token, support_token, _mass, fraction in reversed(matches):
+        qx, qy = query_centers[query_token]
+        sx, sy = support_centers[support_token]
+        endpoint_strength = max(
+            float(query_score[query_token].item()) / max(query_score_max, 1e-8),
+            float(support_score[support_token].item()) / max(support_score_max, 1e-8),
+        )
+        pair_strength = fraction / max(max_match_score_fraction, 1e-8)
+        strength = min(1.0, max(pair_strength, 0.45 * endpoint_strength))
+        linewidth = (0.8 if muted else 1.2) + (1.8 if muted else 2.9) * strength
+        alpha = (0.25 if muted else 0.34) + (0.42 if muted else 0.56) * strength
+        line = ax.plot(
+            [qx, sx],
+            [qy, sy],
+            color=line_color,
+            alpha=alpha,
+            linewidth=linewidth,
+            solid_capstyle="round",
+            zorder=4,
+        )[0]
+        line.set_path_effects(
+            [
+                path_effects.Stroke(linewidth=linewidth + 1.2, foreground="white", alpha=0.48),
+                path_effects.Normal(),
+            ]
+        )
+
+    if matches:
+        q_points = np.asarray([query_centers[item[0]] for item in matches], dtype=np.float32)
+        s_points = np.asarray([support_centers[item[1]] for item in matches], dtype=np.float32)
+        sizes = np.asarray(
+            [
+                22.0
+                + 150.0
+                * max(
+                    float(query_score[item[0]].item()) / max(query_score_max, 1e-8),
+                    float(support_score[item[1]].item()) / max(support_score_max, 1e-8),
+                )
+                for item in matches
+            ],
+            dtype=np.float32,
+        )
+        ax.scatter(
+            q_points[:, 0],
+            q_points[:, 1],
+            s=sizes,
+            c=dot_color,
+            edgecolors="white",
+            linewidths=0.55,
+            alpha=0.92 if not muted else 0.72,
+            zorder=5,
+        )
+        ax.scatter(
+            s_points[:, 0],
+            s_points[:, 1],
+            s=sizes,
+            c=dot_color,
+            edgecolors="white",
+            linewidths=0.55,
+            alpha=0.92 if not muted else 0.72,
+            zorder=5,
+        )
+
+    if title:
+        ax.set_title(title, fontsize=10.5, weight="bold", color="#111827", pad=6)
+    ax.axis("off")
+    return top_match_score_fraction, max_match_score_fraction, len(matches)
+
+
+def _transport_pair_payload(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    plan: torch.Tensor,
+    cost_matrix: torch.Tensor | None,
+    query_idx: int,
+    class_idx: int,
+    query_image: np.ndarray,
+    support_images: torch.Tensor,
+    way_num: int,
+    shot_num: int,
+) -> dict[str, Any]:
+    shot_idx = _select_transport_shot(
+        outputs,
+        query_idx=query_idx,
+        class_idx=class_idx,
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+    pair_plan = plan[query_idx, class_idx, shot_idx]
+    query_mass = pair_plan.sum(dim=-1)
+    support_mass = pair_plan.sum(dim=-2)
+    transported_mass = float(pair_plan.sum().item())
+    expected_mass = _shot_expected_mass(
+        outputs,
+        query_idx=query_idx,
+        class_idx=class_idx,
+        shot_idx=shot_idx,
+        fallback_mass=max(transported_mass, 1e-8),
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+    unmatched_fraction = max(0.0, 1.0 - transported_mass / max(expected_mass, 1e-8))
+    support_image = _ensure_numpy_image(support_images[class_idx, shot_idx])
+    pair_cost = None
+    if cost_matrix is not None and query_idx < cost_matrix.shape[0]:
+        pair_cost = cost_matrix[query_idx, class_idx, shot_idx]
+    transport_threshold = _threshold_for_transport_pair(
+        outputs,
+        query_idx=query_idx,
+        class_idx=class_idx,
+        shot_idx=shot_idx,
+    )
+    positive_evidence = _positive_transport_evidence(
+        pair_plan=pair_plan,
+        pair_cost=pair_cost,
+        threshold=transport_threshold,
+    )
+    if positive_evidence is not None and float(positive_evidence.sum().item()) > 1e-8:
+        pair_scores = positive_evidence
+        query_values = positive_evidence.sum(dim=-1)
+        support_values = positive_evidence.sum(dim=-2)
+        visual_source = "positive_evidence"
+        positive_evidence_total = float(positive_evidence.sum().item())
+    else:
+        pair_scores = None
+        query_values = query_mass
+        support_values = support_mass
+        visual_source = "transport_mass"
+        positive_evidence_total = None
+
+    query_bright_mask = _token_bright_mask(query_image, num_tokens=int(query_mass.numel()))
+    support_bright_mask = _token_bright_mask(support_image, num_tokens=int(support_mass.numel()))
+    pulse_to_pulse_mass_ratio = _pulse_to_pulse_ratio(pair_plan, query_bright_mask, support_bright_mask)
+    positive_pulse_to_pulse_ratio = (
+        _pulse_to_pulse_ratio(pair_scores, query_bright_mask, support_bright_mask)
+        if pair_scores is not None
+        else None
+    )
+    query_bright_mass_ratio = _masked_token_ratio(query_values, query_bright_mask)
+    support_bright_mass_ratio = _masked_token_ratio(support_values, support_bright_mask)
+
+    return {
+        "shot_idx": shot_idx,
+        "pair_plan": pair_plan,
+        "pair_scores": pair_scores,
+        "query_values": query_values,
+        "support_values": support_values,
+        "query_heat": _token_values_to_heatmap(query_values, tuple(int(dim) for dim in query_image.shape)),
+        "support_heat": _token_values_to_heatmap(support_values, tuple(int(dim) for dim in support_image.shape)),
+        "support_image": support_image,
+        "transported_mass": transported_mass,
+        "expected_mass": expected_mass,
+        "unmatched_fraction": unmatched_fraction,
+        "visual_source": visual_source,
+        "positive_evidence_total": positive_evidence_total,
+        "pulse_to_pulse_mass_ratio": pulse_to_pulse_mass_ratio,
+        "positive_pulse_to_pulse_ratio": positive_pulse_to_pulse_ratio,
+        "query_bright_mass_ratio": query_bright_mass_ratio,
+        "support_bright_mass_ratio": support_bright_mass_ratio,
+        "transport_threshold": transport_threshold,
+        "sink_mass": _noise_sink_value(
+            outputs,
+            "ecot_noise_sink_query_mass",
+            query_idx=query_idx,
+            class_idx=class_idx,
+            shot_idx=shot_idx,
+        )
+        + _noise_sink_value(
+            outputs,
+            "ecot_noise_sink_support_mass",
+            query_idx=query_idx,
+            class_idx=class_idx,
+            shot_idx=shot_idx,
+        ),
+    }
+
+
 def _transport_plan_by_shot(
     outputs: dict[str, Any] | torch.Tensor,
     *,
@@ -864,6 +1136,203 @@ def _shot_expected_mass(
     return float(fallback_mass)
 
 
+def _class_label(class_names: Sequence[str], class_idx: int) -> str:
+    return class_names[class_idx] if 0 <= class_idx < len(class_names) else str(class_idx)
+
+
+def _export_uot_paper_evidence_figure(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    query_images: torch.Tensor,
+    support_images: torch.Tensor,
+    logits: torch.Tensor,
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    class_names: Sequence[str],
+    plan: torch.Tensor,
+    cost_matrix: torch.Tensor | None,
+    save_path: str,
+    episode_index: int,
+    query_indices: Sequence[int],
+    transport_kind: str,
+    variant_text: str,
+    max_matches: int = 6,
+) -> list[dict[str, Any]]:
+    way_num, shot_num = support_images.shape[:2]
+    show_rival = way_num > 1
+    num_cols = 3 if show_rival else 2
+    width = 3.4 + (5.9 if show_rival else 6.1) * (num_cols - 1)
+    fig, axes = plt.subplots(
+        len(query_indices),
+        num_cols,
+        figsize=(width, max(3.4, 3.35 * len(query_indices))),
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+    rows: list[dict[str, Any]] = []
+
+    for row_idx, query_idx_raw in enumerate(query_indices):
+        query_idx = int(query_idx_raw)
+        true_class = int(targets[query_idx].item())
+        pred_class = int(preds[query_idx].item())
+        score_np = logits[query_idx].numpy()
+        if len(score_np) > 1:
+            wrong_scores = score_np.copy()
+            wrong_scores[true_class] = -np.inf
+            best_wrong_class = int(np.argmax(wrong_scores))
+            best_wrong_score = float(wrong_scores[best_wrong_class])
+        else:
+            best_wrong_class = true_class
+            best_wrong_score = 0.0
+        true_score = float(score_np[true_class])
+        decision_margin = true_score - best_wrong_score
+
+        query_np = _ensure_numpy_image(query_images[query_idx])
+        ax_query = axes[row_idx, 0]
+        ax_query.imshow(query_np, cmap="gray", vmin=0.0, vmax=1.0)
+        query_edge = "#0f766e" if pred_class == true_class else "#dc2626"
+        ax_query.add_patch(
+            Rectangle(
+                (-0.5, -0.5),
+                query_np.shape[1],
+                query_np.shape[0],
+                fill=False,
+                edgecolor=query_edge,
+                linewidth=1.4,
+                alpha=0.95,
+            )
+        )
+        ax_query.set_title("(a) Query", fontsize=10.5, weight="bold", color="#111827", pad=6)
+        ax_query.axis("off")
+
+        primary_class = pred_class if 0 <= pred_class < way_num else true_class
+        rival_class = best_wrong_class if primary_class == true_class else true_class
+        primary_payload = _transport_pair_payload(
+            outputs=outputs,
+            plan=plan,
+            cost_matrix=cost_matrix,
+            query_idx=query_idx,
+            class_idx=primary_class,
+            query_image=query_np,
+            support_images=support_images,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+        primary_top_fraction, primary_max_fraction, primary_match_count = _plot_paper_transport_correspondence(
+            axes[row_idx, 1],
+            query_np,
+            primary_payload["support_image"],
+            primary_payload["pair_plan"],
+            primary_payload["query_heat"],
+            primary_payload["support_heat"],
+            pair_scores=primary_payload["pair_scores"],
+            title=f"(b) UOT evidence: {_class_label(class_names, primary_class)}",
+            max_matches=max_matches,
+            accent="#0f766e" if primary_class == true_class else "#dc2626",
+            muted=False,
+        )
+
+        if show_rival:
+            rival_payload = _transport_pair_payload(
+                outputs=outputs,
+                plan=plan,
+                cost_matrix=cost_matrix,
+                query_idx=query_idx,
+                class_idx=rival_class,
+                query_image=query_np,
+                support_images=support_images,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            _plot_paper_transport_correspondence(
+                axes[row_idx, 2],
+                query_np,
+                rival_payload["support_image"],
+                rival_payload["pair_plan"],
+                rival_payload["query_heat"],
+                rival_payload["support_heat"],
+                pair_scores=rival_payload["pair_scores"],
+                title=f"(c) Closest rival: {_class_label(class_names, rival_class)}",
+                max_matches=max(3, max_matches - 1),
+                accent="#64748b",
+                muted=True,
+            )
+
+        metric_payload = primary_payload
+        if primary_class != true_class:
+            metric_payload = _transport_pair_payload(
+                outputs=outputs,
+                plan=plan,
+                cost_matrix=cost_matrix,
+                query_idx=query_idx,
+                class_idx=true_class,
+                query_image=query_np,
+                support_images=support_images,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            true_top_matches = _top_transport_matches(
+                metric_payload["pair_plan"],
+                match_scores=metric_payload["pair_scores"],
+                max_matches=max_matches,
+                matches_per_query=1,
+            )
+            top_match_score_fraction = float(sum(match[3] for match in true_top_matches))
+            max_match_score_fraction = float(true_top_matches[0][3]) if true_top_matches else 0.0
+            top_match_count = len(true_top_matches)
+        else:
+            top_match_score_fraction = primary_top_fraction
+            max_match_score_fraction = primary_max_fraction
+            top_match_count = primary_match_count
+
+        rows.append(
+            {
+                "episode_index": episode_index,
+                "query_rank_in_episode": query_idx,
+                "variant_label": variant_text,
+                "transport_kind": transport_kind,
+                "true_class": true_class,
+                "true_class_name": _class_label(class_names, true_class),
+                "pred_class": pred_class,
+                "pred_class_name": _class_label(class_names, pred_class),
+                "best_wrong_class": best_wrong_class,
+                "best_wrong_class_name": _class_label(class_names, best_wrong_class),
+                "selected_shot": int(metric_payload["shot_idx"]),
+                "correct": int(true_class == pred_class),
+                "true_score": true_score,
+                "best_wrong_score": best_wrong_score,
+                "decision_margin": decision_margin,
+                "expected_mass": float(metric_payload["expected_mass"]),
+                "transported_mass": float(metric_payload["transported_mass"]),
+                "unmatched_fraction": float(metric_payload["unmatched_fraction"]),
+                "evidence_map_source": metric_payload["visual_source"],
+                "positive_evidence_total": metric_payload["positive_evidence_total"],
+                "pulse_to_pulse_mass_ratio": metric_payload["pulse_to_pulse_mass_ratio"],
+                "query_bright_mass_ratio": metric_payload["query_bright_mass_ratio"],
+                "support_bright_mass_ratio": metric_payload["support_bright_mass_ratio"],
+                "positive_pulse_to_pulse_ratio": metric_payload["positive_pulse_to_pulse_ratio"],
+                "transport_cost_threshold": metric_payload["transport_threshold"],
+                "top_match_count": top_match_count,
+                "top_match_score_fraction": top_match_score_fraction,
+                "max_match_score_fraction": max_match_score_fraction,
+                "top_match_mass_fraction": top_match_score_fraction,
+                "max_match_mass_fraction": max_match_score_fraction,
+                "evidence_background_mass_ratio": None,
+                "evidence_query_background_mass_ratio": None,
+                "evidence_support_background_mass_ratio": None,
+                "noise_sink_mass": metric_payload["sink_mass"],
+                "save_path": save_path,
+                "all_class_match_path": "",
+            }
+        )
+
+    fig.tight_layout(pad=0.45, w_pad=0.45, h_pad=0.65)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=320, bbox_inches="tight", pad_inches=0.04)
+    plt.close(fig)
+    return rows
+
+
 def _export_uot_all_class_match_figure(
     *,
     outputs: dict[str, Any] | torch.Tensor,
@@ -997,6 +1466,7 @@ def export_uot_evidence_figure(
     query_indices: Iterable[int] | None = None,
     transport_kind: str = "uot",
     variant_label: str = "",
+    visual_style: str = "legacy",
 ) -> list[dict[str, Any]]:
     """Export UOT/Partial-OT evidence figures with explicit query-support token correspondences."""
     if query_images.dim() != 4:
@@ -1037,6 +1507,24 @@ def export_uot_evidence_figure(
             else ("Ours_final UOT" if is_uot else "Ours_final full OT")
         )
     )
+    visual_style = str(visual_style or "legacy").strip().lower().replace("-", "_")
+    if visual_style in {"paper", "q1", "compact", "publication"}:
+        return _export_uot_paper_evidence_figure(
+            outputs=outputs,
+            query_images=query_images,
+            support_images=support_images,
+            logits=logits,
+            preds=preds,
+            targets=targets,
+            class_names=class_names,
+            plan=plan,
+            cost_matrix=cost_matrix,
+            save_path=save_path,
+            episode_index=episode_index,
+            query_indices=selected_indices,
+            transport_kind=transport_kind,
+            variant_text=variant_text,
+        )
 
     rows: list[dict[str, Any]] = []
     fig, axes = plt.subplots(

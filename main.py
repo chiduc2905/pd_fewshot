@@ -69,6 +69,27 @@ def _bool_flag(value, default=False):
     return str(value).lower() == "true"
 
 
+def _is_ours_final_model(args):
+    model_name = str(getattr(args, "model", "") or "").strip().lower()
+    return model_name in OURS_FINAL_MODEL_NAMES
+
+
+def resolve_uot_evidence_enabled(args):
+    value = str(getattr(args, "export_uot_evidence_figure", "auto") or "auto").strip().lower()
+    if value == "auto":
+        return _is_ours_final_model(args)
+    return _bool_flag(value, default=False)
+
+
+def resolve_uot_evidence_visual_style(args):
+    value = str(getattr(args, "uot_evidence_visual_style", "auto") or "auto").strip().lower().replace("-", "_")
+    if value == "auto":
+        return "paper" if _is_ours_final_model(args) else "legacy"
+    if value in {"q1", "compact", "publication"}:
+        return "paper"
+    return value
+
+
 def save_auxiliary_result_artifacts(args):
     return str(getattr(args, "result_artifacts", "figures_only")).lower() == "all"
 
@@ -1417,12 +1438,32 @@ def get_args():
         help="Eval/test-time multiplier for pulse-region UOT guidance.",
     )
     parser.add_argument(
+        "--pulse_region_multishot_train_strength",
+        type=float,
+        default=None,
+        help="Optional training-time pulse guidance multiplier used only when shot_num > 1.",
+    )
+    parser.add_argument(
+        "--pulse_region_multishot_eval_strength",
+        type=float,
+        default=None,
+        help="Optional eval/test-time pulse guidance multiplier used only when shot_num > 1.",
+    )
+    parser.add_argument(
         "--pulse_region_train_schedule",
         type=str,
         default="constant",
         choices=["constant", "decay", "warmup_decay", "eval_only"],
         help="Schedule for pulse guidance during training; eval/test uses pulse_region_eval_strength.",
     )
+    parser.add_argument(
+        "--pulse_support_consensus_weight",
+        type=float,
+        default=0.0,
+        help="For shot_num > 1, blend support pulse saliency with cross-shot support-token consensus.",
+    )
+    parser.add_argument("--pulse_support_consensus_beta", type=float, default=5.0)
+    parser.add_argument("--pulse_support_consensus_eta", type=float, default=0.05)
     parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
@@ -2130,16 +2171,23 @@ def get_args():
     parser.add_argument(
         "--export_uot_evidence_figure",
         type=str,
-        default="false",
-        choices=["true", "false"],
+        default="auto",
+        choices=["auto", "true", "false"],
         help=(
             "Export UOT/Partial-OT evidence figures with positive-evidence overlays, top transported-token correspondences, "
-            "and query-to-all-class support comparison panels."
+            "and query-to-all-class support comparison panels. auto enables the compact paper figure for ours_final."
         ),
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--uot_evidence_visual_style",
+        type=str,
+        default="auto",
+        choices=["auto", "paper", "legacy"],
+        help="UOT evidence figure style. auto uses paper for Ours-Final and legacy for other models.",
+    )
     parser.add_argument("--export_dataset_profile", type=str, default="false", choices=["true", "false"])
     parser.add_argument("--save_last_checkpoint", type=str, default="false", choices=["true", "false"])
     parser.add_argument(
@@ -3552,7 +3600,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_saliency_contrast_weight",
             "pulse_region_train_strength",
             "pulse_region_eval_strength",
+            "pulse_region_multishot_train_strength",
+            "pulse_region_multishot_eval_strength",
             "pulse_region_train_schedule",
+            "pulse_support_consensus_weight",
+            "pulse_support_consensus_beta",
+            "pulse_support_consensus_eta",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -4663,6 +4716,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/query_saliency_peak",
         "pulse/support_saliency_peak",
         "pulse/region_cost_delta_ratio",
+        "pulse/effective_strength",
+        "pulse/support_consensus_weight",
+        "pulse/support_consensus_peak",
+        "pulse/support_consensus_entropy",
+        "pulse/support_consistency_mean",
+        "pulse/support_consistency_sigma_peak",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
@@ -5112,6 +5171,12 @@ def format_diagnostic_summary(metrics):
         "pulse/query_saliency_peak",
         "pulse/support_saliency_peak",
         "pulse/region_cost_delta_ratio",
+        "pulse/effective_strength",
+        "pulse/support_consensus_weight",
+        "pulse/support_consensus_peak",
+        "pulse/support_consensus_entropy",
+        "pulse/support_consistency_mean",
+        "pulse/support_consistency_sigma_peak",
     ]
     chunks = []
     emitted = set()
@@ -5693,10 +5758,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     q1_limit = max(0, int(getattr(args, "q1_num_episodes", 0)))
     q1_queries_per_episode = max(1, int(getattr(args, "q1_queries_per_episode", 1)))
     q1_misclassified_only = _bool_flag(getattr(args, "q1_misclassified_only", "true"), default=True)
-    uot_evidence_enabled = _bool_flag(getattr(args, "export_uot_evidence_figure", "false"), default=False)
+    uot_evidence_enabled = resolve_uot_evidence_enabled(args)
     uot_evidence_limit = max(0, int(getattr(args, "uot_evidence_num_episodes", 0)))
     uot_evidence_queries_per_episode = max(1, int(getattr(args, "uot_evidence_queries_per_episode", 1)))
     uot_evidence_correct_only = _bool_flag(getattr(args, "uot_evidence_correct_only", "true"), default=True)
+    uot_evidence_visual_style = resolve_uot_evidence_visual_style(args)
     q1_rows = []
     q1_figure_paths = []
     uot_evidence_rows = []
@@ -5880,6 +5946,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                             query_indices=selected_query_indices,
                             transport_kind=uot_transport_kind,
                             variant_label=uot_variant_label,
+                            visual_style=uot_evidence_visual_style,
                         )
                     except Exception as exc:
                         print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")

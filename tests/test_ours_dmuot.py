@@ -943,6 +943,40 @@ def test_pulse_region_train_schedule_reduces_train_guidance_but_not_eval():
     assert eval_outputs["pulse/effective_strength"].item() == pytest.approx(1.0, abs=1e-6)
 
 
+def test_pulse_region_multishot_strength_and_support_consensus():
+    torch.manual_seed(902)
+    model = _tiny_ours_final(
+        enable_pulse_region_uot=True,
+        pulse_region_kernel_size=3,
+        pulse_region_cost_weight=0.25,
+        pulse_saliency_mass_mix=0.5,
+        pulse_region_train_strength=0.6,
+        pulse_region_eval_strength=1.0,
+        pulse_region_multishot_train_strength=0.25,
+        pulse_region_multishot_eval_strength=0.45,
+        pulse_support_consensus_weight=0.7,
+    )
+    query, support = _episode(shot=5)
+
+    model.train()
+    train_outputs = model(query, support, return_aux=True)
+    model.eval()
+    with torch.no_grad():
+        eval_outputs = model(query, support, return_aux=True)
+
+    assert train_outputs["pulse/effective_strength"].item() == pytest.approx(0.25, abs=1e-6)
+    assert eval_outputs["pulse/effective_strength"].item() == pytest.approx(0.45, abs=1e-6)
+    for key in (
+        "pulse/support_consensus_weight",
+        "pulse/support_consensus_peak",
+        "pulse/support_consensus_entropy",
+        "pulse/support_consistency_mean",
+        "pulse/support_consistency_sigma_peak",
+    ):
+        assert key in train_outputs
+        assert torch.isfinite(train_outputs[key])
+
+
 def test_pulse_region_uot_factory_flags_are_ours_final_only():
     common = dict(
         device="cpu",
@@ -957,6 +991,9 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
         pulse_region_train_schedule="decay",
         pulse_region_train_strength=0.6,
         pulse_region_eval_strength=1.0,
+        pulse_region_multishot_train_strength=0.25,
+        pulse_region_multishot_eval_strength=0.45,
+        pulse_support_consensus_weight=0.7,
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -970,6 +1007,9 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
     assert ours_final.pulse_region_train_schedule == "decay"
     assert ours_final.pulse_region_train_strength == pytest.approx(0.6)
     assert ours_final.pulse_region_eval_strength == pytest.approx(1.0)
+    assert ours_final.pulse_region_multishot_train_strength == pytest.approx(0.25)
+    assert ours_final.pulse_region_multishot_eval_strength == pytest.approx(0.45)
+    assert ours_final.pulse_support_consensus_weight == pytest.approx(0.7)
 
     with pytest.raises(ValueError, match="--enable_pulse_region_uot is supported only with --model ours_final"):
         build_model_from_args(

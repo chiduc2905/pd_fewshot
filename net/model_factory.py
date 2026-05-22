@@ -2726,8 +2726,23 @@ def build_model_from_args(args):
                             "pulse_region_eval_strength": float(
                                 getattr(args, "pulse_region_eval_strength", 1.0)
                             ),
+                            "pulse_region_multishot_train_strength": getattr(
+                                args, "pulse_region_multishot_train_strength", None
+                            ),
+                            "pulse_region_multishot_eval_strength": getattr(
+                                args, "pulse_region_multishot_eval_strength", None
+                            ),
                             "pulse_region_train_schedule": str(
                                 getattr(args, "pulse_region_train_schedule", "constant")
+                            ),
+                            "pulse_support_consensus_weight": float(
+                                getattr(args, "pulse_support_consensus_weight", 0.0)
+                            ),
+                            "pulse_support_consensus_beta": float(
+                                getattr(args, "pulse_support_consensus_beta", 5.0)
+                            ),
+                            "pulse_support_consensus_eta": float(
+                                getattr(args, "pulse_support_consensus_eta", 0.05)
                             ),
                         }
                         if is_ours_final_model
