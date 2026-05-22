@@ -32,6 +32,24 @@ DEEPEMD_5SHOT_TRAIN_SFC_STEPS = 15
 DEEPEMD_5SHOT_TRAIN_SFC_BS = 20
 DEEPEMD_5SHOT_TEST_EXACT = "false"
 DEEPEMD_5SHOT_TEST_SFC = "false"
+PAPER_BASELINE_MODELS = [
+    "cosine",
+    "protonet",
+    "relationnet",
+    "dn4",
+    "feat",
+    "can",
+    "frn",
+    "covamnet",
+    "deepbdc",
+    "deepemd",
+]
+MODEL_GROUP_ALIASES = {
+    "paper_baselines": PAPER_BASELINE_MODELS,
+    "baseline_papers": PAPER_BASELINE_MODELS,
+    "image_baselines": PAPER_BASELINE_MODELS,
+    "table_baselines": PAPER_BASELINE_MODELS,
+}
 
 
 def default_dataset_path():
@@ -113,7 +131,18 @@ def get_args():
             "--final_test_seed only; --final_test_seeds applies to the primary protocol."
         ),
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--seed",
+        type=str,
+        default="42",
+        help="Random training seed, or comma-separated seeds such as 44,45,46",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=str,
+        default=None,
+        help="Comma-separated training seeds. Overrides --seed when provided.",
+    )
     parser.add_argument(
         "--final_test_seed",
         type=int,
@@ -148,7 +177,20 @@ def get_args():
         "--models",
         type=str,
         default="covamnet,protonet,cosine,relationnet,matchingnet,dn4,feat,deepemd,maml,can,frn,deepbdc,hierarchical_episodic_ssm_net,hierarchical_consensus_slot_mamba_net,fgwuot_fsl",
-        help="Comma-separated model registry names to run",
+        help=(
+            "Comma-separated model registry names to run. "
+            "Aliases: paper_baselines/image_baselines for cosine, protonet, relationnet, "
+            "dn4, feat, can, frn, covamnet, deepbdc, deepemd."
+        ),
+    )
+    parser.add_argument(
+        "--experiment_tag",
+        type=str,
+        default=None,
+        help=(
+            "Optional base tag for result/checkpoint filenames. With multiple training seeds, "
+            "use {seed} in the tag or the runner appends _seed<seed> automatically."
+        ),
     )
     parser.add_argument(
         "--fewshot_backbone",
@@ -1793,6 +1835,7 @@ def run_experiment(
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
+    print(f"Train Seed  : {seed}")
     print(f"Test Proto  : {test_protocol}")
     checkpoint_path = build_best_checkpoint_path(
         dataset_name=dataset_name,
@@ -2223,6 +2266,72 @@ def parse_mode_ids(mode_ids_str):
     return parsed
 
 
+def parse_training_seeds(seed_list_str):
+    if seed_list_str is None or not str(seed_list_str).strip():
+        return [42]
+    parsed = []
+    for token in str(seed_list_str).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        seed = int(token)
+        if seed not in parsed:
+            parsed.append(seed)
+    if not parsed:
+        raise ValueError("--seed/--seeds must contain at least one integer seed.")
+    return parsed
+
+
+def parse_requested_models(models_str):
+    requested = []
+    for token in str(models_str or "").split(","):
+        model = token.strip()
+        if not model:
+            continue
+        alias_models = MODEL_GROUP_ALIASES.get(model.lower())
+        if alias_models:
+            for alias_model in alias_models:
+                if alias_model not in requested:
+                    requested.append(alias_model)
+            continue
+        if model not in requested:
+            requested.append(model)
+    return requested
+
+
+def format_training_seed_line(training_seeds):
+    if len(training_seeds) == 1:
+        return f"Train Seed  : seed={training_seeds[0]}"
+    return f"Train Seeds : seeds={','.join(str(seed) for seed in training_seeds)}"
+
+
+def format_planned_total(experiments, training_seeds, suffix):
+    return f"Total       : {len(experiments) * len(training_seeds)} {suffix}"
+
+
+def join_result_tags(*parts):
+    normalized = [str(part).strip() for part in parts if str(part or "").strip()]
+    return "_".join(normalized) if normalized else None
+
+
+def format_seeded_base_tag(base_tag, seed, multiple_training_seeds):
+    base_tag = str(base_tag or "").strip()
+    if "{seed}" in base_tag:
+        return base_tag.format(seed=seed)
+    if multiple_training_seeds:
+        return join_result_tags(base_tag, f"seed{seed}")
+    return base_tag or None
+
+
+def build_effective_run_tags(experiment, base_experiment_tag, seed, multiple_training_seeds):
+    base_tag = format_seeded_base_tag(base_experiment_tag, seed, multiple_training_seeds)
+    variant_tag = experiment.get("experiment_tag")
+    variant_checkpoint_tag = experiment.get("checkpoint_tag")
+    experiment_tag = join_result_tags(base_tag, variant_tag)
+    checkpoint_tag = join_result_tags(base_tag, variant_checkpoint_tag or variant_tag)
+    return experiment_tag, checkpoint_tag
+
+
 def parse_rho_values(rho_values_str):
     if rho_values_str is None or not str(rho_values_str).strip():
         return None
@@ -2540,6 +2649,10 @@ def print_extra_test_protocol_line(args):
 
 def main():
     args = get_args()
+    training_seed_arg = getattr(args, "seeds", None) if getattr(args, "seeds", None) is not None else args.seed
+    training_seeds = parse_training_seeds(training_seed_arg)
+    args.training_seeds = training_seeds
+    args.seed = int(training_seeds[0])
     final_test_seeds = parse_final_test_seeds(getattr(args, "final_test_seeds", None))
     if final_test_seeds is None:
         final_test_seeds = [int(args.final_test_seed)]
@@ -2601,7 +2714,7 @@ def main():
             noise_test_split_names = extra_noise_splits
     args.extra_test_protocols = extra_test_protocols
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
-    requested_models = [model.strip() for model in args.models.split(",") if model.strip()]
+    requested_models = parse_requested_models(args.models)
     valid_models = set(get_model_choices())
     invalid_models = [model for model in requested_models if model not in valid_models]
     if invalid_models:
@@ -2691,7 +2804,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
         print("=" * 72)
     elif args.ours_final_ablation_suite != "none":
         suite_name = args.ours_final_ablation_suite
@@ -2991,7 +3104,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
         print("=" * 72)
     elif args.spot_ablation_suite != "none":
         if requested_models != [MM_SPOT_MODEL_NAME]:
@@ -3069,7 +3182,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
         print("=" * 72)
     elif args.pare_ablation_suite != "none":
         if requested_models != [PARE_FSL_MODEL_NAME]:
@@ -3147,7 +3260,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
         print("=" * 72)
     elif args.sgpot_ablation_suite != "none":
         if requested_models != [SGPOT_MODEL_NAME]:
@@ -3224,7 +3337,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
         print("=" * 72)
     elif args.spifce_ablation_suite != "none":
         if requested_models != ["spifce"]:
@@ -3295,7 +3408,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} ablation experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
         print("=" * 72)
     elif parsed_mode_ids is not None:
         experiments = [
@@ -3347,7 +3460,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "experiment(s)"))
         print("=" * 72)
     elif args.mode_id is not None:
         samples = EXPERIMENT_MODES[args.mode_id]
@@ -3399,7 +3512,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} experiment(s)")
+        print(format_planned_total(experiments, training_seeds, "experiment(s)"))
         print("=" * 72)
     else:
         experiments = [
@@ -3453,57 +3566,77 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(f"Total       : {len(experiments)} experiments")
+        print(format_planned_total(experiments, training_seeds, "experiments"))
+        print("=" * 72)
+
+    total_runs = len(experiments) * len(training_seeds)
+    multiple_training_seeds = len(training_seeds) > 1
+    if multiple_training_seeds or str(getattr(args, "experiment_tag", "") or "").strip():
+        print("\n" + "=" * 72)
+        print("Run Expansion")
+        print("=" * 72)
+        print(format_training_seed_line(training_seeds))
+        if str(getattr(args, "experiment_tag", "") or "").strip():
+            print(f"Base Tag    : {args.experiment_tag}")
+        print(f"Runs        : {len(experiments)} experiment spec(s) x {len(training_seeds)} seed(s) = {total_runs}")
         print("=" * 72)
 
     success_count = 0
     failed_experiments = []
 
-    for idx, experiment in enumerate(experiments, 1):
-        model = experiment["model"]
-        samples = experiment["samples"]
-        shot = experiment["shot"]
-        print(f"\n[{idx}/{len(experiments)}]", end=" ")
-        success = run_experiment(
-            model=model,
-            shot=shot,
-            samples=samples,
-            dataset_path=args.dataset_path,
-            dataset_name=args.dataset_name,
-            project=args.project,
-            seed=args.seed,
-            final_test_seed=args.final_test_seed,
-            gpu_id=args.gpu_id,
-            fewshot_backbone=args.fewshot_backbone,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory,
-            persistent_workers=args.persistent_workers,
-            prefetch_factor=args.prefetch_factor,
-            spif_global_only=args.spif_global_only,
-            spif_local_only=args.spif_local_only,
-            test_protocol=effective_test_protocol,
-            noise_test_root=args.noise_test_root,
-            noise_test_splits=args.noise_test_splits,
-            passthrough_args=args.passthrough_args,
-            variant_args=experiment["variant_args"],
-            experiment_tag=experiment["experiment_tag"],
-            checkpoint_tag=experiment.get("checkpoint_tag"),
-            experiment_label=experiment["experiment_label"],
-            extra_final_test_seeds=args.extra_final_test_seeds,
-            extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
-            extra_noise_test_splits=experiment.get("extra_noise_test_splits"),
-            skip_existing=str(getattr(args, "skip_existing", "false")).lower() == "true",
-        )
-        if success:
-            success_count += 1
-        else:
-            tag_suffix = f"_{experiment['experiment_tag']}" if experiment["experiment_tag"] else ""
-            failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples{tag_suffix}")
+    for seed_index, train_seed in enumerate(training_seeds):
+        for experiment_index, experiment in enumerate(experiments, 1):
+            idx = seed_index * len(experiments) + experiment_index
+            model = experiment["model"]
+            samples = experiment["samples"]
+            shot = experiment["shot"]
+            experiment_tag, checkpoint_tag = build_effective_run_tags(
+                experiment,
+                args.experiment_tag,
+                train_seed,
+                multiple_training_seeds,
+            )
+            print(f"\n[{idx}/{total_runs}]", end=" ")
+            success = run_experiment(
+                model=model,
+                shot=shot,
+                samples=samples,
+                dataset_path=args.dataset_path,
+                dataset_name=args.dataset_name,
+                project=args.project,
+                seed=train_seed,
+                final_test_seed=args.final_test_seed,
+                gpu_id=args.gpu_id,
+                fewshot_backbone=args.fewshot_backbone,
+                num_workers=args.num_workers,
+                pin_memory=args.pin_memory,
+                persistent_workers=args.persistent_workers,
+                prefetch_factor=args.prefetch_factor,
+                spif_global_only=args.spif_global_only,
+                spif_local_only=args.spif_local_only,
+                test_protocol=effective_test_protocol,
+                noise_test_root=args.noise_test_root,
+                noise_test_splits=args.noise_test_splits,
+                passthrough_args=args.passthrough_args,
+                variant_args=experiment["variant_args"],
+                experiment_tag=experiment_tag,
+                checkpoint_tag=checkpoint_tag,
+                experiment_label=experiment["experiment_label"],
+                extra_final_test_seeds=args.extra_final_test_seeds,
+                extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
+                extra_noise_test_splits=experiment.get("extra_noise_test_splits"),
+                skip_existing=str(getattr(args, "skip_existing", "false")).lower() == "true",
+            )
+            if success:
+                success_count += 1
+            else:
+                tag_suffix = f"_{experiment_tag}" if experiment_tag else f"_seed{train_seed}"
+                failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples{tag_suffix}")
 
     print("\n" + "=" * 60)
     print("EXPERIMENT SUMMARY")
     print("=" * 60)
-    print(f"Total: {len(experiments)}")
+    print(f"Total: {total_runs}")
     print(f"Success: {success_count}")
     print(f"Failed: {len(failed_experiments)}")
     if failed_experiments:
