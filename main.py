@@ -1500,6 +1500,15 @@ def get_args():
     parser.add_argument("--adaptive_region_temperature_min", type=float, default=0.35)
     parser.add_argument("--adaptive_region_temperature_max", type=float, default=1.25)
     parser.add_argument(
+        "--adaptive_region_init_gate",
+        type=float,
+        default=0.05,
+        help=(
+            "Initial learnable gate for adaptive-region cost and marginal influence. "
+            "Small values make the model start close to Ours-Final."
+        ),
+    )
+    parser.add_argument(
         "--enable_pulse_region_uot",
         action="store_true",
         default=False,
@@ -3718,6 +3727,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "adaptive_region_fine_gate_quantile",
             "adaptive_region_temperature_min",
             "adaptive_region_temperature_max",
+            "adaptive_region_init_gate",
             "enable_pulse_region_uot",
             "pulse_region_kernel_size",
             "pulse_region_cost_weight",
@@ -4852,6 +4862,10 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "adaptive_region/num_slots",
         "adaptive_region/cost_discount",
         "adaptive_region/mass_mix",
+        "adaptive_region/cost_gate",
+        "adaptive_region/mass_gate",
+        "adaptive_region/effective_cost_discount",
+        "adaptive_region/effective_mass_mix",
         "adaptive_region/region_cost_mean",
         "adaptive_region/region_mass_mean",
         "adaptive_region/fine_affinity_peak",
@@ -5331,6 +5345,10 @@ def format_diagnostic_summary(metrics):
         "adaptive_region/num_slots",
         "adaptive_region/cost_discount",
         "adaptive_region/mass_mix",
+        "adaptive_region/cost_gate",
+        "adaptive_region/mass_gate",
+        "adaptive_region/effective_cost_discount",
+        "adaptive_region/effective_mass_mix",
         "adaptive_region/region_cost_mean",
         "adaptive_region/region_mass_mean",
         "adaptive_region/fine_affinity_peak",

@@ -290,6 +290,7 @@ class OursM2(JECOTM2):
         adaptive_region_fine_gate_quantile = float(kwargs.pop("adaptive_region_fine_gate_quantile", 0.40))
         adaptive_region_temperature_min = float(kwargs.pop("adaptive_region_temperature_min", 0.35))
         adaptive_region_temperature_max = float(kwargs.pop("adaptive_region_temperature_max", 1.25))
+        adaptive_region_init_gate = float(kwargs.pop("adaptive_region_init_gate", 0.05))
         enable_pulse_region_uot = _bool_config(kwargs.pop("enable_pulse_region_uot", False))
         pulse_region_kernel_size = int(kwargs.pop("pulse_region_kernel_size", 5))
         pulse_region_cost_weight = float(kwargs.pop("pulse_region_cost_weight", 0.35))
@@ -443,6 +444,7 @@ class OursM2(JECOTM2):
                 fine_gate_quantile=adaptive_region_fine_gate_quantile,
                 temperature_min=adaptive_region_temperature_min,
                 temperature_max=adaptive_region_temperature_max,
+                init_gate=adaptive_region_init_gate,
                 ground_cost=self.ground_cost,
                 eps=self.eps,
             )

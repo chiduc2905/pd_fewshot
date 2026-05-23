@@ -59,6 +59,7 @@ class AdaptiveRegionUOTGuidance(nn.Module):
         fine_gate_quantile: float = 0.40,
         temperature_min: float = 0.35,
         temperature_max: float = 1.25,
+        init_gate: float = 0.05,
         ground_cost: str = "euclidean",
         eps: float = 1e-8,
     ) -> None:
@@ -73,6 +74,7 @@ class AdaptiveRegionUOTGuidance(nn.Module):
         self.sinkhorn_tol = float(sinkhorn_tol)
         self.tau = float(tau)
         self.fine_gate_quantile = float(fine_gate_quantile)
+        self.init_gate = float(init_gate)
         self.ground_cost = str(ground_cost).strip().lower().replace("-", "_")
         self.eps = float(eps)
 
@@ -96,6 +98,8 @@ class AdaptiveRegionUOTGuidance(nn.Module):
             raise ValueError("adaptive_region temperatures must be positive")
         if temperature_max < temperature_min:
             raise ValueError("adaptive_region_temperature_max must be >= temperature_min")
+        if not 0.0 <= self.init_gate <= 1.0:
+            raise ValueError("adaptive_region_init_gate must be in [0, 1]")
         if self.ground_cost not in {"auto", "euclidean", "cosine"}:
             raise ValueError("adaptive_region ground_cost must be auto/euclidean/cosine")
 
@@ -112,6 +116,9 @@ class AdaptiveRegionUOTGuidance(nn.Module):
         else:
             init_temps = torch.linspace(float(temperature_min), float(temperature_max), self.num_slots)
         self.raw_slot_temperatures = nn.Parameter(_inverse_softplus_local(init_temps))
+        init_gate_tensor = torch.tensor(float(self.init_gate))
+        self.raw_cost_gate = nn.Parameter(_inverse_sigmoid_local(init_gate_tensor))
+        self.raw_mass_gate = nn.Parameter(_inverse_sigmoid_local(init_gate_tensor))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -292,13 +299,29 @@ class AdaptiveRegionUOTGuidance(nn.Module):
         )
         fine_affinity = fine_affinity / fine_affinity.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
         fine_gate = self._fine_low_cost_gate(flat_cost)
-        discount = (self.cost_discount * fine_affinity * fine_gate).clamp(min=0.0, max=self.cost_discount)
+        cost_gate = torch.sigmoid(self.raw_cost_gate).to(device=flat_cost.device, dtype=flat_cost.dtype)
+        mass_gate = torch.sigmoid(self.raw_mass_gate).to(device=flat_cost.device, dtype=flat_cost.dtype)
+        effective_cost_discount = (flat_cost.new_tensor(self.cost_discount) * cost_gate).clamp(
+            min=0.0,
+            max=self.cost_discount,
+        )
+        effective_mass_mix = (flat_cost.new_tensor(self.mass_mix) * mass_gate).clamp(
+            min=0.0,
+            max=self.mass_mix,
+        )
+        discount = (effective_cost_discount * fine_affinity * fine_gate).clamp(
+            min=0.0,
+            max=self.cost_discount,
+        )
         guided_cost = flat_cost * (1.0 - discount)
 
         query_uniform = query_token_prob.new_full(query_token_prob.shape, 1.0 / float(query_len))
         support_uniform = support_token_prob_flat.new_full(support_token_prob_flat.shape, 1.0 / float(support_len))
-        query_weight = (1.0 - self.mass_mix) * query_uniform + self.mass_mix * query_token_prob
-        support_weight_flat = (1.0 - self.mass_mix) * support_uniform + self.mass_mix * support_token_prob_flat
+        query_weight = (1.0 - effective_mass_mix) * query_uniform + effective_mass_mix * query_token_prob
+        support_weight_flat = (
+            (1.0 - effective_mass_mix) * support_uniform
+            + effective_mass_mix * support_token_prob_flat
+        )
         support_weight = support_weight_flat.reshape(int(way_num), int(shot_num), support_len)
 
         region_transport_cost = compute_transport_cost(region_plan, pair_region_cost).reshape(
@@ -351,6 +374,10 @@ class AdaptiveRegionUOTGuidance(nn.Module):
             "adaptive_region/num_slots": flat_cost.new_tensor(float(self.num_slots)),
             "adaptive_region/cost_discount": flat_cost.new_tensor(self.cost_discount),
             "adaptive_region/mass_mix": flat_cost.new_tensor(self.mass_mix),
+            "adaptive_region/cost_gate": cost_gate.detach(),
+            "adaptive_region/mass_gate": mass_gate.detach(),
+            "adaptive_region/effective_cost_discount": effective_cost_discount.detach(),
+            "adaptive_region/effective_mass_mix": effective_mass_mix.detach(),
             "adaptive_region/region_cost_mean": region_transport_cost.mean().detach(),
             "adaptive_region/region_mass_mean": region_transported_mass.mean().detach(),
             "adaptive_region/fine_affinity_peak": fine_affinity.amax(dim=(-1, -2)).mean().detach(),
@@ -377,6 +404,11 @@ class AdaptiveRegionUOTGuidance(nn.Module):
 
 def _inverse_softplus_local(value: torch.Tensor) -> torch.Tensor:
     return value + torch.log(-torch.expm1(-value.clamp_min(1e-8)))
+
+
+def _inverse_sigmoid_local(value: torch.Tensor) -> torch.Tensor:
+    value = value.clamp(1e-6, 1.0 - 1e-6)
+    return torch.log(value) - torch.log1p(-value)
 
 
 __all__ = ["AdaptiveRegionUOTGuidance", "parse_adaptive_region_kernels"]

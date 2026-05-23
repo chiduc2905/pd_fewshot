@@ -2768,6 +2768,9 @@ def build_model_from_args(args):
                             "adaptive_region_temperature_max": float(
                                 getattr(args, "adaptive_region_temperature_max", 1.25)
                             ),
+                            "adaptive_region_init_gate": float(
+                                getattr(args, "adaptive_region_init_gate", 0.05)
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_adaptive_region_uot", False), default=False)

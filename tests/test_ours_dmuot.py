@@ -176,6 +176,7 @@ def test_adaptive_region_uot_enabled_runs_and_exposes_diagnostics():
         adaptive_region_cost_discount=0.10,
         adaptive_region_mass_mix=0.7,
         adaptive_region_sinkhorn_iters=4,
+        adaptive_region_init_gate=0.03,
     )
     model.train()
     query, support = _episode()
@@ -198,6 +199,10 @@ def test_adaptive_region_uot_enabled_runs_and_exposes_diagnostics():
         "adaptive_region/num_slots",
         "adaptive_region/cost_discount",
         "adaptive_region/mass_mix",
+        "adaptive_region/cost_gate",
+        "adaptive_region/mass_gate",
+        "adaptive_region/effective_cost_discount",
+        "adaptive_region/effective_mass_mix",
         "adaptive_region/region_cost_mean",
         "adaptive_region/region_mass_mean",
         "adaptive_region/fine_affinity_peak",
@@ -213,6 +218,8 @@ def test_adaptive_region_uot_enabled_runs_and_exposes_diagnostics():
         assert torch.isfinite(outputs[key]), f"Non-finite diagnostic: {key}"
     assert model.adaptive_region_uot.slot_queries.grad is not None
     assert torch.isfinite(model.adaptive_region_uot.slot_queries.grad).all()
+    assert outputs["adaptive_region/cost_gate"].item() == pytest.approx(0.03, abs=1e-5)
+    assert outputs["adaptive_region/mass_gate"].item() == pytest.approx(0.03, abs=1e-5)
 
 
 def test_pot_guide_enabled_exposes_diagnostics_and_nonuniform_marginals():
@@ -436,6 +443,7 @@ def test_adaptive_region_uot_factory_flags_are_ours_final_only():
         adaptive_region_cost_discount=0.10,
         adaptive_region_mass_mix=0.7,
         adaptive_region_sinkhorn_iters=4,
+        adaptive_region_init_gate=0.03,
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -447,6 +455,7 @@ def test_adaptive_region_uot_factory_flags_are_ours_final_only():
     assert hasattr(ours_final, "adaptive_region_uot")
     assert ours_final.enable_adaptive_region_uot
     assert ours_final.adaptive_region_uot.num_slots == 3
+    assert torch.sigmoid(ours_final.adaptive_region_uot.raw_cost_gate).item() == pytest.approx(0.03, abs=1e-5)
 
     with pytest.raises(ValueError, match="--enable_adaptive_region_uot is supported only with --model ours_final"):
         build_model_from_args(
