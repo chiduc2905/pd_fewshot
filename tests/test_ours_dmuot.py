@@ -125,6 +125,42 @@ def test_multiscale_enabled_runs_and_exposes_diagnostics():
     assert torch.isfinite(model.scale_weights.grad).all()
 
 
+def test_region_structural_uot_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(506)
+    model = _tiny_ours_final(
+        enable_region_structural_uot=True,
+        region_uot_grid_size="2x2",
+        region_uot_strength=0.15,
+        region_uot_fgw_alpha=0.30,
+        region_uot_fgw_iters=1,
+        region_uot_sinkhorn_iters=4,
+    )
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.enable_region_structural_uot
+    assert hasattr(model, "region_structural_uot")
+    assert outputs["logits"].shape == (2, 2)
+    assert outputs["region_uot_coarse_plan"].shape[:4] == (2, 2, 1, 4)
+    assert outputs["region_uot_coarse_plan"].shape[-1] == 4
+    assert outputs["region_uot_guided_cost_matrix"].shape == outputs["cost_matrix"].shape
+    assert "base_cost_matrix" in outputs
+    for key in (
+        "region_uot/strength",
+        "region_uot/fgw_alpha",
+        "region_uot/coarse_mass_mean",
+        "region_uot/coarse_cost_mean",
+        "region_uot/affinity_peak",
+        "region_uot/cost_delta_ratio",
+    ):
+        assert key in outputs, f"Missing diagnostic key: {key}"
+        assert torch.isfinite(outputs[key]), f"Non-finite diagnostic: {key}"
+
+
 def test_pot_guide_enabled_exposes_diagnostics_and_nonuniform_marginals():
     torch.manual_seed(513)
     model = _tiny_ours_final(enable_pot_guide=True, pot_guide_max_iter=4)
@@ -286,6 +322,42 @@ def test_multiscale_factory_flags_are_ours_final_only():
     assert ours_final.scale_weights.shape == (2,)
 
     with pytest.raises(ValueError, match="--enable_multiscale_ot is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_region_structural_uot_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_region_structural_uot=True,
+        region_uot_grid_size="2x2",
+        region_uot_strength=0.15,
+        region_uot_fgw_alpha=0.30,
+        region_uot_fgw_iters=1,
+        region_uot_sinkhorn_iters=4,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "region_structural_uot")
+    assert ours_final.enable_region_structural_uot
+
+    with pytest.raises(ValueError, match="--enable_region_structural_uot is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
                 model="ours",

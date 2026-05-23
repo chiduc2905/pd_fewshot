@@ -1393,6 +1393,41 @@ def get_args():
         help="Dimension of the structural embedding projection (default 16).",
     )
     parser.add_argument(
+        "--enable_region_structural_uot",
+        action="store_true",
+        default=False,
+        help=(
+            "Ours-Final only: build a coarse feature-structural region UOT plan "
+            "and use it as a soft prior for fine-token UOT."
+        ),
+    )
+    parser.add_argument(
+        "--region_uot_grid_size",
+        type=str,
+        default="3x3",
+        help="Coarse region grid for structural UOT guidance, e.g. '3x3' or '4x4'.",
+    )
+    parser.add_argument(
+        "--region_uot_strength",
+        type=float,
+        default=0.20,
+        help="Cost discount strength from coarse region UOT guidance.",
+    )
+    parser.add_argument(
+        "--region_uot_fgw_alpha",
+        type=float,
+        default=0.35,
+        help="Structure-vs-feature FGW blend for coarse region UOT guidance.",
+    )
+    parser.add_argument(
+        "--region_uot_sinkhorn_epsilon",
+        type=float,
+        default=0.08,
+        help="Entropy epsilon for the coarse region UOT solver.",
+    )
+    parser.add_argument("--region_uot_fgw_iters", type=int, default=4)
+    parser.add_argument("--region_uot_sinkhorn_iters", type=int, default=40)
+    parser.add_argument(
         "--enable_pulse_region_uot",
         action="store_true",
         default=False,
@@ -3590,6 +3625,13 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "context_change_max",
             "enable_structural_augmentation",
             "struct_dim",
+            "enable_region_structural_uot",
+            "region_uot_grid_size",
+            "region_uot_strength",
+            "region_uot_fgw_alpha",
+            "region_uot_sinkhorn_epsilon",
+            "region_uot_fgw_iters",
+            "region_uot_sinkhorn_iters",
             "enable_pulse_region_uot",
             "pulse_region_kernel_size",
             "pulse_region_cost_weight",
@@ -4710,6 +4752,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "struct/struct_weight_norm",
         "struct/semantic_weight_norm",
         "struct/struct_vs_semantic_ratio",
+        "region_uot/strength",
+        "region_uot/fgw_alpha",
+        "region_uot/coarse_mass_mean",
+        "region_uot/coarse_cost_mean",
+        "region_uot/affinity_peak",
+        "region_uot/cost_delta_ratio",
         "pulse/region_cost_weight",
         "pulse/saliency_mass_mix",
         "pulse/saliency_cost_discount",
@@ -5165,6 +5213,12 @@ def format_diagnostic_summary(metrics):
         "struct/struct_weight_norm",
         "struct/semantic_weight_norm",
         "struct/struct_vs_semantic_ratio",
+        "region_uot/strength",
+        "region_uot/fgw_alpha",
+        "region_uot/coarse_mass_mean",
+        "region_uot/coarse_cost_mean",
+        "region_uot/affinity_peak",
+        "region_uot/cost_delta_ratio",
         "pulse/region_cost_weight",
         "pulse/saliency_mass_mix",
         "pulse/saliency_cost_discount",

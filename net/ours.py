@@ -25,6 +25,7 @@ from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
+from net.modules.region_structural_uot import RegionStructuralUOTGuidance
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.jecot_m2 import JECOTM2
@@ -267,6 +268,13 @@ class OursM2(JECOTM2):
         context_debug_max_episodes = int(kwargs.pop("context_debug_max_episodes", 3))
         enable_structural_augmentation = _bool_config(kwargs.pop("enable_structural_augmentation", False))
         struct_dim = int(kwargs.pop("struct_dim", 16))
+        enable_region_structural_uot = _bool_config(kwargs.pop("enable_region_structural_uot", False))
+        region_uot_grid_size = kwargs.pop("region_uot_grid_size", "3x3")
+        region_uot_strength = float(kwargs.pop("region_uot_strength", 0.20))
+        region_uot_fgw_alpha = float(kwargs.pop("region_uot_fgw_alpha", 0.35))
+        region_uot_sinkhorn_epsilon = float(kwargs.pop("region_uot_sinkhorn_epsilon", 0.08))
+        region_uot_fgw_iters = int(kwargs.pop("region_uot_fgw_iters", 4))
+        region_uot_sinkhorn_iters = int(kwargs.pop("region_uot_sinkhorn_iters", 40))
         enable_pulse_region_uot = _bool_config(kwargs.pop("enable_pulse_region_uot", False))
         pulse_region_kernel_size = int(kwargs.pop("pulse_region_kernel_size", 5))
         pulse_region_cost_weight = float(kwargs.pop("pulse_region_cost_weight", 0.35))
@@ -330,6 +338,15 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_multiscale_ot is not supported with ecot_episode_feature_normalize")
             if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
                 raise ValueError("enable_multiscale_ot is not supported with pre_transport_shot_pool")
+        if enable_region_structural_uot:
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_region_structural_uot is not supported with ours_ablation='gap'")
+            if enable_multiscale_ot:
+                raise ValueError("enable_region_structural_uot is not supported with enable_multiscale_ot")
+            if enable_pulse_region_uot:
+                raise ValueError("enable_region_structural_uot is not supported with enable_pulse_region_uot")
+            if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
+                raise ValueError("enable_region_structural_uot is not supported with pre_transport_shot_pool")
         if enable_pulse_region_uot:
             if self.ours_ablation == "gap":
                 raise ValueError("enable_pulse_region_uot is not supported with ours_ablation='gap'")
@@ -344,6 +361,7 @@ class OursM2(JECOTM2):
             **kwargs,
         )
         self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
+        self.enable_region_structural_uot = bool(enable_region_structural_uot)
         self._pulse_saliency_cache: list[torch.Tensor] | None = None
         self._homotopy_progress = 0.0
         self.pulse_saliency_image_weight = float(pulse_saliency_image_weight)
@@ -381,6 +399,19 @@ class OursM2(JECOTM2):
                 region_cost_weight=pulse_region_cost_weight,
                 saliency_mass_mix=pulse_saliency_mass_mix,
                 saliency_cost_discount=pulse_saliency_cost_discount,
+                ground_cost=self.ground_cost,
+                eps=self.eps,
+            )
+        if self.enable_region_structural_uot:
+            self.region_structural_uot = RegionStructuralUOTGuidance(
+                grid_size=region_uot_grid_size,
+                strength=region_uot_strength,
+                fgw_alpha=region_uot_fgw_alpha,
+                tau=float(self.tau_q),
+                sinkhorn_epsilon=region_uot_sinkhorn_epsilon,
+                fgw_iters=region_uot_fgw_iters,
+                sinkhorn_iters=region_uot_sinkhorn_iters,
+                sinkhorn_tol=self.sinkhorn_tolerance,
                 ground_cost=self.ground_cost,
                 eps=self.eps,
             )
@@ -1259,11 +1290,27 @@ class OursM2(JECOTM2):
             )
         dmuot_payload: dict[str, torch.Tensor] = {}
         pulse_payload: dict[str, torch.Tensor] = {}
+        region_uot_payload: dict[str, torch.Tensor] = {}
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
         if self.enable_pot_guide:
             self._last_pot_guide_diagnostics = None
+
+        if getattr(self, "enable_region_structural_uot", False):
+            if query_tokens is None or support_tokens is None or spatial_hw is None:
+                raise ValueError(
+                    "enable_region_structural_uot requires query_tokens, support_tokens, and spatial_hw"
+                )
+            cost_for_transport, region_uot_payload = self.region_structural_uot(
+                flat_cost=cost_for_transport,
+                query_tokens=query_tokens,
+                support_tokens=support_tokens,
+                way_num=way_num,
+                shot_num=shot_num,
+                spatial_hw=spatial_hw,
+                rho=self._ecot_base_rho_tensor(flat_cost),
+            )
 
         if getattr(self, "enable_pulse_region_uot", False):
             if query_tokens is None or support_tokens is None or spatial_hw is None:
@@ -1414,6 +1461,8 @@ class OursM2(JECOTM2):
             payload.update(dmuot_payload)
         if pulse_payload:
             payload.update(pulse_payload)
+        if region_uot_payload:
+            payload.update(region_uot_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         return payload
@@ -1633,6 +1682,9 @@ class OursM2(JECOTM2):
                 self._context_debug_images = []
                 self._context_debug_fmaps = []
         if isinstance(outputs, dict):
+            if "region_uot_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["region_uot_guided_cost_matrix"]
             if "pulse_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["pulse_guided_cost_matrix"]
@@ -1757,6 +1809,11 @@ class OursM2(JECOTM2):
             "pulse_query_marginal_weight",
             "pulse_region_cost_matrix",
             "pulse_guided_cost_matrix",
+            "region_uot_coarse_plan",
+            "region_uot_coarse_cost_matrix",
+            "region_uot_guided_cost_matrix",
+            "region_uot_coarse_transport_cost",
+            "region_uot_coarse_transported_mass",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -1805,7 +1862,7 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
-        for prefix in ("context/", "struct/", "pulse/"):
+        for prefix in ("context/", "struct/", "pulse/", "region_uot/"):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]
                 if values and all(torch.is_tensor(value) for value in values):

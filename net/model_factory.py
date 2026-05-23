@@ -232,6 +232,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_structural_augmentation is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_region_structural_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_region_structural_uot is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2700,6 +2704,24 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_structural_augmentation", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_region_structural_uot": True,
+                            "region_uot_grid_size": str(getattr(args, "region_uot_grid_size", "3x3")),
+                            "region_uot_strength": float(getattr(args, "region_uot_strength", 0.20)),
+                            "region_uot_fgw_alpha": float(getattr(args, "region_uot_fgw_alpha", 0.35)),
+                            "region_uot_sinkhorn_epsilon": float(
+                                getattr(args, "region_uot_sinkhorn_epsilon", 0.08)
+                            ),
+                            "region_uot_fgw_iters": int(getattr(args, "region_uot_fgw_iters", 4)),
+                            "region_uot_sinkhorn_iters": int(
+                                getattr(args, "region_uot_sinkhorn_iters", 40)
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_region_structural_uot", False), default=False)
                         else {}
                     ),
                     **(

@@ -879,6 +879,41 @@ def _transport_pair_payload(
     }
 
 
+def _region_transport_pair_payload(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    region_plan: torch.Tensor,
+    query_idx: int,
+    class_idx: int,
+    query_image: np.ndarray,
+    support_images: torch.Tensor,
+    way_num: int,
+    shot_num: int,
+    shot_idx: int | None = None,
+) -> dict[str, Any]:
+    if shot_idx is None:
+        shot_idx = _select_transport_shot(
+            outputs,
+            query_idx=query_idx,
+            class_idx=class_idx,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+    shot_idx = int(max(0, min(shot_idx, int(region_plan.shape[2]) - 1)))
+    pair_plan = region_plan[query_idx, class_idx, shot_idx].detach().float().cpu()
+    query_values = pair_plan.sum(dim=-1)
+    support_values = pair_plan.sum(dim=-2)
+    support_image = _ensure_numpy_image(support_images[class_idx, shot_idx])
+    return {
+        "shot_idx": shot_idx,
+        "pair_plan": pair_plan,
+        "pair_scores": pair_plan,
+        "query_heat": _token_values_to_heatmap(query_values, tuple(int(dim) for dim in query_image.shape)),
+        "support_heat": _token_values_to_heatmap(support_values, tuple(int(dim) for dim in support_image.shape)),
+        "support_image": support_image,
+    }
+
+
 def _transport_plan_by_shot(
     outputs: dict[str, Any] | torch.Tensor,
     *,
@@ -1159,9 +1194,15 @@ def _export_uot_paper_evidence_figure(
     max_matches: int = 6,
 ) -> list[dict[str, Any]]:
     way_num, shot_num = support_images.shape[:2]
+    region_plan = _matrix_by_shot(outputs, "region_uot_coarse_plan", way_num=way_num, shot_num=shot_num)
+    has_region_plan = region_plan is not None
     show_rival = way_num > 1
-    num_cols = 3 if show_rival else 2
-    width = 3.4 + (5.9 if show_rival else 6.1) * (num_cols - 1)
+    if has_region_plan:
+        num_cols = 4 if show_rival else 3
+        width = 3.4 + 5.55 * (num_cols - 1)
+    else:
+        num_cols = 3 if show_rival else 2
+        width = 3.4 + (5.9 if show_rival else 6.1) * (num_cols - 1)
     fig, axes = plt.subplots(
         len(query_indices),
         num_cols,
@@ -1218,41 +1259,86 @@ def _export_uot_paper_evidence_figure(
             way_num=way_num,
             shot_num=shot_num,
         )
+        primary_axis = 2 if has_region_plan else 1
+        if has_region_plan and region_plan is not None:
+            region_primary_payload = _region_transport_pair_payload(
+                outputs=outputs,
+                region_plan=region_plan,
+                query_idx=query_idx,
+                class_idx=primary_class,
+                query_image=query_np,
+                support_images=support_images,
+                way_num=way_num,
+                shot_num=shot_num,
+                shot_idx=int(primary_payload["shot_idx"]),
+            )
+            _plot_paper_transport_correspondence(
+                axes[row_idx, 1],
+                query_np,
+                region_primary_payload["support_image"],
+                region_primary_payload["pair_plan"],
+                region_primary_payload["query_heat"],
+                region_primary_payload["support_heat"],
+                pair_scores=region_primary_payload["pair_scores"],
+                title=f"(b) Region UOT prior: {_class_label(class_names, primary_class)}",
+                max_matches=max(4, min(max_matches, 5)),
+                accent="#0f766e" if primary_class == true_class else "#dc2626",
+                muted=False,
+            )
         primary_top_fraction, primary_max_fraction, primary_match_count = _plot_paper_transport_correspondence(
-            axes[row_idx, 1],
+            axes[row_idx, primary_axis],
             query_np,
             primary_payload["support_image"],
             primary_payload["pair_plan"],
             primary_payload["query_heat"],
             primary_payload["support_heat"],
             pair_scores=primary_payload["pair_scores"],
-            title=f"(b) UOT evidence: {_class_label(class_names, primary_class)}",
+            title=(
+                f"(c) Fine UOT evidence: {_class_label(class_names, primary_class)}"
+                if has_region_plan
+                else f"(b) UOT evidence: {_class_label(class_names, primary_class)}"
+            ),
             max_matches=max_matches,
             accent="#0f766e" if primary_class == true_class else "#dc2626",
             muted=False,
         )
 
         if show_rival:
-            rival_payload = _transport_pair_payload(
-                outputs=outputs,
-                plan=plan,
-                cost_matrix=cost_matrix,
-                query_idx=query_idx,
-                class_idx=rival_class,
-                query_image=query_np,
-                support_images=support_images,
-                way_num=way_num,
-                shot_num=shot_num,
-            )
+            rival_axis = 3 if has_region_plan else 2
+            if has_region_plan and region_plan is not None:
+                rival_payload = _region_transport_pair_payload(
+                    outputs=outputs,
+                    region_plan=region_plan,
+                    query_idx=query_idx,
+                    class_idx=rival_class,
+                    query_image=query_np,
+                    support_images=support_images,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                )
+                rival_title = f"(d) Region rival: {_class_label(class_names, rival_class)}"
+            else:
+                rival_payload = _transport_pair_payload(
+                    outputs=outputs,
+                    plan=plan,
+                    cost_matrix=cost_matrix,
+                    query_idx=query_idx,
+                    class_idx=rival_class,
+                    query_image=query_np,
+                    support_images=support_images,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                )
+                rival_title = f"(c) Closest rival: {_class_label(class_names, rival_class)}"
             _plot_paper_transport_correspondence(
-                axes[row_idx, 2],
+                axes[row_idx, rival_axis],
                 query_np,
                 rival_payload["support_image"],
                 rival_payload["pair_plan"],
                 rival_payload["query_heat"],
                 rival_payload["support_heat"],
                 pair_scores=rival_payload["pair_scores"],
-                title=f"(c) Closest rival: {_class_label(class_names, rival_class)}",
+                title=rival_title,
                 max_matches=max(3, max_matches - 1),
                 accent="#64748b",
                 muted=True,
