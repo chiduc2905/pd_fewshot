@@ -160,3 +160,56 @@ def test_export_uot_evidence_figure_paper_style_draws_region_uot_prior(tmp_path)
     assert save_path.stat().st_size > 0
     assert len(rows) == 1
     assert rows[0]["top_match_count"] == 3
+
+
+def test_export_uot_evidence_figure_paper_style_draws_adaptive_region_prior(tmp_path):
+    query_images = torch.rand(1, 1, 16, 16)
+    support_images = torch.rand(2, 1, 1, 16, 16)
+    fine_plan = torch.zeros(1, 2, 1, 4, 4)
+    fine_plan[0, 0, 0, 0, 0] = 0.30
+    fine_plan[0, 0, 0, 1, 1] = 0.22
+    fine_plan[0, 0, 0, 2, 2] = 0.16
+    fine_plan[0, 1, 0, 0, 3] = 0.12
+    region_plan = torch.zeros(1, 2, 1, 3, 3)
+    region_plan[0, 0, 0, 0, 0] = 0.25
+    region_plan[0, 0, 0, 1, 2] = 0.20
+    region_plan[0, 1, 0, 2, 1] = 0.13
+    query_masks = torch.tensor(
+        [
+            [
+                [0.70, 0.20, 0.05, 0.05],
+                [0.05, 0.70, 0.20, 0.05],
+                [0.05, 0.05, 0.20, 0.70],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    support_masks = query_masks.repeat(2, 1, 1, 1)
+    outputs = {
+        "transport_plan": fine_plan,
+        "adaptive_region_plan": region_plan,
+        "adaptive_region_query_masks": query_masks,
+        "adaptive_region_support_masks": support_masks,
+        "shot_transported_mass": fine_plan.sum(dim=(-1, -2)),
+        "shot_rho": torch.ones(1, 2, 1),
+    }
+    save_path = tmp_path / "uot_adaptive_region_paper.png"
+
+    rows = export_uot_evidence_figure(
+        outputs=outputs,
+        query_images=query_images,
+        support_images=support_images,
+        logits=torch.tensor([[2.0, 0.5]]),
+        preds=torch.tensor([0]),
+        targets=torch.tensor([0]),
+        class_names=["PD-A", "PD-B"],
+        save_path=str(save_path),
+        episode_index=7,
+        query_indices=[0],
+        visual_style="paper",
+    )
+
+    assert save_path.exists()
+    assert save_path.stat().st_size > 0
+    assert len(rows) == 1
+    assert rows[0]["top_match_count"] == 3

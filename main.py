@@ -1452,6 +1452,54 @@ def get_args():
         help="Temperature for cost-derived coarse region importance marginals.",
     )
     parser.add_argument(
+        "--enable_adaptive_region_uot",
+        action="store_true",
+        default=False,
+        help=(
+            "Ours-Final only: learn soft multi-scale region slots, match them with "
+            "region-level UOT, and use that plan to guide fine-token UOT."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive_region_num_slots",
+        type=int,
+        default=4,
+        help="Number of learned adaptive region slots per image.",
+    )
+    parser.add_argument(
+        "--adaptive_region_context_kernels",
+        type=str,
+        default="1,3,5",
+        help="Odd spatial smoothing kernels for adaptive region slot logits.",
+    )
+    parser.add_argument(
+        "--adaptive_region_cost_discount",
+        type=float,
+        default=0.12,
+        help="Maximum fine-token cost discount from adaptive region UOT affinity.",
+    )
+    parser.add_argument(
+        "--adaptive_region_mass_mix",
+        type=float,
+        default=0.60,
+        help="Blend between uniform token mass and learned adaptive-region token mass.",
+    )
+    parser.add_argument(
+        "--adaptive_region_sinkhorn_epsilon",
+        type=float,
+        default=0.08,
+        help="Entropy epsilon for adaptive region-level UOT.",
+    )
+    parser.add_argument("--adaptive_region_sinkhorn_iters", type=int, default=30)
+    parser.add_argument(
+        "--adaptive_region_fine_gate_quantile",
+        type=float,
+        default=0.40,
+        help="Only fine-token pairs below this cost quantile receive adaptive-region discount.",
+    )
+    parser.add_argument("--adaptive_region_temperature_min", type=float, default=0.35)
+    parser.add_argument("--adaptive_region_temperature_max", type=float, default=1.25)
+    parser.add_argument(
         "--enable_pulse_region_uot",
         action="store_true",
         default=False,
@@ -3660,6 +3708,16 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "region_uot_fine_gate_quantile",
             "region_uot_min_confidence",
             "region_uot_importance_temperature",
+            "enable_adaptive_region_uot",
+            "adaptive_region_num_slots",
+            "adaptive_region_context_kernels",
+            "adaptive_region_cost_discount",
+            "adaptive_region_mass_mix",
+            "adaptive_region_sinkhorn_epsilon",
+            "adaptive_region_sinkhorn_iters",
+            "adaptive_region_fine_gate_quantile",
+            "adaptive_region_temperature_min",
+            "adaptive_region_temperature_max",
             "enable_pulse_region_uot",
             "pulse_region_kernel_size",
             "pulse_region_cost_weight",
@@ -4791,6 +4849,19 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "region_uot/effective_strength_mean",
         "region_uot/fine_gate_mean",
         "region_uot/cost_delta_ratio",
+        "adaptive_region/num_slots",
+        "adaptive_region/cost_discount",
+        "adaptive_region/mass_mix",
+        "adaptive_region/region_cost_mean",
+        "adaptive_region/region_mass_mean",
+        "adaptive_region/fine_affinity_peak",
+        "adaptive_region/fine_gate_mean",
+        "adaptive_region/cost_delta_ratio",
+        "adaptive_region/query_weight_peak",
+        "adaptive_region/support_weight_peak",
+        "adaptive_region/query_effective_area",
+        "adaptive_region/support_effective_area",
+        "adaptive_region/context_kernel_entropy",
         "pulse/region_cost_weight",
         "pulse/saliency_mass_mix",
         "pulse/saliency_cost_discount",
@@ -5257,6 +5328,19 @@ def format_diagnostic_summary(metrics):
         "region_uot/effective_strength_mean",
         "region_uot/fine_gate_mean",
         "region_uot/cost_delta_ratio",
+        "adaptive_region/num_slots",
+        "adaptive_region/cost_discount",
+        "adaptive_region/mass_mix",
+        "adaptive_region/region_cost_mean",
+        "adaptive_region/region_mass_mean",
+        "adaptive_region/fine_affinity_peak",
+        "adaptive_region/fine_gate_mean",
+        "adaptive_region/cost_delta_ratio",
+        "adaptive_region/query_weight_peak",
+        "adaptive_region/support_weight_peak",
+        "adaptive_region/query_effective_area",
+        "adaptive_region/support_effective_area",
+        "adaptive_region/context_kernel_entropy",
         "pulse/region_cost_weight",
         "pulse/saliency_mass_mix",
         "pulse/saliency_cost_discount",

@@ -914,6 +914,72 @@ def _region_transport_pair_payload(
     }
 
 
+def _adaptive_region_masks(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    way_num: int,
+    shot_num: int,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if not isinstance(outputs, dict):
+        return None, None
+    query_masks = _safe_detach_tensor(outputs.get("adaptive_region_query_masks"))
+    support_masks = _safe_detach_tensor(outputs.get("adaptive_region_support_masks"))
+    if query_masks is None or support_masks is None:
+        return None, None
+    query_masks = query_masks.float().cpu()
+    support_masks = support_masks.float().cpu()
+    if query_masks.dim() == 4 and query_masks.shape[0] == 1:
+        query_masks = query_masks.squeeze(0)
+    if support_masks.dim() == 5 and support_masks.shape[0] == 1:
+        support_masks = support_masks.squeeze(0)
+    if query_masks.dim() != 3:
+        return None, None
+    if support_masks.dim() != 4 or support_masks.shape[0] != way_num or support_masks.shape[1] != shot_num:
+        return None, None
+    return query_masks, support_masks
+
+
+def _adaptive_region_transport_pair_payload(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    region_plan: torch.Tensor,
+    query_masks: torch.Tensor,
+    support_masks: torch.Tensor,
+    query_idx: int,
+    class_idx: int,
+    query_image: np.ndarray,
+    support_images: torch.Tensor,
+    way_num: int,
+    shot_num: int,
+    shot_idx: int | None = None,
+) -> dict[str, Any]:
+    if shot_idx is None:
+        shot_idx = _select_transport_shot(
+            outputs,
+            query_idx=query_idx,
+            class_idx=class_idx,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+    shot_idx = int(max(0, min(shot_idx, int(region_plan.shape[2]) - 1)))
+    pair_region_plan = region_plan[query_idx, class_idx, shot_idx].detach().float().cpu()
+    q_masks = query_masks[query_idx].detach().float().cpu()
+    s_masks = support_masks[class_idx, shot_idx].detach().float().cpu()
+    pair_plan = torch.matmul(torch.matmul(q_masks.transpose(0, 1), pair_region_plan), s_masks)
+    pair_plan = torch.nan_to_num(pair_plan, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    query_values = pair_plan.sum(dim=-1)
+    support_values = pair_plan.sum(dim=-2)
+    support_image = _ensure_numpy_image(support_images[class_idx, shot_idx])
+    return {
+        "shot_idx": shot_idx,
+        "pair_plan": pair_plan,
+        "pair_scores": pair_plan,
+        "query_heat": _token_values_to_heatmap(query_values, tuple(int(dim) for dim in query_image.shape)),
+        "support_heat": _token_values_to_heatmap(support_values, tuple(int(dim) for dim in support_image.shape)),
+        "support_image": support_image,
+    }
+
+
 def _transport_plan_by_shot(
     outputs: dict[str, Any] | torch.Tensor,
     *,
@@ -1197,6 +1263,14 @@ def _export_uot_paper_evidence_figure(
     region_plan = _matrix_by_shot(outputs, "region_uot_sparse_coarse_plan", way_num=way_num, shot_num=shot_num)
     if region_plan is None:
         region_plan = _matrix_by_shot(outputs, "region_uot_coarse_plan", way_num=way_num, shot_num=shot_num)
+    region_source = "Region UOT prior"
+    adaptive_region_masks: tuple[torch.Tensor | None, torch.Tensor | None] = (None, None)
+    if region_plan is None:
+        adaptive_region_plan = _matrix_by_shot(outputs, "adaptive_region_plan", way_num=way_num, shot_num=shot_num)
+        adaptive_region_masks = _adaptive_region_masks(outputs, way_num=way_num, shot_num=shot_num)
+        if adaptive_region_plan is not None and adaptive_region_masks[0] is not None and adaptive_region_masks[1] is not None:
+            region_plan = adaptive_region_plan
+            region_source = "Adaptive region prior"
     has_region_plan = region_plan is not None
     show_rival = way_num > 1
     if has_region_plan:
@@ -1263,17 +1337,32 @@ def _export_uot_paper_evidence_figure(
         )
         primary_axis = 2 if has_region_plan else 1
         if has_region_plan and region_plan is not None:
-            region_primary_payload = _region_transport_pair_payload(
-                outputs=outputs,
-                region_plan=region_plan,
-                query_idx=query_idx,
-                class_idx=primary_class,
-                query_image=query_np,
-                support_images=support_images,
-                way_num=way_num,
-                shot_num=shot_num,
-                shot_idx=int(primary_payload["shot_idx"]),
-            )
+            if region_source.startswith("Adaptive") and adaptive_region_masks[0] is not None and adaptive_region_masks[1] is not None:
+                region_primary_payload = _adaptive_region_transport_pair_payload(
+                    outputs=outputs,
+                    region_plan=region_plan,
+                    query_masks=adaptive_region_masks[0],
+                    support_masks=adaptive_region_masks[1],
+                    query_idx=query_idx,
+                    class_idx=primary_class,
+                    query_image=query_np,
+                    support_images=support_images,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    shot_idx=int(primary_payload["shot_idx"]),
+                )
+            else:
+                region_primary_payload = _region_transport_pair_payload(
+                    outputs=outputs,
+                    region_plan=region_plan,
+                    query_idx=query_idx,
+                    class_idx=primary_class,
+                    query_image=query_np,
+                    support_images=support_images,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    shot_idx=int(primary_payload["shot_idx"]),
+                )
             _plot_paper_transport_correspondence(
                 axes[row_idx, 1],
                 query_np,
@@ -1282,7 +1371,7 @@ def _export_uot_paper_evidence_figure(
                 region_primary_payload["query_heat"],
                 region_primary_payload["support_heat"],
                 pair_scores=region_primary_payload["pair_scores"],
-                title=f"(b) Region UOT prior: {_class_label(class_names, primary_class)}",
+                title=f"(b) {region_source}: {_class_label(class_names, primary_class)}",
                 max_matches=max(4, min(max_matches, 5)),
                 accent="#0f766e" if primary_class == true_class else "#dc2626",
                 muted=False,
@@ -1308,17 +1397,31 @@ def _export_uot_paper_evidence_figure(
         if show_rival:
             rival_axis = 3 if has_region_plan else 2
             if has_region_plan and region_plan is not None:
-                rival_payload = _region_transport_pair_payload(
-                    outputs=outputs,
-                    region_plan=region_plan,
-                    query_idx=query_idx,
-                    class_idx=rival_class,
-                    query_image=query_np,
-                    support_images=support_images,
-                    way_num=way_num,
-                    shot_num=shot_num,
-                )
-                rival_title = f"(d) Region rival: {_class_label(class_names, rival_class)}"
+                if region_source.startswith("Adaptive") and adaptive_region_masks[0] is not None and adaptive_region_masks[1] is not None:
+                    rival_payload = _adaptive_region_transport_pair_payload(
+                        outputs=outputs,
+                        region_plan=region_plan,
+                        query_masks=adaptive_region_masks[0],
+                        support_masks=adaptive_region_masks[1],
+                        query_idx=query_idx,
+                        class_idx=rival_class,
+                        query_image=query_np,
+                        support_images=support_images,
+                        way_num=way_num,
+                        shot_num=shot_num,
+                    )
+                else:
+                    rival_payload = _region_transport_pair_payload(
+                        outputs=outputs,
+                        region_plan=region_plan,
+                        query_idx=query_idx,
+                        class_idx=rival_class,
+                        query_image=query_np,
+                        support_images=support_images,
+                        way_num=way_num,
+                        shot_num=shot_num,
+                    )
+                rival_title = f"(d) {region_source} rival: {_class_label(class_names, rival_class)}"
             else:
                 rival_payload = _transport_pair_payload(
                     outputs=outputs,

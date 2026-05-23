@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from net.fewshot_common import feature_map_to_tokens
 from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
+from net.modules.adaptive_region_uot import AdaptiveRegionUOTGuidance
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
 from net.modules.region_structural_uot import RegionStructuralUOTGuidance
@@ -279,6 +280,16 @@ class OursM2(JECOTM2):
         region_uot_fine_gate_quantile = float(kwargs.pop("region_uot_fine_gate_quantile", 0.35))
         region_uot_min_confidence = float(kwargs.pop("region_uot_min_confidence", 0.10))
         region_uot_importance_temperature = float(kwargs.pop("region_uot_importance_temperature", 0.50))
+        enable_adaptive_region_uot = _bool_config(kwargs.pop("enable_adaptive_region_uot", False))
+        adaptive_region_num_slots = int(kwargs.pop("adaptive_region_num_slots", 4))
+        adaptive_region_context_kernels = kwargs.pop("adaptive_region_context_kernels", "1,3,5")
+        adaptive_region_cost_discount = float(kwargs.pop("adaptive_region_cost_discount", 0.12))
+        adaptive_region_mass_mix = float(kwargs.pop("adaptive_region_mass_mix", 0.60))
+        adaptive_region_sinkhorn_epsilon = float(kwargs.pop("adaptive_region_sinkhorn_epsilon", 0.08))
+        adaptive_region_sinkhorn_iters = int(kwargs.pop("adaptive_region_sinkhorn_iters", 30))
+        adaptive_region_fine_gate_quantile = float(kwargs.pop("adaptive_region_fine_gate_quantile", 0.40))
+        adaptive_region_temperature_min = float(kwargs.pop("adaptive_region_temperature_min", 0.35))
+        adaptive_region_temperature_max = float(kwargs.pop("adaptive_region_temperature_max", 1.25))
         enable_pulse_region_uot = _bool_config(kwargs.pop("enable_pulse_region_uot", False))
         pulse_region_kernel_size = int(kwargs.pop("pulse_region_kernel_size", 5))
         pulse_region_cost_weight = float(kwargs.pop("pulse_region_cost_weight", 0.35))
@@ -351,6 +362,17 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_region_structural_uot is not supported with enable_pulse_region_uot")
             if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
                 raise ValueError("enable_region_structural_uot is not supported with pre_transport_shot_pool")
+        if enable_adaptive_region_uot:
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_adaptive_region_uot is not supported with ours_ablation='gap'")
+            if enable_multiscale_ot:
+                raise ValueError("enable_adaptive_region_uot is not supported with enable_multiscale_ot")
+            if enable_region_structural_uot:
+                raise ValueError("enable_adaptive_region_uot is not supported with enable_region_structural_uot")
+            if enable_pulse_region_uot:
+                raise ValueError("enable_adaptive_region_uot is not supported with enable_pulse_region_uot")
+            if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
+                raise ValueError("enable_adaptive_region_uot is not supported with pre_transport_shot_pool")
         if enable_pulse_region_uot:
             if self.ours_ablation == "gap":
                 raise ValueError("enable_pulse_region_uot is not supported with ours_ablation='gap'")
@@ -366,6 +388,7 @@ class OursM2(JECOTM2):
         )
         self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
         self.enable_region_structural_uot = bool(enable_region_structural_uot)
+        self.enable_adaptive_region_uot = bool(enable_adaptive_region_uot)
         self._pulse_saliency_cache: list[torch.Tensor] | None = None
         self._homotopy_progress = 0.0
         self.pulse_saliency_image_weight = float(pulse_saliency_image_weight)
@@ -403,6 +426,23 @@ class OursM2(JECOTM2):
                 region_cost_weight=pulse_region_cost_weight,
                 saliency_mass_mix=pulse_saliency_mass_mix,
                 saliency_cost_discount=pulse_saliency_cost_discount,
+                ground_cost=self.ground_cost,
+                eps=self.eps,
+            )
+        if self.enable_adaptive_region_uot:
+            self.adaptive_region_uot = AdaptiveRegionUOTGuidance(
+                token_dim=self.token_dim,
+                num_slots=adaptive_region_num_slots,
+                context_kernels=adaptive_region_context_kernels,
+                cost_discount=adaptive_region_cost_discount,
+                mass_mix=adaptive_region_mass_mix,
+                sinkhorn_epsilon=adaptive_region_sinkhorn_epsilon,
+                sinkhorn_iters=adaptive_region_sinkhorn_iters,
+                sinkhorn_tol=self.sinkhorn_tolerance,
+                tau=float(self.tau_q),
+                fine_gate_quantile=adaptive_region_fine_gate_quantile,
+                temperature_min=adaptive_region_temperature_min,
+                temperature_max=adaptive_region_temperature_max,
                 ground_cost=self.ground_cost,
                 eps=self.eps,
             )
@@ -726,6 +766,7 @@ class OursM2(JECOTM2):
             or self.uses_ours_gap_control
             or getattr(self, "enable_structural_augmentation", False)
             or getattr(self, "enable_pulse_region_uot", False)
+            or getattr(self, "enable_adaptive_region_uot", False)
         )
         if not need_local:
             return super()._encode_images(images)
@@ -751,6 +792,7 @@ class OursM2(JECOTM2):
             self.token_g_kind == "token_norm_pre_l2"
             or getattr(self, "enable_structural_augmentation", False)
             or getattr(self, "enable_pulse_region_uot", False)
+            or getattr(self, "enable_adaptive_region_uot", False)
         )
         if not need_local:
             return super()._project_tokens_from_images(images)
@@ -772,6 +814,7 @@ class OursM2(JECOTM2):
             self.token_g_kind == "token_norm_pre_l2"
             or getattr(self, "enable_structural_augmentation", False)
             or getattr(self, "enable_pulse_region_uot", False)
+            or getattr(self, "enable_adaptive_region_uot", False)
         )
         if not need_local:
             return super()._encode_images_with_amp_norms(images)
@@ -1299,6 +1342,7 @@ class OursM2(JECOTM2):
         dmuot_payload: dict[str, torch.Tensor] = {}
         pulse_payload: dict[str, torch.Tensor] = {}
         region_uot_payload: dict[str, torch.Tensor] = {}
+        adaptive_region_payload: dict[str, torch.Tensor] = {}
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
@@ -1319,6 +1363,29 @@ class OursM2(JECOTM2):
                 spatial_hw=spatial_hw,
                 rho=self._ecot_base_rho_tensor(flat_cost),
             )
+
+        if getattr(self, "enable_adaptive_region_uot", False):
+            if query_tokens is None or support_tokens is None or spatial_hw is None:
+                raise ValueError(
+                    "enable_adaptive_region_uot requires query_tokens, support_tokens, and spatial_hw"
+                )
+            (
+                adaptive_guided_cost,
+                adaptive_query_weight,
+                adaptive_support_weight,
+                adaptive_region_payload,
+            ) = self.adaptive_region_uot(
+                flat_cost=cost_for_transport,
+                query_tokens=query_tokens,
+                support_tokens=support_tokens,
+                way_num=way_num,
+                shot_num=shot_num,
+                spatial_hw=spatial_hw,
+                rho=self._ecot_base_rho_tensor(flat_cost),
+            )
+            cost_for_transport = adaptive_guided_cost
+            query_weight = self._combine_token_weight(query_weight, adaptive_query_weight)
+            support_weight = self._combine_token_weight(support_weight, adaptive_support_weight)
 
         if getattr(self, "enable_pulse_region_uot", False):
             if query_tokens is None or support_tokens is None or spatial_hw is None:
@@ -1471,6 +1538,8 @@ class OursM2(JECOTM2):
             payload.update(pulse_payload)
         if region_uot_payload:
             payload.update(region_uot_payload)
+        if adaptive_region_payload:
+            payload.update(adaptive_region_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         return payload
@@ -1696,6 +1765,9 @@ class OursM2(JECOTM2):
             if "pulse_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["pulse_guided_cost_matrix"]
+            if "adaptive_region_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["adaptive_region_guided_cost_matrix"]
             if self.lambda_cost > 0.0 and "cost_matrix_modulated" in outputs:
                 if "base_cost_matrix" not in outputs and "cost_matrix" in outputs:
                     outputs["base_cost_matrix"] = outputs["cost_matrix"]
@@ -1823,12 +1895,21 @@ class OursM2(JECOTM2):
             "region_uot_guided_cost_matrix",
             "region_uot_coarse_transport_cost",
             "region_uot_coarse_transported_mass",
+            "adaptive_region_query_masks",
+            "adaptive_region_guided_cost_matrix",
+            "adaptive_region_plan",
+            "adaptive_region_cost_matrix",
+            "adaptive_region_transport_cost",
+            "adaptive_region_transported_mass",
+            "adaptive_region_query_weight",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
         for key in (
             "pulse_support_saliency",
             "pulse_support_marginal_weight",
+            "adaptive_region_support_masks",
+            "adaptive_region_support_weight",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
@@ -1871,7 +1952,7 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
-        for prefix in ("context/", "struct/", "pulse/", "region_uot/"):
+        for prefix in ("context/", "struct/", "pulse/", "region_uot/", "adaptive_region/"):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]
                 if values and all(torch.is_tensor(value) for value in values):

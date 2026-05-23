@@ -167,6 +167,54 @@ def test_region_structural_uot_enabled_runs_and_exposes_diagnostics():
         assert torch.isfinite(outputs[key]), f"Non-finite diagnostic: {key}"
 
 
+def test_adaptive_region_uot_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(505)
+    model = _tiny_ours_final(
+        enable_adaptive_region_uot=True,
+        adaptive_region_num_slots=3,
+        adaptive_region_context_kernels="1,3",
+        adaptive_region_cost_discount=0.10,
+        adaptive_region_mass_mix=0.7,
+        adaptive_region_sinkhorn_iters=4,
+    )
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.enable_adaptive_region_uot
+    assert hasattr(model, "adaptive_region_uot")
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert outputs["adaptive_region_plan"].shape[:4] == (2, 2, 1, 3)
+    assert outputs["adaptive_region_plan"].shape[-1] == 3
+    assert outputs["adaptive_region_guided_cost_matrix"].shape == outputs["cost_matrix"].shape
+    assert outputs["adaptive_region_query_masks"].shape[:2] == (2, 3)
+    assert outputs["adaptive_region_support_masks"].shape[1:4] == (2, 1, 3)
+    assert "base_cost_matrix" in outputs
+    for key in (
+        "adaptive_region/num_slots",
+        "adaptive_region/cost_discount",
+        "adaptive_region/mass_mix",
+        "adaptive_region/region_cost_mean",
+        "adaptive_region/region_mass_mean",
+        "adaptive_region/fine_affinity_peak",
+        "adaptive_region/fine_gate_mean",
+        "adaptive_region/cost_delta_ratio",
+        "adaptive_region/query_weight_peak",
+        "adaptive_region/support_weight_peak",
+        "adaptive_region/query_effective_area",
+        "adaptive_region/support_effective_area",
+        "adaptive_region/context_kernel_entropy",
+    ):
+        assert key in outputs, f"Missing diagnostic key: {key}"
+        assert torch.isfinite(outputs[key]), f"Non-finite diagnostic: {key}"
+    assert model.adaptive_region_uot.slot_queries.grad is not None
+    assert torch.isfinite(model.adaptive_region_uot.slot_queries.grad).all()
+
+
 def test_pot_guide_enabled_exposes_diagnostics_and_nonuniform_marginals():
     torch.manual_seed(513)
     model = _tiny_ours_final(enable_pot_guide=True, pot_guide_max_iter=4)
@@ -364,6 +412,43 @@ def test_region_structural_uot_factory_flags_are_ours_final_only():
     assert ours_final.enable_region_structural_uot
 
     with pytest.raises(ValueError, match="--enable_region_structural_uot is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_adaptive_region_uot_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_adaptive_region_uot=True,
+        adaptive_region_num_slots=3,
+        adaptive_region_context_kernels="1,3",
+        adaptive_region_cost_discount=0.10,
+        adaptive_region_mass_mix=0.7,
+        adaptive_region_sinkhorn_iters=4,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "adaptive_region_uot")
+    assert ours_final.enable_adaptive_region_uot
+    assert ours_final.adaptive_region_uot.num_slots == 3
+
+    with pytest.raises(ValueError, match="--enable_adaptive_region_uot is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
                 model="ours",

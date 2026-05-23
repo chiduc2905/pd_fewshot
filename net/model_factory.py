@@ -236,6 +236,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_region_structural_uot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_adaptive_region_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_adaptive_region_uot is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2732,6 +2736,41 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_region_structural_uot", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_adaptive_region_uot": True,
+                            "adaptive_region_num_slots": int(
+                                getattr(args, "adaptive_region_num_slots", 4)
+                            ),
+                            "adaptive_region_context_kernels": str(
+                                getattr(args, "adaptive_region_context_kernels", "1,3,5")
+                            ),
+                            "adaptive_region_cost_discount": float(
+                                getattr(args, "adaptive_region_cost_discount", 0.12)
+                            ),
+                            "adaptive_region_mass_mix": float(
+                                getattr(args, "adaptive_region_mass_mix", 0.60)
+                            ),
+                            "adaptive_region_sinkhorn_epsilon": float(
+                                getattr(args, "adaptive_region_sinkhorn_epsilon", 0.08)
+                            ),
+                            "adaptive_region_sinkhorn_iters": int(
+                                getattr(args, "adaptive_region_sinkhorn_iters", 30)
+                            ),
+                            "adaptive_region_fine_gate_quantile": float(
+                                getattr(args, "adaptive_region_fine_gate_quantile", 0.40)
+                            ),
+                            "adaptive_region_temperature_min": float(
+                                getattr(args, "adaptive_region_temperature_min", 0.35)
+                            ),
+                            "adaptive_region_temperature_max": float(
+                                getattr(args, "adaptive_region_temperature_max", 1.25)
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_adaptive_region_uot", False), default=False)
                         else {}
                     ),
                     **(
