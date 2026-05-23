@@ -270,11 +270,15 @@ class OursM2(JECOTM2):
         struct_dim = int(kwargs.pop("struct_dim", 16))
         enable_region_structural_uot = _bool_config(kwargs.pop("enable_region_structural_uot", False))
         region_uot_grid_size = kwargs.pop("region_uot_grid_size", "3x3")
-        region_uot_strength = float(kwargs.pop("region_uot_strength", 0.20))
+        region_uot_strength = float(kwargs.pop("region_uot_strength", 0.08))
         region_uot_fgw_alpha = float(kwargs.pop("region_uot_fgw_alpha", 0.35))
         region_uot_sinkhorn_epsilon = float(kwargs.pop("region_uot_sinkhorn_epsilon", 0.08))
         region_uot_fgw_iters = int(kwargs.pop("region_uot_fgw_iters", 4))
         region_uot_sinkhorn_iters = int(kwargs.pop("region_uot_sinkhorn_iters", 40))
+        region_uot_topk = int(kwargs.pop("region_uot_topk", 3))
+        region_uot_fine_gate_quantile = float(kwargs.pop("region_uot_fine_gate_quantile", 0.35))
+        region_uot_min_confidence = float(kwargs.pop("region_uot_min_confidence", 0.10))
+        region_uot_importance_temperature = float(kwargs.pop("region_uot_importance_temperature", 0.50))
         enable_pulse_region_uot = _bool_config(kwargs.pop("enable_pulse_region_uot", False))
         pulse_region_kernel_size = int(kwargs.pop("pulse_region_kernel_size", 5))
         pulse_region_cost_weight = float(kwargs.pop("pulse_region_cost_weight", 0.35))
@@ -413,6 +417,10 @@ class OursM2(JECOTM2):
                 sinkhorn_iters=region_uot_sinkhorn_iters,
                 sinkhorn_tol=self.sinkhorn_tolerance,
                 ground_cost=self.ground_cost,
+                topk=region_uot_topk,
+                fine_gate_quantile=region_uot_fine_gate_quantile,
+                min_confidence=region_uot_min_confidence,
+                importance_temperature=region_uot_importance_temperature,
                 eps=self.eps,
             )
         if enable_multiscale_ot:
@@ -1810,6 +1818,7 @@ class OursM2(JECOTM2):
             "pulse_region_cost_matrix",
             "pulse_guided_cost_matrix",
             "region_uot_coarse_plan",
+            "region_uot_sparse_coarse_plan",
             "region_uot_coarse_cost_matrix",
             "region_uot_guided_cost_matrix",
             "region_uot_coarse_transport_cost",

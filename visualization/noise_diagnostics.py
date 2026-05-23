@@ -1194,7 +1194,9 @@ def _export_uot_paper_evidence_figure(
     max_matches: int = 6,
 ) -> list[dict[str, Any]]:
     way_num, shot_num = support_images.shape[:2]
-    region_plan = _matrix_by_shot(outputs, "region_uot_coarse_plan", way_num=way_num, shot_num=shot_num)
+    region_plan = _matrix_by_shot(outputs, "region_uot_sparse_coarse_plan", way_num=way_num, shot_num=shot_num)
+    if region_plan is None:
+        region_plan = _matrix_by_shot(outputs, "region_uot_coarse_plan", way_num=way_num, shot_num=shot_num)
     has_region_plan = region_plan is not None
     show_rival = way_num > 1
     if has_region_plan:

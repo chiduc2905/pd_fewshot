@@ -1410,7 +1410,7 @@ def get_args():
     parser.add_argument(
         "--region_uot_strength",
         type=float,
-        default=0.20,
+        default=0.08,
         help="Cost discount strength from coarse region UOT guidance.",
     )
     parser.add_argument(
@@ -1427,6 +1427,30 @@ def get_args():
     )
     parser.add_argument("--region_uot_fgw_iters", type=int, default=4)
     parser.add_argument("--region_uot_sinkhorn_iters", type=int, default=40)
+    parser.add_argument(
+        "--region_uot_topk",
+        type=int,
+        default=3,
+        help="Keep only the top-k coarse region matches when guiding fine-token costs.",
+    )
+    parser.add_argument(
+        "--region_uot_fine_gate_quantile",
+        type=float,
+        default=0.35,
+        help="Only fine-token pairs below this per-pair cost quantile receive region-UOT discount.",
+    )
+    parser.add_argument(
+        "--region_uot_min_confidence",
+        type=float,
+        default=0.10,
+        help="Minimum top-k coarse-plan mass ratio before region UOT can affect fine costs.",
+    )
+    parser.add_argument(
+        "--region_uot_importance_temperature",
+        type=float,
+        default=0.50,
+        help="Temperature for cost-derived coarse region importance marginals.",
+    )
     parser.add_argument(
         "--enable_pulse_region_uot",
         action="store_true",
@@ -3632,6 +3656,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "region_uot_sinkhorn_epsilon",
             "region_uot_fgw_iters",
             "region_uot_sinkhorn_iters",
+            "region_uot_topk",
+            "region_uot_fine_gate_quantile",
+            "region_uot_min_confidence",
+            "region_uot_importance_temperature",
             "enable_pulse_region_uot",
             "pulse_region_kernel_size",
             "pulse_region_cost_weight",
@@ -4754,9 +4782,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "struct/struct_vs_semantic_ratio",
         "region_uot/strength",
         "region_uot/fgw_alpha",
+        "region_uot/topk",
         "region_uot/coarse_mass_mean",
         "region_uot/coarse_cost_mean",
         "region_uot/affinity_peak",
+        "region_uot/sparse_mass_ratio",
+        "region_uot/importance_confidence",
+        "region_uot/effective_strength_mean",
+        "region_uot/fine_gate_mean",
         "region_uot/cost_delta_ratio",
         "pulse/region_cost_weight",
         "pulse/saliency_mass_mix",
@@ -5215,9 +5248,14 @@ def format_diagnostic_summary(metrics):
         "struct/struct_vs_semantic_ratio",
         "region_uot/strength",
         "region_uot/fgw_alpha",
+        "region_uot/topk",
         "region_uot/coarse_mass_mean",
         "region_uot/coarse_cost_mean",
         "region_uot/affinity_peak",
+        "region_uot/sparse_mass_ratio",
+        "region_uot/importance_confidence",
+        "region_uot/effective_strength_mean",
+        "region_uot/fine_gate_mean",
         "region_uot/cost_delta_ratio",
         "pulse/region_cost_weight",
         "pulse/saliency_mass_mix",

@@ -2710,7 +2710,7 @@ def build_model_from_args(args):
                         {
                             "enable_region_structural_uot": True,
                             "region_uot_grid_size": str(getattr(args, "region_uot_grid_size", "3x3")),
-                            "region_uot_strength": float(getattr(args, "region_uot_strength", 0.20)),
+                            "region_uot_strength": float(getattr(args, "region_uot_strength", 0.08)),
                             "region_uot_fgw_alpha": float(getattr(args, "region_uot_fgw_alpha", 0.35)),
                             "region_uot_sinkhorn_epsilon": float(
                                 getattr(args, "region_uot_sinkhorn_epsilon", 0.08)
@@ -2718,6 +2718,16 @@ def build_model_from_args(args):
                             "region_uot_fgw_iters": int(getattr(args, "region_uot_fgw_iters", 4)),
                             "region_uot_sinkhorn_iters": int(
                                 getattr(args, "region_uot_sinkhorn_iters", 40)
+                            ),
+                            "region_uot_topk": int(getattr(args, "region_uot_topk", 3)),
+                            "region_uot_fine_gate_quantile": float(
+                                getattr(args, "region_uot_fine_gate_quantile", 0.35)
+                            ),
+                            "region_uot_min_confidence": float(
+                                getattr(args, "region_uot_min_confidence", 0.10)
+                            ),
+                            "region_uot_importance_temperature": float(
+                                getattr(args, "region_uot_importance_temperature", 0.50)
                             ),
                         }
                         if is_ours_final_model

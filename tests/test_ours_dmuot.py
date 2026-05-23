@@ -147,14 +147,20 @@ def test_region_structural_uot_enabled_runs_and_exposes_diagnostics():
     assert outputs["logits"].shape == (2, 2)
     assert outputs["region_uot_coarse_plan"].shape[:4] == (2, 2, 1, 4)
     assert outputs["region_uot_coarse_plan"].shape[-1] == 4
+    assert outputs["region_uot_sparse_coarse_plan"].shape == outputs["region_uot_coarse_plan"].shape
     assert outputs["region_uot_guided_cost_matrix"].shape == outputs["cost_matrix"].shape
     assert "base_cost_matrix" in outputs
     for key in (
         "region_uot/strength",
         "region_uot/fgw_alpha",
+        "region_uot/topk",
         "region_uot/coarse_mass_mean",
         "region_uot/coarse_cost_mean",
         "region_uot/affinity_peak",
+        "region_uot/sparse_mass_ratio",
+        "region_uot/importance_confidence",
+        "region_uot/effective_strength_mean",
+        "region_uot/fine_gate_mean",
         "region_uot/cost_delta_ratio",
     ):
         assert key in outputs, f"Missing diagnostic key: {key}"

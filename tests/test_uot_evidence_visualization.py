@@ -136,6 +136,7 @@ def test_export_uot_evidence_figure_paper_style_draws_region_uot_prior(tmp_path)
     outputs = {
         "transport_plan": fine_plan,
         "region_uot_coarse_plan": region_plan,
+        "region_uot_sparse_coarse_plan": region_plan,
         "shot_transported_mass": fine_plan.sum(dim=(-1, -2)),
         "shot_rho": torch.ones(1, 2, 1),
     }

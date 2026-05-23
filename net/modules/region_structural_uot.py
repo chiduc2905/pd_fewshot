@@ -73,6 +73,14 @@ def _normalized_region_coordinates(
     return torch.stack([grid_y.reshape(-1), grid_x.reshape(-1)], dim=-1)
 
 
+def _entropy_confidence(prob: torch.Tensor, eps: float) -> torch.Tensor:
+    count = int(prob.shape[-1])
+    if count <= 1:
+        return torch.ones(prob.shape[:-1], device=prob.device, dtype=prob.dtype)
+    entropy = -(prob.clamp_min(eps) * prob.clamp_min(eps).log()).sum(dim=-1)
+    return (1.0 - entropy / math.log(float(count))).clamp(0.0, 1.0)
+
+
 class RegionStructuralUOTGuidance(nn.Module):
     """Coarse region UOT prior for fine-token transport costs."""
 
@@ -88,6 +96,10 @@ class RegionStructuralUOTGuidance(nn.Module):
         sinkhorn_iters: int = 40,
         sinkhorn_tol: float = 1e-5,
         ground_cost: str = "euclidean",
+        topk: int = 3,
+        fine_gate_quantile: float = 0.35,
+        min_confidence: float = 0.10,
+        importance_temperature: float = 0.50,
         eps: float = 1e-8,
     ) -> None:
         super().__init__()
@@ -100,6 +112,10 @@ class RegionStructuralUOTGuidance(nn.Module):
         self.sinkhorn_iters = int(sinkhorn_iters)
         self.sinkhorn_tol = float(sinkhorn_tol)
         self.ground_cost = str(ground_cost).strip().lower().replace("-", "_")
+        self.topk = int(topk)
+        self.fine_gate_quantile = float(fine_gate_quantile)
+        self.min_confidence = float(min_confidence)
+        self.importance_temperature = float(importance_temperature)
         self.eps = float(eps)
         if not 0.0 <= self.strength < 1.0:
             raise ValueError("region_uot_strength must be in [0, 1)")
@@ -113,6 +129,14 @@ class RegionStructuralUOTGuidance(nn.Module):
             raise ValueError("region_uot solver iteration counts must be positive")
         if self.ground_cost not in {"auto", "euclidean", "cosine"}:
             raise ValueError("region_uot ground_cost must be auto/euclidean/cosine")
+        if self.topk <= 0:
+            raise ValueError("region_uot_topk must be positive")
+        if not 0.0 < self.fine_gate_quantile < 1.0:
+            raise ValueError("region_uot_fine_gate_quantile must be in (0, 1)")
+        if not 0.0 <= self.min_confidence < 1.0:
+            raise ValueError("region_uot_min_confidence must be in [0, 1)")
+        if self.importance_temperature <= 0.0:
+            raise ValueError("region_uot_importance_temperature must be positive")
 
     def _pool_regions(self, tokens: torch.Tensor, spatial_hw: tuple[int, int]) -> torch.Tensor:
         if tokens.dim() != 3:
@@ -137,6 +161,45 @@ class RegionStructuralUOTGuidance(nn.Module):
         support_sq = support_regions.pow(2).sum(dim=-1)
         dot = torch.einsum("qrd,psd->qprs", query_regions, support_regions)
         return (query_sq[:, None, :, None] + support_sq[None, :, None, :] - 2.0 * dot).clamp_min(0.0)
+
+    def _importance_from_cost(self, pair_cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cost_scale = pair_cost.detach().std(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        scaled_cost = pair_cost / (cost_scale * self.importance_temperature)
+        query_logits = -scaled_cost.amin(dim=-1)
+        support_logits = -scaled_cost.amin(dim=-2)
+        query_prob = torch.softmax(query_logits, dim=-1).clamp_min(self.eps)
+        support_prob = torch.softmax(support_logits, dim=-1).clamp_min(self.eps)
+        query_prob = query_prob / query_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        support_prob = support_prob / support_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        confidence = 0.5 * (
+            _entropy_confidence(query_prob, self.eps) + _entropy_confidence(support_prob, self.eps)
+        )
+        return query_prob, support_prob, confidence.detach()
+
+    def _sparse_plan_and_confidence(self, plan: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch, rows, cols = plan.shape
+        flat = plan.reshape(batch, rows * cols)
+        topk = min(self.topk, int(flat.shape[-1]))
+        _, indices = torch.topk(flat.detach(), k=topk, dim=-1)
+        mask = torch.zeros_like(flat)
+        mask.scatter_(dim=-1, index=indices, value=1.0)
+        sparse_plan = plan * mask.reshape_as(plan)
+        total_mass = plan.sum(dim=(-1, -2)).clamp_min(self.eps)
+        sparse_mass_ratio = sparse_plan.sum(dim=(-1, -2)) / total_mass
+        confidence = ((sparse_mass_ratio - self.min_confidence) / (1.0 - self.min_confidence)).clamp(0.0, 1.0)
+        return sparse_plan, confidence.detach()
+
+    def _fine_low_cost_gate(self, flat_cost: torch.Tensor) -> torch.Tensor:
+        cost_flat = flat_cost.detach().reshape(flat_cost.shape[0], flat_cost.shape[1], -1)
+        threshold = torch.quantile(cost_flat, q=self.fine_gate_quantile, dim=-1).reshape(
+            flat_cost.shape[0],
+            flat_cost.shape[1],
+            1,
+            1,
+        )
+        scale = flat_cost.detach().std(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        gate = torch.sigmoid((threshold - flat_cost.detach()) / (0.25 * scale))
+        return gate
 
     def forward(
         self,
@@ -181,6 +244,7 @@ class RegionStructuralUOTGuidance(nn.Module):
         pair_cost = feature_cost.reshape(batch, region_count, region_count)
         structure_q = structure.unsqueeze(0).expand(batch, -1, -1)
         structure_s = structure.unsqueeze(0).expand(batch, -1, -1)
+        query_prob, support_prob, importance_confidence = self._importance_from_cost(pair_cost)
 
         rho_tensor = torch.as_tensor(rho, device=flat_cost.device, dtype=flat_cost.dtype)
         if rho_tensor.numel() == 1:
@@ -197,8 +261,8 @@ class RegionStructuralUOTGuidance(nn.Module):
                     f"got {rho_tensor.shape}"
                 )
         rho_flat = rho_flat.clamp_min(self.eps)
-        log_a = torch.log(rho_flat[:, None] / float(region_count)).expand(batch, region_count)
-        log_b = torch.log(rho_flat[:, None] / float(region_count)).expand(batch, region_count)
+        log_a = torch.log((rho_flat[:, None] * query_prob).clamp_min(self.eps))
+        log_b = torch.log((rho_flat[:, None] * support_prob).clamp_min(self.eps))
 
         coarse_plan, coarse_cost = fgw_uot_solve(
             pair_cost,
@@ -215,7 +279,9 @@ class RegionStructuralUOTGuidance(nn.Module):
         )
         coarse_plan = torch.nan_to_num(coarse_plan, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
         coarse_cost = torch.nan_to_num(coarse_cost, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        plan_norm = coarse_plan / coarse_plan.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        sparse_plan, sparse_confidence = self._sparse_plan_and_confidence(coarse_plan)
+        plan_confidence = (sparse_confidence * importance_confidence).reshape(num_query, num_pairs, 1, 1)
+        plan_norm = sparse_plan / sparse_plan.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
 
         assignment = _token_grid_assignments(
             spatial_hw,
@@ -231,8 +297,12 @@ class RegionStructuralUOTGuidance(nn.Module):
         fine_affinity = torch.matmul(torch.matmul(assignment, plan_norm), assignment.transpose(0, 1))
         fine_affinity = fine_affinity.reshape(num_query, num_pairs, query_len, support_len)
         fine_affinity = fine_affinity / fine_affinity.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        fine_gate = self._fine_low_cost_gate(flat_cost)
 
-        discount = (self.strength * fine_affinity).clamp(min=0.0, max=self.strength)
+        discount = (self.strength * plan_confidence * fine_affinity * fine_gate).clamp(
+            min=0.0,
+            max=self.strength,
+        )
         guided_cost = flat_cost * (1.0 - discount)
 
         coarse_plan_view = coarse_plan.reshape(
@@ -255,8 +325,19 @@ class RegionStructuralUOTGuidance(nn.Module):
             int(shot_num),
         )
         coarse_transport_mass = coarse_plan.sum(dim=(-1, -2)).reshape(num_query, int(way_num), int(shot_num))
+        sparse_mass_ratio = (
+            sparse_plan.sum(dim=(-1, -2)) / coarse_plan.sum(dim=(-1, -2)).clamp_min(self.eps)
+        ).reshape(num_query, int(way_num), int(shot_num))
+        effective_strength = discount.detach().amax(dim=(-1, -2)).reshape(num_query, int(way_num), int(shot_num))
         payload = {
             "region_uot_coarse_plan": coarse_plan_view.detach(),
+            "region_uot_sparse_coarse_plan": sparse_plan.reshape(
+                num_query,
+                int(way_num),
+                int(shot_num),
+                region_count,
+                region_count,
+            ).detach(),
             "region_uot_coarse_cost_matrix": coarse_cost_view.detach(),
             "region_uot_guided_cost_matrix": guided_cost.reshape(
                 num_query,
@@ -269,13 +350,17 @@ class RegionStructuralUOTGuidance(nn.Module):
             "region_uot_coarse_transported_mass": coarse_transport_mass.detach(),
             "region_uot/strength": flat_cost.new_tensor(self.strength),
             "region_uot/fgw_alpha": flat_cost.new_tensor(self.fgw_alpha),
+            "region_uot/topk": flat_cost.new_tensor(float(self.topk)),
             "region_uot/coarse_mass_mean": coarse_transport_mass.mean().detach(),
             "region_uot/coarse_cost_mean": coarse_transport_cost.mean().detach(),
             "region_uot/affinity_peak": fine_affinity.amax(dim=(-1, -2)).mean().detach(),
+            "region_uot/sparse_mass_ratio": sparse_mass_ratio.mean().detach(),
+            "region_uot/importance_confidence": importance_confidence.mean().detach(),
+            "region_uot/effective_strength_mean": effective_strength.mean().detach(),
+            "region_uot/fine_gate_mean": fine_gate.mean().detach(),
             "region_uot/cost_delta_ratio": (
                 (guided_cost.detach() - flat_cost.detach()).abs().mean()
                 / flat_cost.detach().abs().mean().clamp_min(self.eps)
             ),
         }
         return guided_cost, payload
-
