@@ -24,6 +24,8 @@ EVAL_QUERY_NUM = 1
 TRAIN_EPISODES_PER_EPOCH = 130
 TEST_EPISODES_PER_EPOCH = 150
 DEFAULT_FINAL_TEST_SEED = 200042
+DEFAULT_SELECTION_BASE_SEED = 42
+DEFAULT_SELECTION_EPISODE_SEED_OFFSET = 100000
 FIXED_CUDNN_DETERMINISTIC = "true"
 FIXED_CUDNN_BENCHMARK = "false"
 DEEPEMD_5SHOT_TRAIN_SOLVER = "sinkhorn"
@@ -150,6 +152,15 @@ def get_args():
         help=(
             "Fixed final-test episode seed passed to main.py. "
             "Default keeps the previous seed-42 benchmark episodes."
+        ),
+    )
+    parser.add_argument(
+        "--selection_seed",
+        type=int,
+        default=DEFAULT_SELECTION_BASE_SEED,
+        help=(
+            "Base seed used for val/model-selection episodes. "
+            "Default keeps validation episodes identical to the original --seed 42 run."
         ),
     )
     parser.add_argument(
@@ -1819,6 +1830,7 @@ def run_experiment(
     extra_test_protocols=None,
     extra_noise_test_splits=None,
     skip_existing=False,
+    selection_seed=DEFAULT_SELECTION_BASE_SEED,
 ):
     applied_backbone = resolve_backbone_for_model(model, fewshot_backbone)
 
@@ -1832,10 +1844,12 @@ def run_experiment(
         print(f"Tag         : {experiment_tag}")
     if checkpoint_tag and checkpoint_tag != experiment_tag:
         print(f"Ckpt Tag    : {checkpoint_tag}")
+    selection_offset = selection_episode_seed_offset(seed, selection_seed)
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
     print(f"Backbone    : {applied_backbone}")
     print(f"Train Seed  : {seed}")
+    print(f"Val Seed    : {selection_seed}+{DEFAULT_SELECTION_EPISODE_SEED_OFFSET}+epoch")
     print(f"Test Proto  : {test_protocol}")
     checkpoint_path = build_best_checkpoint_path(
         dataset_name=dataset_name,
@@ -2002,7 +2016,7 @@ def run_experiment(
                 "--selection_episode_seed_mode",
                 "per_epoch",
                 "--selection_episode_seed_offset",
-                "100000",
+                str(selection_offset),
                 "--final_test_seed",
                 str(final_test_seed),
             ]
@@ -2330,6 +2344,10 @@ def build_effective_run_tags(experiment, base_experiment_tag, seed, multiple_tra
     experiment_tag = join_result_tags(base_tag, variant_tag)
     checkpoint_tag = join_result_tags(base_tag, variant_checkpoint_tag or variant_tag)
     return experiment_tag, checkpoint_tag
+
+
+def selection_episode_seed_offset(train_seed, selection_seed):
+    return DEFAULT_SELECTION_EPISODE_SEED_OFFSET + int(selection_seed) - int(train_seed)
 
 
 def parse_rho_values(rho_values_str):
@@ -3605,6 +3623,7 @@ def main():
                 dataset_name=args.dataset_name,
                 project=args.project,
                 seed=train_seed,
+                selection_seed=args.selection_seed,
                 final_test_seed=args.final_test_seed,
                 gpu_id=args.gpu_id,
                 fewshot_backbone=args.fewshot_backbone,
