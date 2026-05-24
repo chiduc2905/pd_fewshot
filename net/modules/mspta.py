@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from net.fewshot_common import feature_map_to_tokens
 
 
-MSPTA_MASS_MODES = frozenset({"area", "balanced_area", "uniform"})
+MSPTA_MASS_MODES = frozenset({"area", "balanced_area", "compact_area", "uniform"})
 
 
 @dataclass(frozen=True)
@@ -76,23 +76,66 @@ class MSPTATokenizer(nn.Module):
     mass_mode='area' preserves the standalone MSPTA script exactly: each token
     gets nominal k*k area.  mass_mode='balanced_area' gives every scale the
     same total budget while still making coarser tokens heavier within that
-    scale, which is usually better behaved for small Ours-Final feature maps.
+    scale.  mass_mode='compact_area' keeps the same scale balance but shifts
+    mass inside each scale away from full-height vertical-band saliency.
     """
 
     def __init__(
         self,
         scales: str | Sequence[int | str] = (1, 2, 3),
         mass_mode: str = "area",
+        compact_floor: float = 0.05,
+        vertical_suppression: float = 1.0,
     ) -> None:
         super().__init__()
         self.scales = parse_mspta_scales(scales)
         self.mass_mode = normalize_mspta_mass_mode(mass_mode)
+        if not 0.0 <= float(compact_floor) <= 1.0:
+            raise ValueError("compact_floor must be in [0, 1]")
+        if float(vertical_suppression) < 0.0:
+            raise ValueError("vertical_suppression must be non-negative")
+        self.compact_floor = float(compact_floor)
+        self.vertical_suppression = float(vertical_suppression)
         self.scale_names = tuple("fine" if scale == 1 else f"s{scale}" for scale in self.scales)
 
-    def forward(self, feature_map: torch.Tensor) -> list[MSPTAScaleTokens]:
+    def _compact_guidance(self, feature_map: torch.Tensor, guidance_map: torch.Tensor | None) -> torch.Tensor:
+        if guidance_map is None:
+            guidance = feature_map.detach().float().norm(dim=1, keepdim=True)
+        else:
+            guidance = guidance_map.detach().float()
+            if guidance.dim() != 4:
+                raise ValueError(f"guidance_map must have shape (B, 1, H, W), got {tuple(guidance.shape)}")
+            if guidance.shape[1] != 1:
+                guidance = guidance.mean(dim=1, keepdim=True)
+            if guidance.shape[-2:] != feature_map.shape[-2:]:
+                guidance = F.interpolate(
+                    guidance,
+                    size=feature_map.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+        g_min = guidance.amin(dim=(-2, -1), keepdim=True)
+        guidance = guidance - g_min
+        g_max = guidance.amax(dim=(-2, -1), keepdim=True)
+        eps = torch.finfo(guidance.dtype).eps
+        guidance = guidance / g_max.clamp_min(eps)
+        column_profile = guidance.mean(dim=2, keepdim=True)
+        compact = (guidance - float(self.vertical_suppression) * column_profile).clamp_min(0.0)
+        return compact.to(device=feature_map.device, dtype=feature_map.dtype)
+
+    def forward(
+        self,
+        feature_map: torch.Tensor,
+        guidance_map: torch.Tensor | None = None,
+    ) -> list[MSPTAScaleTokens]:
         if feature_map.dim() != 4:
             raise ValueError(f"Expected a 4D feature map, got shape={tuple(feature_map.shape)}")
         batch_size, _, height, width = feature_map.shape
+        compact_guidance = (
+            self._compact_guidance(feature_map, guidance_map)
+            if self.mass_mode == "compact_area"
+            else None
+        )
         records: list[MSPTAScaleTokens] = []
         for name, scale in zip(self.scale_names, self.scales):
             if scale == 1:
@@ -111,6 +154,15 @@ class MSPTATokenizer(nn.Module):
                     (batch_size, token_count),
                     float(height * width) / float(token_count),
                 )
+            elif self.mass_mode == "compact_area":
+                pooled_guidance = F.adaptive_avg_pool2d(compact_guidance, output_size=spatial_hw)
+                token_guidance = feature_map_to_tokens(pooled_guidance).squeeze(-1).clamp_min(0.0)
+                uniform = feature_map.new_full((batch_size, token_count), 1.0 / float(token_count))
+                guidance_sum = token_guidance.sum(dim=-1, keepdim=True)
+                token_prob = token_guidance / guidance_sum.clamp_min(torch.finfo(feature_map.dtype).eps)
+                token_prob = torch.where(guidance_sum > 0.0, token_prob, uniform)
+                floor = feature_map.new_tensor(float(self.compact_floor))
+                raw_weight = (1.0 - floor) * token_prob + floor * uniform
             else:
                 raw_weight = feature_map.new_full((batch_size, token_count), float(scale * scale))
             records.append(

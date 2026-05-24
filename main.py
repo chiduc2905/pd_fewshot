@@ -1360,11 +1360,12 @@ def get_args():
     parser.add_argument(
         "--mspta_mass_mode",
         type=str,
-        default="balanced_area",
-        choices=["balanced_area", "area", "uniform"],
+        default="compact_area",
+        choices=["compact_area", "balanced_area", "area", "uniform"],
         help=(
-            "MSPTA token marginal mode. balanced_area gives each scale equal total budget "
-            "while coarser tokens stay heavier; area uses the standalone script's nominal k*k coverage; "
+            "MSPTA token marginal mode. compact_area gives each scale equal total budget and suppresses "
+            "full-height vertical-band saliency; balanced_area gives each scale equal total budget; "
+            "area uses the standalone script's nominal k*k coverage; "
             "uniform gives all pyramid tokens equal mass."
         ),
     )
@@ -1385,6 +1386,31 @@ def get_args():
         type=int,
         default=0,
         help="Compatibility flag from standalone MSPTA. Use 0 or match --hrot_token_dim for Ours-Final.",
+    )
+    parser.add_argument(
+        "--mspta_compact_floor",
+        type=float,
+        default=0.05,
+        help="Uniform floor mixed into compact_area token weights to avoid hard saliency collapse.",
+    )
+    parser.add_argument(
+        "--mspta_vertical_suppression",
+        type=float,
+        default=1.0,
+        help="Column-profile subtraction strength for compact_area MSPTA marginals.",
+    )
+    parser.add_argument(
+        "--mspta_saliency_cost_discount",
+        type=float,
+        default=0.10,
+        help="Cost discount applied when both query/support MSPTA tokens have high pulse saliency.",
+    )
+    parser.add_argument(
+        "--mspta_guidance_source",
+        type=str,
+        default="mixed",
+        choices=["mixed", "image", "feature"],
+        help="Guidance map used by compact_area MSPTA marginals.",
     )
     parser.add_argument(
         "--mspta_learnable_weights",
@@ -3755,6 +3781,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "mspta_mass_mode",
             "mspta_normalize",
             "mspta_proj_dim",
+            "mspta_compact_floor",
+            "mspta_vertical_suppression",
+            "mspta_saliency_cost_discount",
+            "mspta_guidance_source",
             "mspta_learnable_weights",
             "enable_context_enrichment",
             "context_kernel_sizes",
@@ -4920,6 +4950,8 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "mspta/scale_multiplier_fine",
         "mspta/scale_multiplier_s2",
         "mspta/scale_multiplier_s3",
+        "mspta/saliency_cost_discount",
+        "mspta/cost_delta_ratio",
         "context/gate_value",
         "context/branch_weight_original",
         "context/branch_weight_conv3",
@@ -5425,6 +5457,8 @@ def format_diagnostic_summary(metrics):
         "mspta/scale_multiplier_fine",
         "mspta/scale_multiplier_s2",
         "mspta/scale_multiplier_s3",
+        "mspta/saliency_cost_discount",
+        "mspta/cost_delta_ratio",
         "context/gate_value",
         "context/branch_weight_original",
         "context/branch_weight_conv3",

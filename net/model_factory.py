@@ -2675,12 +2675,20 @@ def build_model_from_args(args):
                         {
                             "enable_mspta": True,
                             "mspta_scales": getattr(args, "mspta_scales", (1, 2, 3)),
-                            "mspta_mass_mode": str(getattr(args, "mspta_mass_mode", "balanced_area")),
+                            "mspta_mass_mode": str(getattr(args, "mspta_mass_mode", "compact_area")),
                             "mspta_normalize": _bool_flag(
                                 getattr(args, "mspta_normalize", True),
                                 default=True,
                             ),
                             "mspta_proj_dim": int(getattr(args, "mspta_proj_dim", 0)),
+                            "mspta_compact_floor": float(getattr(args, "mspta_compact_floor", 0.05)),
+                            "mspta_vertical_suppression": float(
+                                getattr(args, "mspta_vertical_suppression", 1.0)
+                            ),
+                            "mspta_saliency_cost_discount": float(
+                                getattr(args, "mspta_saliency_cost_discount", 0.10)
+                            ),
+                            "mspta_guidance_source": str(getattr(args, "mspta_guidance_source", "mixed")),
                             "mspta_learnable_weights": _bool_flag(
                                 getattr(args, "mspta_learnable_weights", False),
                                 default=False,

@@ -51,6 +51,7 @@ TOKEN_G_KINDS = frozenset({"none", "episode_mean_dist", "token_norm_pre_l2", "le
 DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
 DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
 PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_only"})
+MSPTA_GUIDANCE_SOURCES = frozenset({"image", "feature", "mixed"})
 
 
 def normalize_ours_ablation(value: str | None) -> str:
@@ -221,6 +222,23 @@ def _normalize_pulse_train_schedule(value: str | None) -> str:
     return name
 
 
+def _normalize_mspta_guidance_source(value: str | None) -> str:
+    name = "mixed" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "both": "mixed",
+        "input": "image",
+        "img": "image",
+        "feat": "feature",
+    }
+    name = aliases.get(name, name)
+    if name not in MSPTA_GUIDANCE_SOURCES:
+        raise ValueError(
+            f"Unsupported mspta_guidance_source: {value}. "
+            f"Expected one of {sorted(MSPTA_GUIDANCE_SOURCES)}"
+        )
+    return name
+
+
 def _infer_token_hw(num_tokens: int) -> tuple[int, int]:
     if num_tokens <= 0:
         raise ValueError("num_tokens must be positive")
@@ -262,10 +280,16 @@ class OursM2(JECOTM2):
         multiscale_per_scale_T = _bool_config(kwargs.pop("multiscale_per_scale_T", False))
         enable_mspta = _bool_config(kwargs.pop("enable_mspta", False))
         mspta_scales = kwargs.pop("mspta_scales", "1,2,3")
-        mspta_mass_mode = str(kwargs.pop("mspta_mass_mode", "balanced_area"))
+        mspta_mass_mode = str(kwargs.pop("mspta_mass_mode", "compact_area"))
         mspta_normalize = _bool_config(kwargs.pop("mspta_normalize", True))
         mspta_proj_dim = int(kwargs.pop("mspta_proj_dim", 0))
         mspta_learnable_weights = _bool_config(kwargs.pop("mspta_learnable_weights", False))
+        mspta_compact_floor = float(kwargs.pop("mspta_compact_floor", 0.05))
+        mspta_vertical_suppression = float(kwargs.pop("mspta_vertical_suppression", 1.0))
+        mspta_saliency_cost_discount = float(kwargs.pop("mspta_saliency_cost_discount", 0.10))
+        mspta_guidance_source = _normalize_mspta_guidance_source(
+            kwargs.pop("mspta_guidance_source", "mixed")
+        )
         enable_context_enrichment = _bool_config(kwargs.pop("enable_context_enrichment", False))
         context_kernel_sizes_raw = kwargs.pop("context_kernel_sizes", "3,5")
         context_fusion = str(kwargs.pop("context_fusion", "weighted_sum"))
@@ -377,6 +401,8 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_mspta is not supported with enable_pulse_region_uot")
             if enable_pot_guide:
                 raise ValueError("enable_mspta is not supported with enable_pot_guide")
+            if not 0.0 <= mspta_saliency_cost_discount < 1.0:
+                raise ValueError("mspta_saliency_cost_discount must be in [0, 1)")
         if enable_multiscale_ot:
             if self.ours_ablation == "gap":
                 raise ValueError("enable_multiscale_ot is not supported with ours_ablation='gap'")
@@ -527,9 +553,13 @@ class OursM2(JECOTM2):
             self.mspta_tokenizer = MSPTATokenizer(
                 scales=mspta_scales,
                 mass_mode=mspta_mass_mode,
+                compact_floor=mspta_compact_floor,
+                vertical_suppression=mspta_vertical_suppression,
             )
             self.mspta_normalize = bool(mspta_normalize)
             self.mspta_proj_dim = int(mspta_proj_dim)
+            self.mspta_guidance_source = str(mspta_guidance_source)
+            self.mspta_saliency_cost_discount = float(mspta_saliency_cost_discount)
             self.mspta_learnable_weights = bool(mspta_learnable_weights)
             if self.mspta_learnable_weights:
                 self.mspta_scale_logits = torch.nn.Parameter(
@@ -785,13 +815,87 @@ class OursM2(JECOTM2):
         weights = torch.softmax(logits.to(device=reference.device, dtype=reference.dtype), dim=0)
         return weights * float(len(scale_names))
 
+    @staticmethod
+    def _normalize_spatial_guidance(values: torch.Tensor, eps: float) -> torch.Tensor:
+        values = values.detach().float()
+        values = values - values.amin(dim=(-2, -1), keepdim=True)
+        denom = values.amax(dim=(-2, -1), keepdim=True).clamp_min(float(eps))
+        return values / denom
+
+    @staticmethod
+    def _pulse_guidance_kernel_size(height: int, width: int) -> int:
+        base = max(5, min(int(height), int(width)) // 10)
+        if base % 2 == 0:
+            base += 1
+        return min(base, 31)
+
+    def _image_pulse_guidance(
+        self,
+        images: torch.Tensor,
+        spatial_hw: tuple[int, int],
+    ) -> torch.Tensor:
+        image = images.detach().float()
+        energy = image.abs().mean(dim=1, keepdim=True)
+        color_change = image.std(dim=1, keepdim=True, unbiased=False)
+        base = self._normalize_spatial_guidance(0.7 * energy + 0.3 * color_change, self.eps)
+        kernel_size = self._pulse_guidance_kernel_size(int(base.shape[-2]), int(base.shape[-1]))
+        local_mean = F.avg_pool2d(
+            base,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=kernel_size // 2,
+            count_include_pad=False,
+        )
+        local_deviation = (base - local_mean).abs()
+        dx = F.pad(base[..., :, 1:] - base[..., :, :-1], (0, 1, 0, 0))
+        dy = F.pad(base[..., 1:, :] - base[..., :-1, :], (0, 0, 0, 1))
+        gradient = torch.sqrt(dx.pow(2) + dy.pow(2) + float(self.eps))
+        local_anomaly = self._normalize_spatial_guidance(local_deviation + 0.5 * gradient, self.eps)
+        column_profile = local_anomaly.mean(dim=2, keepdim=True)
+        compact = (local_anomaly - column_profile).clamp_min(0.0)
+        compact = self._normalize_spatial_guidance(compact, self.eps)
+        pooled_avg = F.adaptive_avg_pool2d(compact, output_size=spatial_hw)
+        pooled_max = F.adaptive_max_pool2d(compact, output_size=spatial_hw)
+        return self._normalize_spatial_guidance(0.5 * pooled_avg + 0.5 * pooled_max, self.eps)
+
+    def _feature_pulse_guidance(self, feature_map: torch.Tensor) -> torch.Tensor:
+        feature_energy = feature_map.detach().float().norm(dim=1, keepdim=True)
+        feature_norm = self._normalize_spatial_guidance(feature_energy, self.eps)
+        local_mean = F.avg_pool2d(
+            feature_norm,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            count_include_pad=False,
+        )
+        feature_contrast = self._normalize_spatial_guidance((feature_norm - local_mean).abs(), self.eps)
+        column_profile = feature_contrast.mean(dim=2, keepdim=True)
+        return self._normalize_spatial_guidance((feature_contrast - column_profile).clamp_min(0.0), self.eps)
+
+    def _build_mspta_guidance_map(
+        self,
+        images: torch.Tensor,
+        feature_map: torch.Tensor,
+    ) -> torch.Tensor:
+        source = getattr(self, "mspta_guidance_source", "mixed")
+        feature_guidance = self._feature_pulse_guidance(feature_map)
+        if source == "feature":
+            return feature_guidance.to(device=feature_map.device, dtype=feature_map.dtype)
+
+        image_guidance = self._image_pulse_guidance(images, feature_map.shape[-2:])
+        if source == "image":
+            return image_guidance.to(device=feature_map.device, dtype=feature_map.dtype)
+        guidance = 0.65 * image_guidance + 0.35 * feature_guidance
+        return guidance.to(device=feature_map.device, dtype=feature_map.dtype)
+
     def _encode_mspta_images(
         self,
         images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
         feature_map = self.encode(images)
         base_spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
-        scale_records = self.mspta_tokenizer(feature_map)
+        guidance_map = self._build_mspta_guidance_map(images, feature_map)
+        scale_records = self.mspta_tokenizer(feature_map, guidance_map=guidance_map)
         if not scale_records:
             raise RuntimeError("MSPTA tokenizer returned no scales")
 
@@ -1527,6 +1631,27 @@ class OursM2(JECOTM2):
                 way_num=way_num,
                 shot_num=shot_num,
             )
+            discount = float(getattr(self, "mspta_saliency_cost_discount", 0.0))
+            if discount > 0.0:
+                support_weight_flat = support_weight.reshape(way_num * shot_num, support_weight.shape[-1])
+                q_peak = query_weight / query_weight.amax(dim=-1, keepdim=True).clamp_min(self.eps)
+                s_peak = support_weight_flat / support_weight_flat.amax(dim=-1, keepdim=True).clamp_min(self.eps)
+                saliency_pair = torch.sqrt(
+                    (q_peak[:, None, :, None] * s_peak[None, :, None, :]).clamp_min(0.0)
+                )
+                cost_for_transport = cost_for_transport * (1.0 - discount * saliency_pair)
+                mspta_payload["mspta_guided_cost_matrix"] = cost_for_transport.reshape(
+                    flat_cost.shape[0],
+                    way_num,
+                    shot_num,
+                    flat_cost.shape[-2],
+                    flat_cost.shape[-1],
+                )
+                mspta_payload["mspta/saliency_cost_discount"] = flat_cost.new_tensor(discount)
+                mspta_payload["mspta/cost_delta_ratio"] = (
+                    (cost_for_transport.detach() - flat_cost.detach()).abs().mean()
+                    / flat_cost.detach().abs().mean().clamp_min(self.eps)
+                )
         if self.enable_pot_guide:
             self._last_pot_guide_diagnostics = None
 
@@ -1947,6 +2072,9 @@ class OursM2(JECOTM2):
                 self._context_debug_images = []
                 self._context_debug_fmaps = []
         if isinstance(outputs, dict):
+            if "mspta_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["mspta_guided_cost_matrix"]
             if "region_uot_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["region_uot_guided_cost_matrix"]
@@ -2069,6 +2197,7 @@ class OursM2(JECOTM2):
             "marginal_query",
             "marginal_support",
             "cost_matrix_modulated",
+            "mspta_guided_cost_matrix",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)

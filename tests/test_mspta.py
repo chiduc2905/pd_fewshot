@@ -66,6 +66,26 @@ def test_mspta_balanced_area_keeps_equal_scale_budget():
         assert torch.allclose(share, torch.full_like(share, 1.0 / 3.0), atol=1e-6)
 
 
+def test_mspta_compact_area_penalizes_full_height_vertical_band():
+    feature_map = torch.zeros(1, 4, 4, 4)
+    guidance = torch.zeros(1, 1, 4, 4)
+    guidance[..., :, 0] = 1.0
+    guidance[..., 2, 2] = 1.0
+    tokenizer = MSPTATokenizer(
+        scales="1,2,3",
+        mass_mode="compact_area",
+        compact_floor=0.01,
+        vertical_suppression=1.0,
+    )
+
+    records = tokenizer(feature_map, guidance_map=guidance)
+    fine_weights = records[0].weights.reshape(1, 4, 4)
+
+    vertical_band_mean = fine_weights[..., :, 0].mean()
+    compact_blob_weight = fine_weights[..., 2, 2].mean()
+    assert compact_blob_weight > vertical_band_mean * 10.0
+
+
 def test_ours_final_mspta_forward_uses_area_marginals_and_exposes_diagnostics():
     torch.manual_seed(611)
     model = _tiny_ours_final(
@@ -95,7 +115,7 @@ def test_ours_final_mspta_forward_uses_area_marginals_and_exposes_diagnostics():
     assert torch.isfinite(model.mspta_scale_logits.grad).all()
 
 
-def test_ours_final_mspta_default_uses_balanced_area_for_small_grids():
+def test_ours_final_mspta_default_uses_compact_area_for_small_grids():
     torch.manual_seed(610)
     model = _tiny_ours_final(enable_mspta=True)
     model.eval()
@@ -105,10 +125,28 @@ def test_ours_final_mspta_default_uses_balanced_area_for_small_grids():
     with torch.no_grad():
         outputs = model(query, support, return_aux=True)
 
-    assert model.mspta_tokenizer.mass_mode == "balanced_area"
+    assert model.mspta_tokenizer.mass_mode == "compact_area"
     assert outputs["mspta/query_weight_share_fine"].item() == pytest.approx(1.0 / 3.0, abs=1e-6)
     assert outputs["mspta/query_weight_share_s2"].item() == pytest.approx(1.0 / 3.0, abs=1e-6)
     assert outputs["mspta/query_weight_share_s3"].item() == pytest.approx(1.0 / 3.0, abs=1e-6)
+    assert "mspta_guided_cost_matrix" in outputs
+    assert "base_cost_matrix" in outputs
+    assert outputs["mspta/cost_delta_ratio"].item() > 0.0
+
+
+def test_ours_final_mspta_guidance_prefers_compact_pulse_over_vertical_band():
+    model = _tiny_ours_final(enable_mspta=True, mspta_guidance_source="image")
+    images = torch.zeros(1, 3, 64, 64)
+    images[..., :, 4:8] = 1.0
+    images[..., 30:38, 34:42] = 1.0
+    feature_map = torch.zeros(1, 64, 4, 4)
+
+    guidance = model._build_mspta_guidance_map(images, feature_map)
+
+    assert guidance.shape == (1, 1, 4, 4)
+    compact_cell = guidance[..., 2, 2].mean()
+    vertical_column = guidance[..., :, 0].mean()
+    assert compact_cell > vertical_column * 5.0
 
 
 def test_mspta_factory_flags_are_ours_final_only():
