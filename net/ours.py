@@ -25,6 +25,7 @@ from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.adaptive_region_uot import AdaptiveRegionUOTGuidance
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
+from net.modules.mspta import MSPTATokenizer
 from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
 from net.modules.region_structural_uot import RegionStructuralUOTGuidance
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
@@ -259,6 +260,12 @@ class OursM2(JECOTM2):
         enable_multiscale_ot = _bool_config(kwargs.pop("enable_multiscale_ot", False))
         multiscale_pool_sizes = kwargs.pop("multiscale_pool_sizes", "original,2x2,1x1")
         multiscale_per_scale_T = _bool_config(kwargs.pop("multiscale_per_scale_T", False))
+        enable_mspta = _bool_config(kwargs.pop("enable_mspta", False))
+        mspta_scales = kwargs.pop("mspta_scales", "1,2,3")
+        mspta_mass_mode = str(kwargs.pop("mspta_mass_mode", "balanced_area"))
+        mspta_normalize = _bool_config(kwargs.pop("mspta_normalize", True))
+        mspta_proj_dim = int(kwargs.pop("mspta_proj_dim", 0))
+        mspta_learnable_weights = _bool_config(kwargs.pop("mspta_learnable_weights", False))
         enable_context_enrichment = _bool_config(kwargs.pop("enable_context_enrichment", False))
         context_kernel_sizes_raw = kwargs.pop("context_kernel_sizes", "3,5")
         context_fusion = str(kwargs.pop("context_fusion", "weighted_sum"))
@@ -343,6 +350,33 @@ class OursM2(JECOTM2):
         self._last_dm_diagnostics: dict[str, torch.Tensor] | None = None
         self._token_g_prenorm_cache: list[torch.Tensor] | None = None
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
+        if enable_mspta:
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_mspta is not supported with ours_ablation='gap'")
+            if mspta_proj_dim not in {0, int(kwargs.get("token_dim", mspta_proj_dim))}:
+                raise ValueError("mspta_proj_dim must be 0 or match hrot_token_dim; use hrot_token_dim for Ours-Final")
+            if enable_multiscale_ot:
+                raise ValueError("enable_mspta is not supported with enable_multiscale_ot")
+            if self.token_g_kind != "none":
+                raise ValueError("enable_mspta currently requires token_g_kind='none'")
+            if _bool_config(kwargs.get("use_cata", False)):
+                raise ValueError("enable_mspta is not supported with CATA token aggregation")
+            if _bool_config(kwargs.get("hrot_amp_marginals", False)):
+                raise ValueError("enable_mspta is not supported with hrot_amp_marginals")
+            if _bool_config(kwargs.get("ecot_episode_feature_normalize", False)):
+                raise ValueError("enable_mspta is not supported with ecot_episode_feature_normalize")
+            if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
+                raise ValueError("enable_mspta is not supported with pre_transport_shot_pool")
+            if enable_structural_augmentation:
+                raise ValueError("enable_mspta is not supported with enable_structural_augmentation")
+            if enable_region_structural_uot:
+                raise ValueError("enable_mspta is not supported with enable_region_structural_uot")
+            if enable_adaptive_region_uot:
+                raise ValueError("enable_mspta is not supported with enable_adaptive_region_uot")
+            if enable_pulse_region_uot:
+                raise ValueError("enable_mspta is not supported with enable_pulse_region_uot")
+            if enable_pot_guide:
+                raise ValueError("enable_mspta is not supported with enable_pot_guide")
         if enable_multiscale_ot:
             if self.ours_ablation == "gap":
                 raise ValueError("enable_multiscale_ot is not supported with ours_ablation='gap'")
@@ -486,6 +520,20 @@ class OursM2(JECOTM2):
                 raw_threshold = _inverse_softplus(max(threshold_init, float(self.eps)))
                 self.raw_multiscale_transport_cost_thresholds = torch.nn.Parameter(
                     torch.full((self.num_multiscale_scales,), raw_threshold, dtype=torch.float32)
+                )
+        self.enable_mspta = bool(enable_mspta)
+        self._mspta_cache: list[dict[str, torch.Tensor | tuple[str, ...] | tuple[int, ...]]] | None = None
+        if self.enable_mspta:
+            self.mspta_tokenizer = MSPTATokenizer(
+                scales=mspta_scales,
+                mass_mode=mspta_mass_mode,
+            )
+            self.mspta_normalize = bool(mspta_normalize)
+            self.mspta_proj_dim = int(mspta_proj_dim)
+            self.mspta_learnable_weights = bool(mspta_learnable_weights)
+            if self.mspta_learnable_weights:
+                self.mspta_scale_logits = torch.nn.Parameter(
+                    torch.zeros(len(self.mspta_tokenizer.scale_names), dtype=torch.float32)
                 )
         self.enable_pot_guide = bool(enable_pot_guide)
         if self.enable_pot_guide:
@@ -729,6 +777,64 @@ class OursM2(JECOTM2):
             return self.transport_cost_threshold.reshape(1)
         return F.softplus(raw_thresholds).clamp_min(self.eps)
 
+    def _mspta_scale_multipliers(self, reference: torch.Tensor) -> torch.Tensor:
+        scale_names = getattr(getattr(self, "mspta_tokenizer", None), "scale_names", ())
+        logits = getattr(self, "mspta_scale_logits", None)
+        if logits is None:
+            return reference.new_ones((len(scale_names),))
+        weights = torch.softmax(logits.to(device=reference.device, dtype=reference.dtype), dim=0)
+        return weights * float(len(scale_names))
+
+    def _encode_mspta_images(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
+        feature_map = self.encode(images)
+        base_spatial_hw = (feature_map.shape[-2], feature_map.shape[-1])
+        scale_records = self.mspta_tokenizer(feature_map)
+        if not scale_records:
+            raise RuntimeError("MSPTA tokenizer returned no scales")
+
+        scale_multipliers = self._mspta_scale_multipliers(feature_map)
+        euclidean_chunks = []
+        hyperbolic_chunks = []
+        weight_chunks = []
+        scale_lengths = []
+        scale_names = []
+        for scale_idx, record in enumerate(scale_records):
+            projected = self._project_backbone_tokens(record.tokens)
+            euclidean_tokens = (
+                F.normalize(projected, p=2, dim=-1, eps=self.eps)
+                if self.mspta_normalize
+                else projected
+            )
+            ball = self._build_ball(projected)
+            hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
+            multiplier = scale_multipliers[scale_idx]
+            euclidean_tokens = euclidean_tokens * multiplier
+            euclidean_chunks.append(euclidean_tokens)
+            hyperbolic_chunks.append(hyperbolic_tokens)
+            weight_chunks.append(record.weights.to(device=euclidean_tokens.device, dtype=euclidean_tokens.dtype))
+            scale_lengths.append(int(record.tokens.shape[-2]))
+            scale_names.append(str(record.name))
+
+        euclidean = torch.cat(euclidean_chunks, dim=-2)
+        hyperbolic = torch.cat(hyperbolic_chunks, dim=-2)
+        token_weight = torch.cat(weight_chunks, dim=-1)
+        token_weight = token_weight / token_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        cache = getattr(self, "_mspta_cache", None)
+        if cache is not None:
+            cache.append(
+                {
+                    "weights": token_weight,
+                    "scale_multipliers": scale_multipliers,
+                    "scale_lengths": tuple(scale_lengths),
+                    "scale_names": tuple(scale_names),
+                }
+            )
+        return euclidean, hyperbolic, base_spatial_hw
+
     def _encode_multiscale_images(
         self,
         images: torch.Tensor,
@@ -760,6 +866,8 @@ class OursM2(JECOTM2):
         self,
         images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
+        if getattr(self, "enable_mspta", False):
+            return self._encode_mspta_images(images)
         if getattr(self, "enable_multiscale_ot", False):
             return self._encode_multiscale_images(images)
 
@@ -1318,6 +1426,68 @@ class OursM2(JECOTM2):
         transport_mass = pair_transport_mass.reshape(num_query, num_way)
         return plan, transport_cost, transport_mass
 
+    def _mspta_weights_for_ecot(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        cache = getattr(self, "_mspta_cache", None)
+        if cache is None or len(cache) < 2:
+            raise RuntimeError("MSPTA cache was not populated before ECOT scoring")
+        query_record = cache[0]
+        support_record = cache[1]
+        query_weight = query_record["weights"]
+        support_weight = support_record["weights"]
+        if not torch.is_tensor(query_weight) or not torch.is_tensor(support_weight):
+            raise RuntimeError("MSPTA cache is missing query/support token weights")
+
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        expected_support = int(way_num) * int(shot_num)
+        if tuple(query_weight.shape) != (num_query, query_len):
+            raise ValueError(
+                "MSPTA query weights do not match ECOT cost shape: "
+                f"{tuple(query_weight.shape)} vs {(num_query, query_len)}"
+            )
+        if tuple(support_weight.shape) != (expected_support, support_len):
+            raise ValueError(
+                "MSPTA support weights do not match ECOT cost shape: "
+                f"{tuple(support_weight.shape)} vs {(expected_support, support_len)}"
+            )
+        if num_pairs != expected_support:
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match Way*Shot={expected_support}")
+
+        query_weight = query_weight.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        support_weight = support_weight.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        support_weight = support_weight.reshape(way_num, shot_num, support_len)
+
+        scale_lengths = query_record.get("scale_lengths", ())
+        scale_names = query_record.get("scale_names", ())
+        scale_multipliers = query_record.get("scale_multipliers", None)
+        if not torch.is_tensor(scale_multipliers):
+            scale_multipliers = flat_cost.new_ones((len(scale_names),))
+        else:
+            scale_multipliers = scale_multipliers.to(device=flat_cost.device, dtype=flat_cost.dtype)
+
+        payload: dict[str, torch.Tensor] = {
+            "mspta/token_count": flat_cost.new_tensor(float(query_len)),
+            "mspta/query_weight_sum": query_weight.sum(dim=-1).mean(),
+            "mspta/support_weight_sum": support_weight.sum(dim=-1).mean(),
+            "mspta/scale_multipliers": scale_multipliers,
+        }
+        for idx, name in enumerate(scale_names):
+            length = int(scale_lengths[idx])
+            start = sum(int(item) for item in scale_lengths[:idx])
+            stop = start + length
+            payload[f"mspta/token_count_{name}"] = flat_cost.new_tensor(float(length))
+            payload[f"mspta/query_weight_share_{name}"] = query_weight[:, start:stop].sum(dim=-1).mean()
+            payload[f"mspta/support_weight_share_{name}"] = support_weight[..., start:stop].sum(dim=-1).mean()
+            payload[f"mspta/query_weight_mean_{name}"] = query_weight[:, start:stop].mean()
+            payload[f"mspta/support_weight_mean_{name}"] = support_weight[..., start:stop].mean()
+            payload[f"mspta/scale_multiplier_{name}"] = scale_multipliers[idx]
+        return query_weight, support_weight, payload
+
     def _forward_ecot_budget_bank(
         self,
         flat_cost: torch.Tensor,
@@ -1348,6 +1518,15 @@ class OursM2(JECOTM2):
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
+        mspta_payload: dict[str, torch.Tensor] = {}
+        if getattr(self, "enable_mspta", False):
+            if query_weight is not None or support_weight is not None:
+                raise ValueError("enable_mspta cannot be combined with explicit query/support weights")
+            query_weight, support_weight, mspta_payload = self._mspta_weights_for_ecot(
+                flat_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
         if self.enable_pot_guide:
             self._last_pot_guide_diagnostics = None
 
@@ -1542,6 +1721,8 @@ class OursM2(JECOTM2):
             payload.update(region_uot_payload)
         if adaptive_region_payload:
             payload.update(adaptive_region_payload)
+        if mspta_payload:
+            payload.update(mspta_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         return payload
@@ -1738,11 +1919,14 @@ class OursM2(JECOTM2):
                 self.context_enrichment._debug_cache = []
         use_prenorm_cache = self.token_g_kind == "token_norm_pre_l2"
         use_multiscale_cache = getattr(self, "enable_multiscale_ot", False)
+        use_mspta_cache = getattr(self, "enable_mspta", False)
         use_pulse_cache = getattr(self, "enable_pulse_region_uot", False)
         if use_prenorm_cache:
             self._token_g_prenorm_cache = []
         if use_multiscale_cache:
             self._multiscale_ot_cache = []
+        if use_mspta_cache:
+            self._mspta_cache = []
         if use_pulse_cache:
             self._pulse_saliency_cache = []
         try:
@@ -1752,6 +1936,8 @@ class OursM2(JECOTM2):
                 self._token_g_prenorm_cache = None
             if use_multiscale_cache:
                 self._multiscale_ot_cache = None
+            if use_mspta_cache:
+                self._mspta_cache = None
             if use_pulse_cache:
                 self._pulse_saliency_cache = None
             if use_context_debug:
@@ -1954,7 +2140,7 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
-        for prefix in ("context/", "struct/", "pulse/", "region_uot/", "adaptive_region/"):
+        for prefix in ("context/", "struct/", "pulse/", "region_uot/", "adaptive_region/", "mspta/"):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]
                 if values and all(torch.is_tensor(value) for value in values):

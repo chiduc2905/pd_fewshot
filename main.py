@@ -1342,6 +1342,57 @@ def get_args():
         help="Use separate learned threshold T per multi-scale OT scale.",
     )
     parser.add_argument(
+        "--enable_mspta",
+        action="store_true",
+        default=False,
+        help="Enable MSPTA token pyramid with area-weighted UOT marginals for Ours-Final.",
+    )
+    parser.add_argument(
+        "--mspta_scales",
+        nargs="+",
+        type=str,
+        default=["1", "2", "3"],
+        help=(
+            "MSPTA pooling scale factors. 1 keeps the original grid; k pools to ceil(H/k)xceil(W/k). "
+            "Accepts either '--mspta_scales 1 2 3' or '--mspta_scales 1,2,3'."
+        ),
+    )
+    parser.add_argument(
+        "--mspta_mass_mode",
+        type=str,
+        default="balanced_area",
+        choices=["balanced_area", "area", "uniform"],
+        help=(
+            "MSPTA token marginal mode. balanced_area gives each scale equal total budget "
+            "while coarser tokens stay heavier; area uses the standalone script's nominal k*k coverage; "
+            "uniform gives all pyramid tokens equal mass."
+        ),
+    )
+    parser.add_argument(
+        "--mspta_normalize",
+        action="store_true",
+        default=True,
+        help="L2-normalize MSPTA projected tokens at each scale before transport.",
+    )
+    parser.add_argument(
+        "--mspta_no_normalize",
+        action="store_false",
+        dest="mspta_normalize",
+        help="Disable MSPTA per-scale token normalization before transport.",
+    )
+    parser.add_argument(
+        "--mspta_proj_dim",
+        type=int,
+        default=0,
+        help="Compatibility flag from standalone MSPTA. Use 0 or match --hrot_token_dim for Ours-Final.",
+    )
+    parser.add_argument(
+        "--mspta_learnable_weights",
+        action="store_true",
+        default=False,
+        help="Learn per-scale MSPTA feature multipliers before Ours-Final cost computation.",
+    )
+    parser.add_argument(
         "--enable_context_enrichment",
         action="store_true",
         default=False,
@@ -3699,6 +3750,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_multiscale_ot",
             "multiscale_pool_sizes",
             "multiscale_per_scale_T",
+            "enable_mspta",
+            "mspta_scales",
+            "mspta_mass_mode",
+            "mspta_normalize",
+            "mspta_proj_dim",
+            "mspta_learnable_weights",
             "enable_context_enrichment",
             "context_kernel_sizes",
             "context_fusion",
@@ -3751,6 +3808,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             overrides.setdefault("enable_multiscale_ot", True)
         if "raw_multiscale_transport_cost_thresholds" in state_dict:
             overrides.setdefault("multiscale_per_scale_T", True)
+        if "mspta_scale_logits" in state_dict:
+            overrides.setdefault("enable_mspta", True)
+            overrides.setdefault("mspta_learnable_weights", True)
         if any(key.startswith("context_enrichment.") for key in state_dict):
             overrides.setdefault("enable_context_enrichment", True)
         if any(key.startswith("structural_augmentation.") for key in state_dict):
@@ -4838,6 +4898,28 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "multiscale/T_medium",
         "multiscale/T_coarse",
         "multiscale/T_global",
+        "mspta/token_count",
+        "mspta/query_weight_sum",
+        "mspta/support_weight_sum",
+        "mspta/scale_multipliers",
+        "mspta/token_count_fine",
+        "mspta/token_count_s2",
+        "mspta/token_count_s3",
+        "mspta/query_weight_mean_fine",
+        "mspta/query_weight_mean_s2",
+        "mspta/query_weight_mean_s3",
+        "mspta/support_weight_mean_fine",
+        "mspta/support_weight_mean_s2",
+        "mspta/support_weight_mean_s3",
+        "mspta/query_weight_share_fine",
+        "mspta/query_weight_share_s2",
+        "mspta/query_weight_share_s3",
+        "mspta/support_weight_share_fine",
+        "mspta/support_weight_share_s2",
+        "mspta/support_weight_share_s3",
+        "mspta/scale_multiplier_fine",
+        "mspta/scale_multiplier_s2",
+        "mspta/scale_multiplier_s3",
         "context/gate_value",
         "context/branch_weight_original",
         "context/branch_weight_conv3",
@@ -5321,6 +5403,28 @@ def format_diagnostic_summary(metrics):
         "multiscale/T_medium",
         "multiscale/T_coarse",
         "multiscale/T_global",
+        "mspta/token_count",
+        "mspta/query_weight_sum",
+        "mspta/support_weight_sum",
+        "mspta/scale_multipliers",
+        "mspta/token_count_fine",
+        "mspta/token_count_s2",
+        "mspta/token_count_s3",
+        "mspta/query_weight_mean_fine",
+        "mspta/query_weight_mean_s2",
+        "mspta/query_weight_mean_s3",
+        "mspta/support_weight_mean_fine",
+        "mspta/support_weight_mean_s2",
+        "mspta/support_weight_mean_s3",
+        "mspta/query_weight_share_fine",
+        "mspta/query_weight_share_s2",
+        "mspta/query_weight_share_s3",
+        "mspta/support_weight_share_fine",
+        "mspta/support_weight_share_s2",
+        "mspta/support_weight_share_s3",
+        "mspta/scale_multiplier_fine",
+        "mspta/scale_multiplier_s2",
+        "mspta/scale_multiplier_s3",
         "context/gate_value",
         "context/branch_weight_original",
         "context/branch_weight_conv3",

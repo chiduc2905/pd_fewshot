@@ -224,6 +224,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_multiscale_ot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_mspta", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_mspta is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_context_enrichment", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2665,6 +2669,25 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_multiscale_ot", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_mspta": True,
+                            "mspta_scales": getattr(args, "mspta_scales", (1, 2, 3)),
+                            "mspta_mass_mode": str(getattr(args, "mspta_mass_mode", "balanced_area")),
+                            "mspta_normalize": _bool_flag(
+                                getattr(args, "mspta_normalize", True),
+                                default=True,
+                            ),
+                            "mspta_proj_dim": int(getattr(args, "mspta_proj_dim", 0)),
+                            "mspta_learnable_weights": _bool_flag(
+                                getattr(args, "mspta_learnable_weights", False),
+                                default=False,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_mspta", False), default=False)
                         else {}
                     ),
                     **(
