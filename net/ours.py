@@ -344,6 +344,10 @@ class OursM2(JECOTM2):
         pulse_evidence_mass_weight = float(kwargs.pop("pulse_evidence_mass_weight", 1.0))
         pulse_evidence_cost_weight = float(kwargs.pop("pulse_evidence_cost_weight", 1.0))
         pulse_background_penalty = float(kwargs.pop("pulse_background_penalty", 0.25))
+        pulse_discriminative_evidence = _bool_config(kwargs.pop("pulse_discriminative_evidence", True))
+        pulse_discriminative_tau = float(kwargs.pop("pulse_discriminative_tau", 0.05))
+        pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
+        pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -489,13 +493,22 @@ class OursM2(JECOTM2):
         self.pulse_evidence_mass_weight = float(pulse_evidence_mass_weight)
         self.pulse_evidence_cost_weight = float(pulse_evidence_cost_weight)
         self.pulse_background_penalty = float(pulse_background_penalty)
+        self.pulse_discriminative_evidence = bool(pulse_discriminative_evidence)
+        self.pulse_discriminative_tau = float(pulse_discriminative_tau)
+        self.pulse_discriminative_margin = float(pulse_discriminative_margin)
+        self.pulse_discriminative_mix = float(pulse_discriminative_mix)
         for name, value in (
             ("pulse_evidence_mass_weight", self.pulse_evidence_mass_weight),
             ("pulse_evidence_cost_weight", self.pulse_evidence_cost_weight),
             ("pulse_background_penalty", self.pulse_background_penalty),
+            ("pulse_discriminative_margin", self.pulse_discriminative_margin),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if self.pulse_discriminative_tau <= 0.0:
+            raise ValueError("pulse_discriminative_tau must be positive")
+        if not 0.0 <= self.pulse_discriminative_mix <= 1.0:
+            raise ValueError("pulse_discriminative_mix must be in [0, 1]")
         if self.enable_pulse_region_uot:
             self.pulse_region_guidance = PulseRegionGuidance(
                 kernel_size=pulse_region_kernel_size,
@@ -712,6 +725,84 @@ class OursM2(JECOTM2):
         peak = evidence.amax(dim=-1, keepdim=True)
         evidence = torch.where(peak > self.eps, evidence / peak.clamp_min(self.eps), torch.ones_like(evidence))
         return evidence.clamp(0.0, 1.0).reshape(original_shape).to(device=saliency.device, dtype=saliency.dtype)
+
+    def _pulse_discriminative_pair_evidence(
+        self,
+        *,
+        flat_cost: torch.Tensor,
+        query_evidence: torch.Tensor,
+        support_evidence: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+        strength: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match way*shot={way_num * shot_num}")
+        if tuple(query_evidence.shape) != (num_query, query_len):
+            raise ValueError(
+                "query_evidence must have shape (NumQuery, QueryTokens), "
+                f"got {tuple(query_evidence.shape)}"
+            )
+        if tuple(support_evidence.shape) != (int(way_num), int(shot_num), support_len):
+            raise ValueError(
+                "support_evidence must have shape (Way, Shot, SupportTokens), "
+                f"got {tuple(support_evidence.shape)}"
+            )
+
+        query_evidence = query_evidence.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp(0.0, 1.0)
+        support_evidence = support_evidence.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp(0.0, 1.0)
+        pulse_pair = torch.sqrt(
+            (
+                query_evidence[:, None, None, :, None]
+                * support_evidence[None, :, :, None, :]
+            ).clamp_min(0.0)
+        )
+
+        if int(way_num) <= 1 or float(getattr(self, "pulse_discriminative_mix", 1.0)) <= 0.0:
+            rival_gate = torch.ones_like(pulse_pair)
+            rival_advantage = torch.zeros_like(pulse_pair)
+        else:
+            cost_view = flat_cost.reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+            tau = max(float(self.pulse_discriminative_tau), float(self.eps))
+            margin = flat_cost.new_tensor(float(self.pulse_discriminative_margin))
+            gates = []
+            advantages = []
+            all_classes = torch.arange(int(way_num), device=flat_cost.device)
+            for class_idx in range(int(way_num)):
+                rival_mask = all_classes != int(class_idx)
+                rival_cost = cost_view[:, rival_mask]
+                rival_cost = rival_cost.permute(0, 3, 1, 2, 4).reshape(num_query, query_len, -1)
+                rival_count = max(int(rival_cost.shape[-1]), 1)
+                rival_softmin = -tau * (
+                    torch.logsumexp(-rival_cost / tau, dim=-1)
+                    - math.log(float(rival_count))
+                )
+                advantage = rival_softmin[:, None, :, None] - cost_view[:, class_idx] - margin
+                gate = torch.sigmoid(advantage / tau)
+                advantages.append(advantage)
+                gates.append(gate)
+            rival_gate = torch.stack(gates, dim=1)
+            rival_advantage = torch.stack(advantages, dim=1)
+
+        strength_value = strength.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        discriminative_mix = flat_cost.new_tensor(float(self.pulse_discriminative_mix))
+        effective_gate = 1.0 + strength_value * discriminative_mix * (rival_gate - 1.0)
+        pair_evidence = (pulse_pair * effective_gate).clamp(0.0, 1.0)
+        payload = {
+            "pulse_discriminative_gate": effective_gate.detach(),
+            "pulse_rival_advantage": rival_advantage.detach(),
+            "pulse/discriminative_enabled": flat_cost.new_tensor(1.0),
+            "pulse/discriminative_tau": flat_cost.new_tensor(float(self.pulse_discriminative_tau)),
+            "pulse/discriminative_margin": flat_cost.new_tensor(float(self.pulse_discriminative_margin)),
+            "pulse/discriminative_mix": discriminative_mix.detach(),
+            "pulse/discriminative_gate_mean": effective_gate.mean().detach(),
+            "pulse/discriminative_gate_low_share": (effective_gate < 0.5).to(flat_cost.dtype).mean().detach(),
+            "pulse/rival_advantage_mean": rival_advantage.mean().detach(),
+        }
+        return pair_evidence, payload
 
     def _record_pulse_saliency(self, images: torch.Tensor, feature_map: torch.Tensor) -> None:
         if not getattr(self, "enable_pulse_region_uot", False):
@@ -1686,6 +1777,7 @@ class OursM2(JECOTM2):
         cost_for_transport = flat_cost
         score_query_evidence = None
         score_support_evidence = None
+        score_pair_evidence = None
         score_evidence_mass_weight = float(self.pulse_evidence_mass_weight)
         score_evidence_cost_weight = float(self.pulse_evidence_cost_weight)
         score_background_penalty = float(self.pulse_background_penalty)
@@ -1819,6 +1911,16 @@ class OursM2(JECOTM2):
                     s_ones = torch.ones_like(score_support_evidence)
                     score_query_evidence = q_ones + pulse_strength * (score_query_evidence - q_ones)
                     score_support_evidence = s_ones + pulse_strength * (score_support_evidence - s_ones)
+                if getattr(self, "pulse_discriminative_evidence", True):
+                    score_pair_evidence, discriminative_payload = self._pulse_discriminative_pair_evidence(
+                        flat_cost=cost_for_transport,
+                        query_evidence=score_query_evidence,
+                        support_evidence=score_support_evidence,
+                        way_num=way_num,
+                        shot_num=shot_num,
+                        strength=pulse_strength,
+                    )
+                    pulse_payload.update(discriminative_payload)
                 pulse_payload.update(
                     {
                         "pulse_query_evidence": score_query_evidence.detach(),
@@ -1920,6 +2022,7 @@ class OursM2(JECOTM2):
             spatial_hw=spatial_hw,
             score_query_evidence=score_query_evidence,
             score_support_evidence=score_support_evidence,
+            score_pair_evidence=score_pair_evidence,
             score_evidence_mass_weight=score_evidence_mass_weight,
             score_evidence_cost_weight=score_evidence_cost_weight,
             score_background_penalty=score_background_penalty,
@@ -2309,6 +2412,8 @@ class OursM2(JECOTM2):
         for key in (
             "pulse_query_saliency",
             "pulse_query_evidence",
+            "pulse_discriminative_gate",
+            "pulse_rival_advantage",
             "pulse_query_marginal_weight",
             "pulse_region_cost_matrix",
             "pulse_guided_cost_matrix",

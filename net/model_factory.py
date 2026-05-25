@@ -2862,6 +2862,19 @@ def build_model_from_args(args):
                             "pulse_background_penalty": float(
                                 getattr(args, "pulse_background_penalty", 0.25)
                             ),
+                            "pulse_discriminative_evidence": _bool_flag(
+                                getattr(args, "pulse_discriminative_evidence", True),
+                                default=True,
+                            ),
+                            "pulse_discriminative_tau": float(
+                                getattr(args, "pulse_discriminative_tau", 0.05)
+                            ),
+                            "pulse_discriminative_margin": float(
+                                getattr(args, "pulse_discriminative_margin", 0.02)
+                            ),
+                            "pulse_discriminative_mix": float(
+                                getattr(args, "pulse_discriminative_mix", 1.0)
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False)

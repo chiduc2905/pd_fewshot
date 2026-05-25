@@ -3074,6 +3074,7 @@ class HROTFSL(BaseConv64FewShotModel):
         spatial_hw: tuple[int, int] | None = None,
         score_query_evidence: torch.Tensor | None = None,
         score_support_evidence: torch.Tensor | None = None,
+        score_pair_evidence: torch.Tensor | None = None,
         score_evidence_mass_weight: float = 1.0,
         score_evidence_cost_weight: float = 1.0,
         score_background_penalty: float = 0.0,
@@ -3348,9 +3349,30 @@ class HROTFSL(BaseConv64FewShotModel):
         evidence_cost_bank: torch.Tensor | None = None
         evidence_background_mass_bank: torch.Tensor | None = None
         evidence_mass_for_score_bank: torch.Tensor | None = None
+        if score_pair_evidence is not None:
+            pair_evidence = torch.nan_to_num(
+                score_pair_evidence.to(device=flat_cost.device, dtype=flat_cost.dtype),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp(0.0, 1.0)
+            if tuple(pair_evidence.shape) == (num_query, num_pairs, query_len, support_len):
+                pair_evidence = pair_evidence.reshape(num_query, way_num, shot_num, query_len, support_len)
+            elif tuple(pair_evidence.shape) != (num_query, way_num, shot_num, query_len, support_len):
+                raise ValueError(
+                    "score_pair_evidence must have shape "
+                    "(NumQuery, Way*Shot, QueryTokens, SupportTokens) or "
+                    "(NumQuery, Way, Shot, QueryTokens, SupportTokens), "
+                    f"got {tuple(score_pair_evidence.shape)}"
+                )
+            evidence_pair_bank = pair_evidence.unsqueeze(3).expand(-1, -1, -1, budget_count, -1, -1)
         if (score_query_evidence is None) != (score_support_evidence is None):
             raise ValueError("score_query_evidence and score_support_evidence must be provided together")
-        if score_query_evidence is not None and score_support_evidence is not None:
+        if (
+            evidence_pair_bank is None
+            and score_query_evidence is not None
+            and score_support_evidence is not None
+        ):
             if tuple(score_query_evidence.shape) != (num_query, query_len):
                 raise ValueError(
                     "score_query_evidence must have shape (NumQuery, QueryTokens), "
@@ -3386,6 +3408,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 query_len,
                 support_len,
             ).unsqueeze(3).expand(-1, -1, -1, budget_count, -1, -1)
+        if evidence_pair_bank is not None:
             evidence_mass_bank = (plan_bank * evidence_pair_bank).sum(dim=(-1, -2))
             evidence_cost_bank = (plan_bank * D_bank * evidence_pair_bank).sum(dim=(-1, -2))
             evidence_background_mass_bank = (plan_bank * (1.0 - evidence_pair_bank)).sum(dim=(-1, -2))

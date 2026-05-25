@@ -1683,6 +1683,31 @@ def get_args():
         help="Threshold-scaled penalty on transported mass outside pulse-to-pulse evidence.",
     )
     parser.add_argument(
+        "--pulse_discriminative_evidence",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Gate pulse evidence by whether candidate token matches beat rival-class token matches.",
+    )
+    parser.add_argument(
+        "--pulse_discriminative_tau",
+        type=float,
+        default=0.05,
+        help="Temperature for rival-aware pulse evidence gating.",
+    )
+    parser.add_argument(
+        "--pulse_discriminative_margin",
+        type=float,
+        default=0.02,
+        help="Required cost advantage over rival classes before transported pulse mass is fully rewarded.",
+    )
+    parser.add_argument(
+        "--pulse_discriminative_mix",
+        type=float,
+        default=1.0,
+        help="Blend strength for rival-aware pulse evidence gate.",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3860,6 +3885,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_evidence_mass_weight",
             "pulse_evidence_cost_weight",
             "pulse_background_penalty",
+            "pulse_discriminative_evidence",
+            "pulse_discriminative_tau",
+            "pulse_discriminative_margin",
+            "pulse_discriminative_mix",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -5031,6 +5060,20 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/support_consensus_entropy",
         "pulse/support_consistency_mean",
         "pulse/support_consistency_sigma_peak",
+        "pulse/evidence_score_enabled",
+        "pulse/evidence_mass_weight",
+        "pulse/evidence_cost_weight",
+        "pulse/background_penalty",
+        "pulse/background_penalty_config",
+        "pulse/query_evidence_area50",
+        "pulse/support_evidence_area50",
+        "pulse/discriminative_enabled",
+        "pulse/discriminative_tau",
+        "pulse/discriminative_margin",
+        "pulse/discriminative_mix",
+        "pulse/discriminative_gate_mean",
+        "pulse/discriminative_gate_low_share",
+        "pulse/rival_advantage_mean",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))

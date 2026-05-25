@@ -1090,6 +1090,8 @@ def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
         "pulse/effective_strength",
         "pulse/evidence_score_enabled",
         "pulse/background_penalty",
+        "pulse/discriminative_enabled",
+        "pulse/discriminative_gate_mean",
         "evidence_score_background_penalty",
         "evidence_score_pair_mean",
     ):
@@ -1106,6 +1108,33 @@ def test_pulse_region_evidence_mask_expands_single_token_peak():
     assert evidence.shape == saliency.shape
     assert evidence.max().item() == pytest.approx(1.0)
     assert int((evidence > 0.0).sum().item()) > 1
+
+
+def test_pulse_discriminative_evidence_gate_prefers_class_specific_matches():
+    model = _tiny_ours_final(
+        enable_pulse_region_uot=True,
+        pulse_discriminative_tau=0.05,
+        pulse_discriminative_margin=0.02,
+    )
+    cost = torch.full((1, 2, 2, 2), 0.6)
+    cost[:, 0] = 0.05
+    query_evidence = torch.ones(1, 2)
+    support_evidence = torch.ones(2, 1, 2)
+
+    pair_evidence, payload = model._pulse_discriminative_pair_evidence(
+        flat_cost=cost,
+        query_evidence=query_evidence,
+        support_evidence=support_evidence,
+        way_num=2,
+        shot_num=1,
+        strength=cost.new_tensor(1.0),
+    )
+
+    assert pair_evidence.shape == (1, 2, 1, 2, 2)
+    assert pair_evidence[:, 0].mean() > pair_evidence[:, 1].mean()
+    assert pair_evidence[:, 0].mean() > 0.95
+    assert pair_evidence[:, 1].mean() < 0.05
+    assert "pulse/discriminative_gate_mean" in payload
 
 
 def test_pulse_evidence_score_changes_logits_and_tracks_background_mass():
@@ -1224,6 +1253,10 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
         pulse_evidence_mass_weight=1.25,
         pulse_evidence_cost_weight=0.75,
         pulse_background_penalty=0.15,
+        pulse_discriminative_evidence="false",
+        pulse_discriminative_tau=0.07,
+        pulse_discriminative_margin=0.03,
+        pulse_discriminative_mix=0.5,
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -1244,6 +1277,10 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
     assert ours_final.pulse_evidence_mass_weight == pytest.approx(1.25)
     assert ours_final.pulse_evidence_cost_weight == pytest.approx(0.75)
     assert ours_final.pulse_background_penalty == pytest.approx(0.15)
+    assert not ours_final.pulse_discriminative_evidence
+    assert ours_final.pulse_discriminative_tau == pytest.approx(0.07)
+    assert ours_final.pulse_discriminative_margin == pytest.approx(0.03)
+    assert ours_final.pulse_discriminative_mix == pytest.approx(0.5)
 
     with pytest.raises(ValueError, match="--enable_pulse_region_uot is supported only with --model ours_final"):
         build_model_from_args(
