@@ -1720,6 +1720,23 @@ def get_args():
     parser.add_argument("--discriminative_uot_mass_weight", type=float, default=1.0)
     parser.add_argument("--discriminative_uot_cost_weight", type=float, default=1.0)
     parser.add_argument(
+        "--enable_label_ot",
+        "--enable_transductive_label_ot",
+        action="store_true",
+        dest="enable_label_ot",
+        default=False,
+        help=(
+            "Ours-Final only: eval-only label-space Sinkhorn/OT calibration over "
+            "the query set of each episode."
+        ),
+    )
+    parser.add_argument("--label_ot_epsilon", type=float, default=0.75)
+    parser.add_argument("--label_ot_iterations", type=int, default=30)
+    parser.add_argument("--label_ot_mix", type=float, default=1.0)
+    parser.add_argument("--label_ot_min_queries_per_class", type=int, default=2)
+    parser.add_argument("--label_ot_min_column_imbalance", type=float, default=0.0)
+    parser.add_argument("--label_ot_max_bias", type=float, default=2.0)
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3386,6 +3403,15 @@ def get_model(args):
                 if args.model in OURS_FINAL_MODEL_NAMES
                 else "DM-UOT unavailable for legacy ours"
             )
+            label_ot_text = (
+                (
+                    "label_ot=on"
+                    if _bool_flag(getattr(args, "enable_label_ot", False), default=False)
+                    else "label_ot=off"
+                )
+                if args.model in OURS_FINAL_MODEL_NAMES
+                else "label_ot unavailable"
+            )
             print(
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
@@ -3393,6 +3419,7 @@ def get_model(args):
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
                 f"{dmuot_text}, "
+                f"{label_ot_text}, "
                 f"full_defaults={default_text}"
             )
         if args.model in OURS_CPM_MODEL_NAMES:
@@ -3908,6 +3935,13 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "discriminative_uot_background_penalty",
             "discriminative_uot_mass_weight",
             "discriminative_uot_cost_weight",
+            "enable_label_ot",
+            "label_ot_epsilon",
+            "label_ot_iterations",
+            "label_ot_mix",
+            "label_ot_min_queries_per_class",
+            "label_ot_min_column_imbalance",
+            "label_ot_max_bias",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -5101,6 +5135,18 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "discriminative_uot/gate_mean",
         "discriminative_uot/gate_low_share",
         "discriminative_uot/rival_advantage_mean",
+        "label_ot/enabled",
+        "label_ot/active",
+        "label_ot/reason",
+        "label_ot/epsilon",
+        "label_ot/iterations",
+        "label_ot/mix",
+        "label_ot/column_imbalance_before",
+        "label_ot/column_imbalance_after",
+        "label_ot/bias_abs_mean",
+        "label_ot/bias_abs_max",
+        "label_ot/logit_delta_abs_mean",
+        "label_ot/assignment_entropy",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))

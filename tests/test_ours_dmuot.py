@@ -315,6 +315,53 @@ def test_dmuot_active_flags_require_token_g():
         _tiny_ours_final(marginal_kind="discriminative")
 
 
+def test_label_ot_disabled_matches_ours_final_baseline_logits():
+    torch.manual_seed(515)
+    baseline = _tiny_ours_final()
+    label_ot_off = _tiny_ours_final(enable_label_ot=False)
+    label_ot_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    label_ot_off.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = label_ot_off(query, support)
+
+    assert torch.equal(actual, expected)
+
+
+def test_label_ot_is_eval_only_and_rebalances_class_bias():
+    model = _tiny_ours_final(
+        enable_label_ot=True,
+        label_ot_epsilon=0.5,
+        label_ot_iterations=40,
+        label_ot_mix=1.0,
+        label_ot_min_queries_per_class=1,
+    )
+    logits = torch.tensor(
+        [
+            [3.0, 0.0],
+            [2.8, 0.1],
+            [2.6, 0.2],
+            [2.4, 0.3],
+        ]
+    )
+
+    model.eval()
+    adjusted, payload = model._apply_label_ot_to_logits(logits)
+
+    assert payload["label_ot/active"].item() == pytest.approx(1.0)
+    assert payload["label_ot/column_imbalance_after"] < payload["label_ot/column_imbalance_before"]
+    assert adjusted[:, 0].mean() < logits[:, 0].mean()
+    assert adjusted[:, 1].mean() > logits[:, 1].mean()
+
+    model.train()
+    train_adjusted, train_payload = model._apply_label_ot_to_logits(logits)
+    assert torch.equal(train_adjusted, logits)
+    assert train_payload["label_ot/active"].item() == pytest.approx(0.0)
+
+
 def test_dmuot_factory_flags_are_ours_final_only():
     common = dict(
         device="cpu",
@@ -350,6 +397,45 @@ def test_dmuot_factory_flags_are_ours_final_only():
     assert shot_neutral.tau_marg == 2.0
     assert shot_neutral.dmuot_shot_strength == "inverse_sqrt"
     with pytest.raises(ValueError, match="--ours_final_dmuot_ablation is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_label_ot_factory_flag_is_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_label_ot=True,
+        label_ot_epsilon=0.5,
+        label_ot_iterations=12,
+        label_ot_mix=0.75,
+        label_ot_min_queries_per_class=1,
+        label_ot_min_column_imbalance=0.05,
+        label_ot_max_bias=1.5,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert ours_final.enable_label_ot
+    assert ours_final.label_ot_epsilon == pytest.approx(0.5)
+    assert ours_final.label_ot_iterations == 12
+    assert ours_final.label_ot_mix == pytest.approx(0.75)
+
+    with pytest.raises(ValueError, match="--enable_label_ot is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
                 model="ours",

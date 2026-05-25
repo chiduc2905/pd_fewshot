@@ -355,6 +355,15 @@ class OursM2(JECOTM2):
         pulse_discriminative_tau = float(kwargs.pop("pulse_discriminative_tau", 0.05))
         pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
         pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
+        enable_label_ot = _bool_config(
+            kwargs.pop("enable_label_ot", kwargs.pop("enable_transductive_label_ot", False))
+        )
+        label_ot_epsilon = float(kwargs.pop("label_ot_epsilon", 0.75))
+        label_ot_iterations = int(kwargs.pop("label_ot_iterations", 30))
+        label_ot_mix = float(kwargs.pop("label_ot_mix", 1.0))
+        label_ot_min_queries_per_class = int(kwargs.pop("label_ot_min_queries_per_class", 2))
+        label_ot_min_column_imbalance = float(kwargs.pop("label_ot_min_column_imbalance", 0.0))
+        label_ot_max_bias = float(kwargs.pop("label_ot_max_bias", 2.0))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -511,6 +520,13 @@ class OursM2(JECOTM2):
         self.pulse_discriminative_tau = float(pulse_discriminative_tau)
         self.pulse_discriminative_margin = float(pulse_discriminative_margin)
         self.pulse_discriminative_mix = float(pulse_discriminative_mix)
+        self.enable_label_ot = bool(enable_label_ot)
+        self.label_ot_epsilon = float(label_ot_epsilon)
+        self.label_ot_iterations = int(label_ot_iterations)
+        self.label_ot_mix = float(label_ot_mix)
+        self.label_ot_min_queries_per_class = int(label_ot_min_queries_per_class)
+        self.label_ot_min_column_imbalance = float(label_ot_min_column_imbalance)
+        self.label_ot_max_bias = float(label_ot_max_bias)
         for name, value in (
             ("pulse_evidence_mass_weight", self.pulse_evidence_mass_weight),
             ("pulse_evidence_cost_weight", self.pulse_evidence_cost_weight),
@@ -531,6 +547,18 @@ class OursM2(JECOTM2):
             raise ValueError("pulse_discriminative_tau must be positive")
         if not 0.0 <= self.pulse_discriminative_mix <= 1.0:
             raise ValueError("pulse_discriminative_mix must be in [0, 1]")
+        if self.label_ot_epsilon <= 0.0:
+            raise ValueError("label_ot_epsilon must be positive")
+        if self.label_ot_iterations < 1:
+            raise ValueError("label_ot_iterations must be positive")
+        if not 0.0 <= self.label_ot_mix <= 1.0:
+            raise ValueError("label_ot_mix must be in [0, 1]")
+        if self.label_ot_min_queries_per_class < 1:
+            raise ValueError("label_ot_min_queries_per_class must be positive")
+        if self.label_ot_min_column_imbalance < 0.0:
+            raise ValueError("label_ot_min_column_imbalance must be non-negative")
+        if self.label_ot_max_bias < 0.0:
+            raise ValueError("label_ot_max_bias must be non-negative")
         if self.enable_pulse_region_uot:
             self.pulse_region_guidance = PulseRegionGuidance(
                 kernel_size=pulse_region_kernel_size,
@@ -2342,6 +2370,109 @@ class OursM2(JECOTM2):
         )
         return super()._ground_cost(query_tokens, class_tokens)
 
+    def _label_ot_inactive_payload(
+        self,
+        logits: torch.Tensor,
+        *,
+        reason_code: float,
+        imbalance_before: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        zero = logits.new_zeros(())
+        return {
+            "label_ot/enabled": logits.new_tensor(1.0),
+            "label_ot/active": zero,
+            "label_ot/reason": logits.new_tensor(float(reason_code)),
+            "label_ot/epsilon": logits.new_tensor(float(self.label_ot_epsilon)),
+            "label_ot/iterations": logits.new_tensor(float(self.label_ot_iterations)),
+            "label_ot/mix": logits.new_tensor(float(self.label_ot_mix)),
+            "label_ot/column_imbalance_before": zero if imbalance_before is None else imbalance_before.detach(),
+            "label_ot/column_imbalance_after": zero if imbalance_before is None else imbalance_before.detach(),
+            "label_ot/bias_abs_mean": zero,
+            "label_ot/bias_abs_max": zero,
+            "label_ot/logit_delta_abs_mean": zero,
+            "label_ot/assignment_entropy": zero,
+        }
+
+    def _apply_label_ot_to_logits(
+        self,
+        logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if not getattr(self, "enable_label_ot", False):
+            return logits, {}
+        if logits.dim() != 2:
+            return logits, self._label_ot_inactive_payload(logits, reason_code=4.0)
+        if self.training:
+            return logits, self._label_ot_inactive_payload(logits, reason_code=1.0)
+
+        num_query, way_num = logits.shape
+        min_queries = int(self.label_ot_min_queries_per_class) * int(way_num)
+        if way_num <= 1 or num_query < min_queries:
+            return logits, self._label_ot_inactive_payload(logits, reason_code=2.0)
+
+        eps = max(float(self.label_ot_epsilon), float(self.eps))
+        row_target = logits.new_ones(num_query)
+        col_target = logits.new_full((way_num,), float(num_query) / float(way_num))
+        soft_before = torch.softmax(logits / eps, dim=-1)
+        col_before = soft_before.sum(dim=0)
+        imbalance_before = (col_before - col_target).abs().sum() / float(max(1, num_query))
+        if imbalance_before < float(self.label_ot_min_column_imbalance):
+            return logits, self._label_ot_inactive_payload(
+                logits,
+                reason_code=3.0,
+                imbalance_before=imbalance_before,
+            )
+
+        stabilized = (logits - logits.amax(dim=1, keepdim=True)) / eps
+        kernel = stabilized.clamp(min=-60.0, max=60.0).exp().clamp_min(float(self.eps))
+        u = logits.new_ones(num_query)
+        v = logits.new_ones(way_num)
+        for _ in range(int(self.label_ot_iterations)):
+            u = row_target / (kernel @ v).clamp_min(float(self.eps))
+            v = col_target / (kernel.transpose(0, 1) @ u).clamp_min(float(self.eps))
+
+        bias = eps * v.clamp_min(float(self.eps)).log()
+        bias = bias - bias.mean()
+        if self.label_ot_max_bias > 0.0:
+            bias = bias.clamp(min=-float(self.label_ot_max_bias), max=float(self.label_ot_max_bias))
+        delta = float(self.label_ot_mix) * bias.unsqueeze(0)
+        adjusted = logits + delta
+
+        assignment = torch.softmax(adjusted / eps, dim=-1)
+        col_after = assignment.sum(dim=0)
+        imbalance_after = (col_after - col_target).abs().sum() / float(max(1, num_query))
+        entropy = -(assignment * assignment.clamp_min(float(self.eps)).log()).sum(dim=-1).mean()
+        payload = {
+            "label_ot/enabled": logits.new_tensor(1.0),
+            "label_ot/active": logits.new_tensor(1.0),
+            "label_ot/reason": logits.new_tensor(0.0),
+            "label_ot/epsilon": logits.new_tensor(float(self.label_ot_epsilon)),
+            "label_ot/iterations": logits.new_tensor(float(self.label_ot_iterations)),
+            "label_ot/mix": logits.new_tensor(float(self.label_ot_mix)),
+            "label_ot/column_imbalance_before": imbalance_before.detach(),
+            "label_ot/column_imbalance_after": imbalance_after.detach(),
+            "label_ot/bias_abs_mean": bias.detach().abs().mean(),
+            "label_ot/bias_abs_max": bias.detach().abs().amax(),
+            "label_ot/logit_delta_abs_mean": delta.detach().abs().mean(),
+            "label_ot/assignment_entropy": entropy.detach(),
+        }
+        return adjusted, payload
+
+    def _apply_label_ot_to_outputs(
+        self,
+        outputs: torch.Tensor | dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor | dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+        adjusted, payload = self._apply_label_ot_to_logits(logits)
+        if not payload:
+            return outputs, payload
+        if isinstance(outputs, dict):
+            outputs = dict(outputs)
+            outputs["logits"] = adjusted
+            outputs["class_scores"] = adjusted
+            outputs.update(payload)
+            return outputs, payload
+        return adjusted, payload
+
     def _forward_episode(self, *args, **kwargs) -> torch.Tensor | dict[str, torch.Tensor]:
         self._last_dm_diagnostics = None
         use_context_debug = (
@@ -2384,6 +2515,7 @@ class OursM2(JECOTM2):
                     self.context_enrichment._debug_cache = None
                 self._context_debug_images = []
                 self._context_debug_fmaps = []
+        outputs, _label_ot_payload = self._apply_label_ot_to_outputs(outputs)
         if isinstance(outputs, dict):
             if "mspta_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
@@ -2593,6 +2725,7 @@ class OursM2(JECOTM2):
             "struct/",
             "pulse/",
             "discriminative_uot/",
+            "label_ot/",
             "region_uot/",
             "adaptive_region/",
             "mspta/",

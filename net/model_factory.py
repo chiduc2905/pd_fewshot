@@ -252,6 +252,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_discriminative_uot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_label_ot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_label_ot is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2930,6 +2934,24 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_discriminative_uot", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_label_ot": True,
+                            "label_ot_epsilon": float(getattr(args, "label_ot_epsilon", 0.75)),
+                            "label_ot_iterations": int(getattr(args, "label_ot_iterations", 30)),
+                            "label_ot_mix": float(getattr(args, "label_ot_mix", 1.0)),
+                            "label_ot_min_queries_per_class": int(
+                                getattr(args, "label_ot_min_queries_per_class", 2)
+                            ),
+                            "label_ot_min_column_imbalance": float(
+                                getattr(args, "label_ot_min_column_imbalance", 0.0)
+                            ),
+                            "label_ot_max_bias": float(getattr(args, "label_ot_max_bias", 2.0)),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_label_ot", False), default=False)
                         else {}
                     ),
                     **(
