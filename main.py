@@ -45,9 +45,11 @@ from net.model_factory import (
     OURS_FINAL_PARTIAL_OT_MODEL_NAMES,
     build_model_from_args,
     get_ours_final_dmuot_choices,
+    get_ours_final_evidence_choices,
     get_model_choices,
     get_model_metadata,
     resolve_ours_final_dmuot_config,
+    resolve_ours_final_evidence_config,
     resolve_fewshot_backbone,
     resolve_hrot_ecot_enable_egsm,
     resolve_hrot_token_dim,
@@ -1318,6 +1320,48 @@ def get_args():
             "off preserves current ours_final byte path; exp0 logs g only; "
             "exp1 enables cost modulation; exp2 enables discriminative marginals."
         ),
+    )
+    parser.add_argument(
+        "--ours_final_evidence_ablation",
+        type=str,
+        default="off",
+        choices=get_ours_final_evidence_choices(),
+        help=(
+            "Ours-Final only: cost-derived evidence marginal ablation. "
+            "Replaces uniform marginals with class-conditioned evidence marginals "
+            "derived from the transport cost matrix. Modes: query_only, support_only, "
+            "both, rival_aware."
+        ),
+    )
+    parser.add_argument(
+        "--evidence_tau",
+        type=float,
+        default=None,
+        help="Temperature for soft-min evidence computation (default: from ablation config).",
+    )
+    parser.add_argument(
+        "--evidence_tau_marginal",
+        type=float,
+        default=None,
+        help="Temperature for evidence-to-probability conversion (default: from ablation config).",
+    )
+    parser.add_argument(
+        "--evidence_mode",
+        type=str,
+        default=None,
+        help="Evidence marginal mode override: query_only, support_only, both, rival_aware.",
+    )
+    parser.add_argument(
+        "--evidence_rival_margin",
+        type=float,
+        default=None,
+        help="Rival-class evidence subtraction weight for rival_aware mode.",
+    )
+    parser.add_argument(
+        "--evidence_detach",
+        type=str,
+        default=None,
+        help="Whether to detach cost matrix for evidence computation (true/false).",
     )
     parser.add_argument(
         "--enable_multiscale_ot",
@@ -3412,6 +3456,14 @@ def get_model(args):
                 if args.model in OURS_FINAL_MODEL_NAMES
                 else "label_ot unavailable"
             )
+            evidence_marginal_text = (
+                (
+                    f"evidence_marginals={getattr(args, 'ours_final_evidence_ablation', 'off')}, "
+                    f"resolved={resolve_ours_final_evidence_config(args)}"
+                )
+                if args.model in OURS_FINAL_MODEL_NAMES
+                else "evidence_marginals unavailable"
+            )
             print(
                 "  ours_design: "
                 f"ablation={ours_ablation}, "
@@ -3419,6 +3471,7 @@ def get_model(args):
                 f"{dmt_text}, dm_alpha={getattr(args, 'dm_alpha', 0.0)}, "
                 f"dm_debug={getattr(args, 'dm_debug', 'false')}, "
                 f"{dmuot_text}, "
+                f"{evidence_marginal_text}, "
                 f"{label_ot_text}, "
                 f"full_defaults={default_text}"
             )

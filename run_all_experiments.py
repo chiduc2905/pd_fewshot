@@ -276,6 +276,7 @@ def get_args():
             "dmuot",
             "mass_on",
             "pst_dm",
+            "evidence",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -287,7 +288,8 @@ def get_args():
             "tau_shot_off=Ours-Final with ECOT tau-shot pooling disabled; "
             "pooling=class-pooled support before OT plus fixed shot pooling; "
             "dmuot=token-g, cost modulation, and discriminative marginal sweeps; "
-            "mass_on=shot-consensus threshold-mass score variants."
+            "mass_on=shot-consensus threshold-mass score variants; "
+            "evidence=cost-derived evidence marginal ablation (query/support/both/rival)."
         ),
     )
     parser.add_argument(
@@ -1251,6 +1253,81 @@ def build_ours_final_dmuot_variants():
                 + [
                     "--ours_final_dmuot_ablation",
                     f"exp2_tau_marg_{tag_value}",
+                ],
+            }
+        )
+    return variants
+
+
+def build_ours_final_evidence_marginal_variants():
+    """Clean ablation sweep for cost-derived evidence marginals (paper Table).
+
+    1. Ours-Final uniform marginals          (baseline)
+    2. + query evidence marginals only        (query_only)
+    3. + support evidence marginals only      (support_only)
+    4. + query + support evidence marginals   (both)
+    5. + class-discriminative rival-aware     (rival_aware)
+    """
+    base = _ours_final_base_args()
+    variants = [
+        {
+            "tag": "ours_final_evidence_query_only",
+            "checkpoint_tag": "evidence_query_only",
+            "label": "Evidence marginals: query-side only",
+            "extra_args": base + ["--ours_final_evidence_ablation", "query_only"],
+        },
+        {
+            "tag": "ours_final_evidence_support_only",
+            "checkpoint_tag": "evidence_support_only",
+            "label": "Evidence marginals: support-side only",
+            "extra_args": base + ["--ours_final_evidence_ablation", "support_only"],
+        },
+        {
+            "tag": "ours_final_evidence_both",
+            "checkpoint_tag": "evidence_both",
+            "label": "Evidence marginals: query + support (both sides)",
+            "extra_args": base + ["--ours_final_evidence_ablation", "both"],
+        },
+        {
+            "tag": "ours_final_evidence_rival_aware",
+            "checkpoint_tag": "evidence_rival_aware",
+            "label": "Evidence marginals: class-discriminative rival-aware",
+            "extra_args": base + ["--ours_final_evidence_ablation", "rival_aware"],
+        },
+    ]
+    for tau in ("0.05", "0.1", "0.2", "0.5"):
+        tag_tau = tau.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_evidence_both_tau_{tag_tau}",
+                "checkpoint_tag": f"evidence_both_tau_{tag_tau}",
+                "label": f"Evidence marginals: both, tau_evidence={tau}",
+                "extra_args": base + [
+                    "--ours_final_evidence_ablation", f"both_tau_{tag_tau}",
+                ],
+            }
+        )
+    for tau_m in ("0.5", "1.0", "2.0"):
+        tag_tau_m = tau_m.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_evidence_both_tau_m_{tag_tau_m}",
+                "checkpoint_tag": f"evidence_both_tau_m_{tag_tau_m}",
+                "label": f"Evidence marginals: both, tau_marginal={tau_m}",
+                "extra_args": base + [
+                    "--ours_final_evidence_ablation", f"both_tau_m_{tag_tau_m}",
+                ],
+            }
+        )
+    for rm in ("0.0", "0.25", "0.5", "1.0"):
+        tag_rm = rm.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_evidence_rival_margin_{tag_rm}",
+                "checkpoint_tag": f"evidence_rival_margin_{tag_rm}",
+                "label": f"Evidence marginals: rival-aware, rival_margin={rm}",
+                "extra_args": base + [
+                    "--ours_final_evidence_ablation", f"rival_margin_{tag_rm}",
                 ],
             }
         )
@@ -2848,6 +2925,7 @@ def main():
         mass_on_variants = build_ours_final_mass_on_variants()
         dmuot_variants = build_ours_final_dmuot_variants()
         pst_dm_variants = build_ours_final_pst_dm_variants()
+        evidence_variants = build_ours_final_evidence_marginal_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -2861,6 +2939,7 @@ def main():
         mass_on_variants = filter_ours_final_variants(mass_on_variants, ours_final_variant_filter)
         dmuot_variants = filter_ours_final_variants(dmuot_variants, ours_final_variant_filter)
         pst_dm_variants = filter_ours_final_variants(pst_dm_variants, ours_final_variant_filter)
+        evidence_variants = filter_ours_final_variants(evidence_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -2873,12 +2952,14 @@ def main():
             ablation_variants = mass_on_variants
         elif suite_name == "pst_dm":
             ablation_variants = pst_dm_variants
+        elif suite_name == "evidence":
+            ablation_variants = evidence_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
             ]
         elif suite_name == "complete":
-            ablation_variants = contrib_variants + rho_grid_variants + pst_dm_variants
+            ablation_variants = contrib_variants + rho_grid_variants + pst_dm_variants + evidence_variants
         else:
             ablation_variants = contrib_variants
         if not ablation_variants:

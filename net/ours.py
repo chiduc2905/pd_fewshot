@@ -24,6 +24,7 @@ from net.fewshot_common import feature_map_to_tokens
 from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _inverse_softplus
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.adaptive_region_uot import AdaptiveRegionUOTGuidance
+from net.modules.cost_evidence_marginals import CostEvidenceMarginals, _normalize_evidence_mode
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.mspta import MSPTATokenizer
 from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
@@ -273,6 +274,12 @@ class OursM2(JECOTM2):
         marginal_kind: str = "uniform",
         tau_marg: float = 1.0,
         dmuot_shot_strength: str = "none",
+        enable_evidence_marginals: bool = False,
+        evidence_tau: float = 0.1,
+        evidence_tau_marginal: float = 1.0,
+        evidence_mode: str = "both",
+        evidence_rival_margin: float = 0.5,
+        evidence_detach: bool = True,
         **kwargs,
     ) -> None:
         enable_multiscale_ot = _bool_config(kwargs.pop("enable_multiscale_ot", False))
@@ -465,6 +472,14 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_pulse_region_uot is not supported with enable_multiscale_ot")
             if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
                 raise ValueError("enable_pulse_region_uot is not supported with pre_transport_shot_pool")
+        if _bool_config(enable_evidence_marginals):
+            if self.marginal_kind == "discriminative":
+                raise ValueError(
+                    "enable_evidence_marginals cannot be combined with marginal_kind='discriminative'; "
+                    "evidence marginals replace the DMUOT discriminative marginal system"
+                )
+            if enable_multiscale_ot:
+                raise ValueError("enable_evidence_marginals is not supported with enable_multiscale_ot")
         super().__init__(
             *args,
             rho=float(kwargs["ecot_base_rho"]),
@@ -657,6 +672,20 @@ class OursM2(JECOTM2):
                 eps=self.eps,
             )
             self._last_pot_guide_diagnostics: dict[str, torch.Tensor] | None = None
+        self.enable_evidence_marginals = _bool_config(enable_evidence_marginals)
+        if self.enable_evidence_marginals:
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_evidence_marginals is not supported with ours_ablation='gap'")
+            if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
+                raise ValueError("enable_evidence_marginals is not supported with pre_transport_shot_pool")
+            self.evidence_marginal_module = CostEvidenceMarginals(
+                tau_evidence=float(evidence_tau),
+                tau_marginal=float(evidence_tau_marginal),
+                mode=str(evidence_mode),
+                rival_margin=float(evidence_rival_margin),
+                detach_cost=bool(evidence_detach),
+                eps=self.eps,
+            )
         self.token_attention_query = (
             torch.nn.Parameter(torch.randn(self.token_dim) * 0.01)
             if self.token_g_kind == "learned_attention"
@@ -2142,6 +2171,22 @@ class OursM2(JECOTM2):
                     1.0 / float(token_g_support.shape[-1]),
                 ) * base_rho.to(device=token_g_support.device, dtype=token_g_support.dtype)
 
+        evidence_payload: dict[str, torch.Tensor] = {}
+        if getattr(self, "enable_evidence_marginals", False):
+            base_rho_ev = self._ecot_base_rho_tensor(flat_cost)
+            ev_query_marginal, ev_support_marginal, evidence_payload = (
+                self.evidence_marginal_module(
+                    cost_for_transport,
+                    rho=base_rho_ev,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                )
+            )
+            if ev_query_marginal is not None:
+                query_weight = ev_query_marginal
+            if ev_support_marginal is not None:
+                support_weight = ev_support_marginal
+
         payload = super()._forward_ecot_budget_bank(
             cost_for_transport,
             way_num=way_num,
@@ -2189,6 +2234,8 @@ class OursM2(JECOTM2):
             payload.update(adaptive_region_payload)
         if mspta_payload:
             payload.update(mspta_payload)
+        if evidence_payload:
+            payload.update(evidence_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         return payload

@@ -152,6 +152,118 @@ for _tau_marg_la in (0.5, 1.0, 2.0):
     }
 
 
+OURS_FINAL_EVIDENCE_ABLATION_CONFIGS = {
+    "off": {},
+    "query_only": {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "query_only",
+        "evidence_tau": 0.1,
+        "evidence_tau_marginal": 1.0,
+        "evidence_detach": True,
+    },
+    "support_only": {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "support_only",
+        "evidence_tau": 0.1,
+        "evidence_tau_marginal": 1.0,
+        "evidence_detach": True,
+    },
+    "both": {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "both",
+        "evidence_tau": 0.1,
+        "evidence_tau_marginal": 1.0,
+        "evidence_detach": True,
+    },
+    "rival_aware": {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "rival_aware",
+        "evidence_tau": 0.1,
+        "evidence_tau_marginal": 1.0,
+        "evidence_rival_margin": 0.5,
+        "evidence_detach": True,
+    },
+}
+for _ev_tau in (0.05, 0.1, 0.2, 0.5):
+    _ev_suffix = f"{_ev_tau:.6g}".replace(".", "p")
+    OURS_FINAL_EVIDENCE_ABLATION_CONFIGS[f"both_tau_{_ev_suffix}"] = {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "both",
+        "evidence_tau": _ev_tau,
+        "evidence_tau_marginal": 1.0,
+        "evidence_detach": True,
+    }
+for _ev_tau_m in (0.5, 1.0, 2.0):
+    _ev_suffix_m = f"{_ev_tau_m:.6g}".replace(".", "p")
+    OURS_FINAL_EVIDENCE_ABLATION_CONFIGS[f"both_tau_m_{_ev_suffix_m}"] = {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "both",
+        "evidence_tau": 0.1,
+        "evidence_tau_marginal": _ev_tau_m,
+        "evidence_detach": True,
+    }
+for _ev_rival_m in (0.0, 0.25, 0.5, 1.0):
+    _ev_rival_suffix = f"{_ev_rival_m:.6g}".replace(".", "p")
+    OURS_FINAL_EVIDENCE_ABLATION_CONFIGS[f"rival_margin_{_ev_rival_suffix}"] = {
+        "enable_evidence_marginals": True,
+        "evidence_mode": "rival_aware",
+        "evidence_tau": 0.1,
+        "evidence_tau_marginal": 1.0,
+        "evidence_rival_margin": _ev_rival_m,
+        "evidence_detach": True,
+    }
+
+
+def get_ours_final_evidence_choices() -> tuple[str, ...]:
+    return tuple(OURS_FINAL_EVIDENCE_ABLATION_CONFIGS.keys())
+
+
+def normalize_ours_final_evidence_ablation(value) -> str:
+    name = "off" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "none": "off",
+        "false": "off",
+        "0": "off",
+        "query": "query_only",
+        "support": "support_only",
+        "all": "both",
+        "full": "both",
+        "rival": "rival_aware",
+        "disc": "rival_aware",
+        "discriminative": "rival_aware",
+    }
+    name = aliases.get(name, name)
+    if name not in OURS_FINAL_EVIDENCE_ABLATION_CONFIGS:
+        raise ValueError(
+            f"Unsupported ours_final_evidence_ablation: {value}. "
+            f"Expected one of {sorted(OURS_FINAL_EVIDENCE_ABLATION_CONFIGS)}"
+        )
+    return name
+
+
+def resolve_ours_final_evidence_config(args) -> dict:
+    ablation = normalize_ours_final_evidence_ablation(
+        getattr(args, "ours_final_evidence_ablation", "off")
+    )
+    config = dict(OURS_FINAL_EVIDENCE_ABLATION_CONFIGS[ablation])
+    for override_key in (
+        "evidence_tau",
+        "evidence_tau_marginal",
+        "evidence_mode",
+        "evidence_rival_margin",
+        "evidence_detach",
+    ):
+        override_value = getattr(args, override_key, None)
+        if override_value is not None:
+            if override_key in ("evidence_tau", "evidence_tau_marginal", "evidence_rival_margin"):
+                config[override_key] = float(override_value)
+            elif override_key == "evidence_detach":
+                config[override_key] = str(override_value).strip().lower() in ("true", "1", "yes")
+            else:
+                config[override_key] = str(override_value)
+    return config
+
+
 def resolve_hrot_ecot_enable_egsm(args) -> str:
     """Resolve ``--hrot_ecot_enable_egsm`` to ``'true'`` or ``'false'`` (no auto).
 
@@ -256,6 +368,11 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_label_ot is supported only with --model ours_final")
+    evidence_ablation = normalize_ours_final_evidence_ablation(
+        getattr(args, "ours_final_evidence_ablation", "off")
+    )
+    if evidence_ablation != "off" and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError("--ours_final_evidence_ablation is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2664,6 +2781,7 @@ def build_model_from_args(args):
                     "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
+                    **(resolve_ours_final_evidence_config(args) if is_ours_final_model else {}),
                     **(
                         {
                             "enable_multiscale_ot": True,

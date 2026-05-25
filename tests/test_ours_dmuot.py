@@ -1438,3 +1438,177 @@ def test_origin_discriminative_uot_factory_flags_are_ours_final_only():
                 **common,
             )
         )
+
+
+# ── Evidence marginals tests ──────────────────────────────────────────
+
+
+def test_evidence_marginals_off_matches_baseline():
+    torch.manual_seed(600)
+    baseline = _tiny_ours_final()
+    evidence_off = _tiny_ours_final(enable_evidence_marginals=False)
+    evidence_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    evidence_off.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = evidence_off(query, support)
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("mode", ["query_only", "support_only", "both", "rival_aware"])
+def test_evidence_marginals_forward_runs(mode):
+    torch.manual_seed(601)
+    model = _tiny_ours_final(
+        enable_evidence_marginals=True,
+        evidence_tau=0.1,
+        evidence_tau_marginal=1.0,
+        evidence_mode=mode,
+        evidence_rival_margin=0.5,
+    )
+    model.train()
+    query, support = _episode()
+
+    logits = model(query, support)
+    assert logits.shape == (2, 2)
+    assert logits.isfinite().all()
+
+
+def test_evidence_marginals_changes_logits():
+    torch.manual_seed(602)
+    baseline = _tiny_ours_final()
+    evidence = _tiny_ours_final(
+        enable_evidence_marginals=True,
+        evidence_tau=0.1,
+        evidence_tau_marginal=1.0,
+        evidence_mode="both",
+    )
+    baseline.eval()
+    evidence.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        logits_base = baseline(query, support)
+        logits_ev = evidence(query, support)
+
+    assert not torch.allclose(logits_base, logits_ev, atol=1e-6)
+
+
+def test_evidence_marginals_multishot():
+    torch.manual_seed(603)
+    model = _tiny_ours_final(
+        enable_evidence_marginals=True,
+        evidence_tau=0.1,
+        evidence_tau_marginal=1.0,
+        evidence_mode="rival_aware",
+        evidence_rival_margin=0.5,
+    )
+    model.eval()
+    query, support = _episode(shot=5)
+
+    with torch.no_grad():
+        logits = model(query, support)
+
+    assert logits.shape == (2, 2)
+    assert logits.isfinite().all()
+
+
+def test_evidence_marginals_gradient_flows():
+    torch.manual_seed(604)
+    model = _tiny_ours_final(
+        enable_evidence_marginals=True,
+        evidence_tau=0.1,
+        evidence_tau_marginal=1.0,
+        evidence_mode="both",
+        evidence_detach=False,
+    )
+    model.train()
+    query, support = _episode()
+
+    logits = model(query, support)
+    loss = logits.sum()
+    loss.backward()
+
+    has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
+    assert has_grad
+
+
+def test_evidence_marginals_rejects_discriminative_combo():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _tiny_ours_final(
+            enable_evidence_marginals=True,
+            marginal_kind="discriminative",
+            token_g_kind="episode_mean_dist",
+        )
+
+
+def test_evidence_module_standalone():
+    from net.modules.cost_evidence_marginals import CostEvidenceMarginals
+
+    torch.manual_seed(605)
+    module = CostEvidenceMarginals(
+        tau_evidence=0.1,
+        tau_marginal=1.0,
+        mode="both",
+        rival_margin=0.5,
+    )
+    cost = torch.rand(3, 4, 16, 16) * 2.0
+    rho = torch.tensor(0.8)
+
+    q_marg, s_marg, diagnostics = module(cost, rho, way_num=2, shot_num=2)
+
+    assert q_marg is not None
+    assert s_marg is not None
+    assert q_marg.shape == (3, 4, 16)
+    assert s_marg.shape == (2, 2, 16)
+    assert q_marg.sum(dim=-1).allclose(rho.expand(3, 4), atol=1e-5)
+    assert s_marg.sum(dim=-1).allclose(rho.expand(2, 2), atol=1e-5)
+    assert "evidence/query_entropy" in diagnostics
+    assert "evidence/support_entropy" in diagnostics
+
+
+def test_evidence_module_query_only():
+    from net.modules.cost_evidence_marginals import CostEvidenceMarginals
+
+    module = CostEvidenceMarginals(mode="query_only")
+    cost = torch.rand(2, 4, 8, 8)
+    rho = torch.tensor(0.8)
+
+    q_marg, s_marg, diag = module(cost, rho, way_num=2, shot_num=2)
+
+    assert q_marg is not None
+    assert s_marg is None
+
+
+def test_evidence_module_support_only():
+    from net.modules.cost_evidence_marginals import CostEvidenceMarginals
+
+    module = CostEvidenceMarginals(mode="support_only")
+    cost = torch.rand(2, 4, 8, 8)
+    rho = torch.tensor(0.8)
+
+    q_marg, s_marg, diag = module(cost, rho, way_num=2, shot_num=2)
+
+    assert q_marg is None
+    assert s_marg is not None
+
+
+def test_evidence_module_rival_aware_differs_from_both():
+    from net.modules.cost_evidence_marginals import CostEvidenceMarginals
+
+    torch.manual_seed(606)
+    cost = torch.rand(3, 6, 16, 16)
+    rho = torch.tensor(0.8)
+
+    mod_both = CostEvidenceMarginals(mode="both", tau_evidence=0.1, tau_marginal=1.0)
+    mod_rival = CostEvidenceMarginals(
+        mode="rival_aware", tau_evidence=0.1, tau_marginal=1.0, rival_margin=0.5,
+    )
+
+    q_both, _, _ = mod_both(cost, rho, way_num=3, shot_num=2)
+    q_rival, _, _ = mod_rival(cost, rho, way_num=3, shot_num=2)
+
+    assert not torch.allclose(q_both, q_rival, atol=1e-6)

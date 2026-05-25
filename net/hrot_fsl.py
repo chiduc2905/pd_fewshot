@@ -3199,15 +3199,20 @@ class HROTFSL(BaseConv64FewShotModel):
             transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
             transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
         elif query_weight is not None:
-            if tuple(query_weight.shape) != (num_query, query_len):
+            query_weight = query_weight.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp_min(0.0)
+            if query_weight.dim() == 3 and tuple(query_weight.shape) == (num_query, num_pairs, query_len):
+                query_prob = query_weight / query_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                a_bank = query_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            elif tuple(query_weight.shape) == (num_query, query_len):
+                query_prob = query_weight / query_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                a_bank = query_prob.reshape(num_query, 1, 1, query_len) * rho_bank.view(1, 1, budget_count, 1)
+                a_bank = a_bank.expand(-1, num_pairs, -1, -1)
+            else:
                 raise ValueError(
-                    "query_weight must have shape (NumQuery, QueryTokens), "
+                    "query_weight must have shape (NumQuery, QueryTokens) or "
+                    "(NumQuery, Way*Shot, QueryTokens), "
                     f"got {tuple(query_weight.shape)}"
                 )
-            query_weight = query_weight.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp_min(0.0)
-            query_prob = query_weight / query_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
-            a_bank = query_prob.reshape(num_query, 1, 1, query_len) * rho_bank.view(1, 1, budget_count, 1)
-            a_bank = a_bank.expand(-1, num_pairs, -1, -1)
             transport_kwargs["a"] = a_bank.reshape(num_query, num_pairs * budget_count, query_len)
 
         if self.crs_marginal is not None:
