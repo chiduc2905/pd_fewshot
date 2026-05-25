@@ -1660,7 +1660,7 @@ def get_args():
     parser.add_argument(
         "--pulse_evidence_score",
         type=str,
-        default="true",
+        default="false",
         choices=["true", "false"],
         help="When pulse-region UOT is enabled, score pulse-to-pulse transported evidence instead of total mass.",
     )
@@ -1685,7 +1685,7 @@ def get_args():
     parser.add_argument(
         "--pulse_discriminative_evidence",
         type=str,
-        default="true",
+        default="false",
         choices=["true", "false"],
         help="Gate pulse evidence by whether candidate token matches beat rival-class token matches.",
     )
@@ -1707,6 +1707,18 @@ def get_args():
         default=1.0,
         help="Blend strength for rival-aware pulse evidence gate.",
     )
+    parser.add_argument(
+        "--enable_discriminative_uot",
+        action="store_true",
+        default=False,
+        help="Ours-Final only: apply rival-aware UOT evidence scoring without pulse-region guidance.",
+    )
+    parser.add_argument("--discriminative_uot_tau", type=float, default=0.05)
+    parser.add_argument("--discriminative_uot_margin", type=float, default=0.02)
+    parser.add_argument("--discriminative_uot_mix", type=float, default=1.0)
+    parser.add_argument("--discriminative_uot_background_penalty", type=float, default=0.25)
+    parser.add_argument("--discriminative_uot_mass_weight", type=float, default=1.0)
+    parser.add_argument("--discriminative_uot_cost_weight", type=float, default=1.0)
     parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
@@ -3889,6 +3901,13 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_discriminative_tau",
             "pulse_discriminative_margin",
             "pulse_discriminative_mix",
+            "enable_discriminative_uot",
+            "discriminative_uot_tau",
+            "discriminative_uot_margin",
+            "discriminative_uot_mix",
+            "discriminative_uot_background_penalty",
+            "discriminative_uot_mass_weight",
+            "discriminative_uot_cost_weight",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -5074,6 +5093,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/discriminative_gate_mean",
         "pulse/discriminative_gate_low_share",
         "pulse/rival_advantage_mean",
+        "discriminative_uot/enabled",
+        "discriminative_uot/tau",
+        "discriminative_uot/margin",
+        "discriminative_uot/mix",
+        "discriminative_uot/background_penalty",
+        "discriminative_uot/gate_mean",
+        "discriminative_uot/gate_low_share",
+        "discriminative_uot/rival_advantage_mean",
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))

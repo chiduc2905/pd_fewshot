@@ -5361,12 +5361,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho": torch.cat([item["rho"] for item in batch_outputs], dim=0),
             "rho_regularization": torch.stack([item["rho_regularization"] for item in batch_outputs]).mean(),
             "rho_rank_loss": torch.stack([item["rho_rank_loss"] for item in batch_outputs]).mean(),
-            "cost_margin_aux_loss": torch.stack(
-                [
-                    item.get("cost_margin_aux_loss", item["aux_loss"].new_zeros(()))
-                    for item in batch_outputs
-                ]
-            ).mean(),
+            "cost_margin_aux_loss": torch.stack([item["cost_margin_aux_loss"] for item in batch_outputs]).mean(),
             "curvature_regularization": torch.stack([item["curvature_regularization"] for item in batch_outputs]).mean(),
             "curvature": torch.stack([item["curvature"] for item in batch_outputs]).mean(),
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),

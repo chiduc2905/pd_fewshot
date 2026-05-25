@@ -1075,8 +1075,8 @@ def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
     assert torch.isfinite(outputs["logits"]).all()
     assert "pulse_query_saliency" in outputs
     assert "pulse_support_saliency" in outputs
-    assert "pulse_query_evidence" in outputs
-    assert "pulse_support_evidence" in outputs
+    assert "pulse_query_evidence" not in outputs
+    assert "pulse_support_evidence" not in outputs
     assert "pulse_guided_cost_matrix" in outputs
     assert "base_cost_matrix" in outputs
     assert outputs["cost_matrix"].shape == outputs["base_cost_matrix"].shape
@@ -1088,12 +1088,6 @@ def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
         "pulse/support_saliency_peak",
         "pulse/region_cost_delta_ratio",
         "pulse/effective_strength",
-        "pulse/evidence_score_enabled",
-        "pulse/background_penalty",
-        "pulse/discriminative_enabled",
-        "pulse/discriminative_gate_mean",
-        "evidence_score_background_penalty",
-        "evidence_score_pair_mean",
     ):
         assert key in outputs, f"Missing diagnostic key: {key}"
 
@@ -1135,6 +1129,32 @@ def test_pulse_discriminative_evidence_gate_prefers_class_specific_matches():
     assert pair_evidence[:, 0].mean() > 0.95
     assert pair_evidence[:, 1].mean() < 0.05
     assert "pulse/discriminative_gate_mean" in payload
+
+
+def test_origin_discriminative_uot_runs_without_pulse_region_guidance():
+    torch.manual_seed(904)
+    baseline = _tiny_ours_final()
+    model = _tiny_ours_final(
+        enable_discriminative_uot=True,
+        discriminative_uot_tau=0.05,
+        discriminative_uot_margin=0.02,
+        discriminative_uot_background_penalty=0.25,
+    )
+    model.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    model.eval()
+    query, support = _episode(shot=1)
+
+    with torch.no_grad():
+        baseline_outputs = baseline(query, support, return_aux=True)
+        outputs = model(query, support, return_aux=True)
+
+    assert not model.enable_pulse_region_uot
+    assert "discriminative_uot_gate" in outputs
+    assert "discriminative_uot/enabled" in outputs
+    assert "pulse_query_evidence" not in outputs
+    assert torch.isfinite(outputs["logits"]).all()
+    assert not torch.allclose(outputs["logits"], baseline_outputs["logits"])
 
 
 def test_pulse_evidence_score_changes_logits_and_tracks_background_mass():
@@ -1283,6 +1303,48 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
     assert ours_final.pulse_discriminative_mix == pytest.approx(0.5)
 
     with pytest.raises(ValueError, match="--enable_pulse_region_uot is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_origin_discriminative_uot_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_discriminative_uot=True,
+        discriminative_uot_tau=0.07,
+        discriminative_uot_margin=0.03,
+        discriminative_uot_mix=0.5,
+        discriminative_uot_background_penalty=0.15,
+        discriminative_uot_mass_weight=1.2,
+        discriminative_uot_cost_weight=0.8,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert ours_final.enable_discriminative_uot
+    assert ours_final.discriminative_uot_tau == pytest.approx(0.07)
+    assert ours_final.discriminative_uot_margin == pytest.approx(0.03)
+    assert ours_final.discriminative_uot_mix == pytest.approx(0.5)
+    assert ours_final.discriminative_uot_background_penalty == pytest.approx(0.15)
+    assert ours_final.discriminative_uot_mass_weight == pytest.approx(1.2)
+    assert ours_final.discriminative_uot_cost_weight == pytest.approx(0.8)
+
+    with pytest.raises(ValueError, match="--enable_discriminative_uot is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
                 model="ours",

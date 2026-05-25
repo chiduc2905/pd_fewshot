@@ -340,11 +340,18 @@ class OursM2(JECOTM2):
         pulse_support_consensus_weight = float(kwargs.pop("pulse_support_consensus_weight", 0.0))
         pulse_support_consensus_beta = float(kwargs.pop("pulse_support_consensus_beta", 5.0))
         pulse_support_consensus_eta = float(kwargs.pop("pulse_support_consensus_eta", 0.05))
-        pulse_evidence_score = _bool_config(kwargs.pop("pulse_evidence_score", True))
+        pulse_evidence_score = _bool_config(kwargs.pop("pulse_evidence_score", False))
         pulse_evidence_mass_weight = float(kwargs.pop("pulse_evidence_mass_weight", 1.0))
         pulse_evidence_cost_weight = float(kwargs.pop("pulse_evidence_cost_weight", 1.0))
         pulse_background_penalty = float(kwargs.pop("pulse_background_penalty", 0.25))
-        pulse_discriminative_evidence = _bool_config(kwargs.pop("pulse_discriminative_evidence", True))
+        enable_discriminative_uot = _bool_config(kwargs.pop("enable_discriminative_uot", False))
+        discriminative_uot_tau = float(kwargs.pop("discriminative_uot_tau", 0.05))
+        discriminative_uot_margin = float(kwargs.pop("discriminative_uot_margin", 0.02))
+        discriminative_uot_mix = float(kwargs.pop("discriminative_uot_mix", 1.0))
+        discriminative_uot_background_penalty = float(kwargs.pop("discriminative_uot_background_penalty", 0.25))
+        discriminative_uot_mass_weight = float(kwargs.pop("discriminative_uot_mass_weight", 1.0))
+        discriminative_uot_cost_weight = float(kwargs.pop("discriminative_uot_cost_weight", 1.0))
+        pulse_discriminative_evidence = _bool_config(kwargs.pop("pulse_discriminative_evidence", False))
         pulse_discriminative_tau = float(kwargs.pop("pulse_discriminative_tau", 0.05))
         pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
         pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
@@ -493,6 +500,13 @@ class OursM2(JECOTM2):
         self.pulse_evidence_mass_weight = float(pulse_evidence_mass_weight)
         self.pulse_evidence_cost_weight = float(pulse_evidence_cost_weight)
         self.pulse_background_penalty = float(pulse_background_penalty)
+        self.enable_discriminative_uot = bool(enable_discriminative_uot)
+        self.discriminative_uot_tau = float(discriminative_uot_tau)
+        self.discriminative_uot_margin = float(discriminative_uot_margin)
+        self.discriminative_uot_mix = float(discriminative_uot_mix)
+        self.discriminative_uot_background_penalty = float(discriminative_uot_background_penalty)
+        self.discriminative_uot_mass_weight = float(discriminative_uot_mass_weight)
+        self.discriminative_uot_cost_weight = float(discriminative_uot_cost_weight)
         self.pulse_discriminative_evidence = bool(pulse_discriminative_evidence)
         self.pulse_discriminative_tau = float(pulse_discriminative_tau)
         self.pulse_discriminative_margin = float(pulse_discriminative_margin)
@@ -501,10 +515,18 @@ class OursM2(JECOTM2):
             ("pulse_evidence_mass_weight", self.pulse_evidence_mass_weight),
             ("pulse_evidence_cost_weight", self.pulse_evidence_cost_weight),
             ("pulse_background_penalty", self.pulse_background_penalty),
+            ("discriminative_uot_margin", self.discriminative_uot_margin),
+            ("discriminative_uot_background_penalty", self.discriminative_uot_background_penalty),
+            ("discriminative_uot_mass_weight", self.discriminative_uot_mass_weight),
+            ("discriminative_uot_cost_weight", self.discriminative_uot_cost_weight),
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if self.discriminative_uot_tau <= 0.0:
+            raise ValueError("discriminative_uot_tau must be positive")
+        if not 0.0 <= self.discriminative_uot_mix <= 1.0:
+            raise ValueError("discriminative_uot_mix must be in [0, 1]")
         if self.pulse_discriminative_tau <= 0.0:
             raise ValueError("pulse_discriminative_tau must be positive")
         if not 0.0 <= self.pulse_discriminative_mix <= 1.0:
@@ -801,6 +823,73 @@ class OursM2(JECOTM2):
             "pulse/discriminative_gate_mean": effective_gate.mean().detach(),
             "pulse/discriminative_gate_low_share": (effective_gate < 0.5).to(flat_cost.dtype).mean().detach(),
             "pulse/rival_advantage_mean": rival_advantage.mean().detach(),
+        }
+        return pair_evidence, payload
+
+    def _origin_discriminative_pair_evidence(
+        self,
+        *,
+        flat_cost: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match way*shot={way_num * shot_num}")
+
+        pair_prior = torch.ones(
+            num_query,
+            int(way_num),
+            int(shot_num),
+            query_len,
+            support_len,
+            device=flat_cost.device,
+            dtype=flat_cost.dtype,
+        )
+        if int(way_num) <= 1 or float(self.discriminative_uot_mix) <= 0.0:
+            rival_gate = torch.ones_like(pair_prior)
+            rival_advantage = torch.zeros_like(pair_prior)
+        else:
+            cost_view = flat_cost.reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+            tau = max(float(self.discriminative_uot_tau), float(self.eps))
+            margin = flat_cost.new_tensor(float(self.discriminative_uot_margin))
+            gates = []
+            advantages = []
+            all_classes = torch.arange(int(way_num), device=flat_cost.device)
+            for class_idx in range(int(way_num)):
+                rival_mask = all_classes != int(class_idx)
+                rival_cost = cost_view[:, rival_mask]
+                rival_cost = rival_cost.permute(0, 3, 1, 2, 4).reshape(num_query, query_len, -1)
+                rival_count = max(int(rival_cost.shape[-1]), 1)
+                rival_softmin = -tau * (
+                    torch.logsumexp(-rival_cost / tau, dim=-1)
+                    - math.log(float(rival_count))
+                )
+                advantage = rival_softmin[:, None, :, None] - cost_view[:, class_idx] - margin
+                gate = torch.sigmoid(advantage / tau)
+                advantages.append(advantage)
+                gates.append(gate)
+            rival_gate = torch.stack(gates, dim=1)
+            rival_advantage = torch.stack(advantages, dim=1)
+
+        mix = flat_cost.new_tensor(float(self.discriminative_uot_mix))
+        effective_gate = 1.0 + mix * (rival_gate - 1.0)
+        pair_evidence = (pair_prior * effective_gate).clamp(0.0, 1.0)
+        payload = {
+            "discriminative_uot_gate": effective_gate.detach(),
+            "discriminative_uot_rival_advantage": rival_advantage.detach(),
+            "discriminative_uot/enabled": flat_cost.new_tensor(1.0),
+            "discriminative_uot/tau": flat_cost.new_tensor(float(self.discriminative_uot_tau)),
+            "discriminative_uot/margin": flat_cost.new_tensor(float(self.discriminative_uot_margin)),
+            "discriminative_uot/mix": mix.detach(),
+            "discriminative_uot/background_penalty": flat_cost.new_tensor(
+                float(self.discriminative_uot_background_penalty)
+            ),
+            "discriminative_uot/gate_mean": effective_gate.mean().detach(),
+            "discriminative_uot/gate_low_share": (effective_gate < 0.5).to(flat_cost.dtype).mean().detach(),
+            "discriminative_uot/rival_advantage_mean": rival_advantage.mean().detach(),
         }
         return pair_evidence, payload
 
@@ -1770,6 +1859,7 @@ class OursM2(JECOTM2):
             )
         dmuot_payload: dict[str, torch.Tensor] = {}
         pulse_payload: dict[str, torch.Tensor] = {}
+        discriminative_payload: dict[str, torch.Tensor] = {}
         region_uot_payload: dict[str, torch.Tensor] = {}
         adaptive_region_payload: dict[str, torch.Tensor] = {}
         token_g_query = None
@@ -1851,6 +1941,19 @@ class OursM2(JECOTM2):
             cost_for_transport = adaptive_guided_cost
             query_weight = self._combine_token_weight(query_weight, adaptive_query_weight)
             support_weight = self._combine_token_weight(support_weight, adaptive_support_weight)
+
+        if (
+            getattr(self, "enable_discriminative_uot", False)
+            and not getattr(self, "enable_pulse_region_uot", False)
+        ):
+            score_pair_evidence, discriminative_payload = self._origin_discriminative_pair_evidence(
+                flat_cost=cost_for_transport,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            score_evidence_mass_weight = float(self.discriminative_uot_mass_weight)
+            score_evidence_cost_weight = float(self.discriminative_uot_cost_weight)
+            score_background_penalty = float(self.discriminative_uot_background_penalty)
 
         if getattr(self, "enable_pulse_region_uot", False):
             if query_tokens is None or support_tokens is None or spatial_hw is None:
@@ -2050,6 +2153,8 @@ class OursM2(JECOTM2):
             payload.update(dmuot_payload)
         if pulse_payload:
             payload.update(pulse_payload)
+        if discriminative_payload:
+            payload.update(discriminative_payload)
         if region_uot_payload:
             payload.update(region_uot_payload)
         if adaptive_region_payload:
@@ -2414,6 +2519,8 @@ class OursM2(JECOTM2):
             "pulse_query_evidence",
             "pulse_discriminative_gate",
             "pulse_rival_advantage",
+            "discriminative_uot_gate",
+            "discriminative_uot_rival_advantage",
             "pulse_query_marginal_weight",
             "pulse_region_cost_matrix",
             "pulse_guided_cost_matrix",
@@ -2481,7 +2588,15 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
                 else:
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
-        for prefix in ("context/", "struct/", "pulse/", "region_uot/", "adaptive_region/", "mspta/"):
+        for prefix in (
+            "context/",
+            "struct/",
+            "pulse/",
+            "discriminative_uot/",
+            "region_uot/",
+            "adaptive_region/",
+            "mspta/",
+        ):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]
                 if values and all(torch.is_tensor(value) for value in values):

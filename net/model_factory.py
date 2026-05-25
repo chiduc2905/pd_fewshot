@@ -248,6 +248,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_pulse_region_uot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_discriminative_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_discriminative_uot is supported only with --model ours_final")
 
 
 MODEL_REGISTRY = {
@@ -2850,8 +2854,8 @@ def build_model_from_args(args):
                                 getattr(args, "pulse_support_consensus_eta", 0.05)
                             ),
                             "pulse_evidence_score": _bool_flag(
-                                getattr(args, "pulse_evidence_score", True),
-                                default=True,
+                                getattr(args, "pulse_evidence_score", False),
+                                default=False,
                             ),
                             "pulse_evidence_mass_weight": float(
                                 getattr(args, "pulse_evidence_mass_weight", 1.0)
@@ -2862,9 +2866,31 @@ def build_model_from_args(args):
                             "pulse_background_penalty": float(
                                 getattr(args, "pulse_background_penalty", 0.25)
                             ),
+                            "enable_discriminative_uot": _bool_flag(
+                                getattr(args, "enable_discriminative_uot", False),
+                                default=False,
+                            ),
+                            "discriminative_uot_tau": float(
+                                getattr(args, "discriminative_uot_tau", 0.05)
+                            ),
+                            "discriminative_uot_margin": float(
+                                getattr(args, "discriminative_uot_margin", 0.02)
+                            ),
+                            "discriminative_uot_mix": float(
+                                getattr(args, "discriminative_uot_mix", 1.0)
+                            ),
+                            "discriminative_uot_background_penalty": float(
+                                getattr(args, "discriminative_uot_background_penalty", 0.25)
+                            ),
+                            "discriminative_uot_mass_weight": float(
+                                getattr(args, "discriminative_uot_mass_weight", 1.0)
+                            ),
+                            "discriminative_uot_cost_weight": float(
+                                getattr(args, "discriminative_uot_cost_weight", 1.0)
+                            ),
                             "pulse_discriminative_evidence": _bool_flag(
-                                getattr(args, "pulse_discriminative_evidence", True),
-                                default=True,
+                                getattr(args, "pulse_discriminative_evidence", False),
+                                default=False,
                             ),
                             "pulse_discriminative_tau": float(
                                 getattr(args, "pulse_discriminative_tau", 0.05)
@@ -2878,6 +2904,32 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_discriminative_uot": True,
+                            "discriminative_uot_tau": float(
+                                getattr(args, "discriminative_uot_tau", 0.05)
+                            ),
+                            "discriminative_uot_margin": float(
+                                getattr(args, "discriminative_uot_margin", 0.02)
+                            ),
+                            "discriminative_uot_mix": float(
+                                getattr(args, "discriminative_uot_mix", 1.0)
+                            ),
+                            "discriminative_uot_background_penalty": float(
+                                getattr(args, "discriminative_uot_background_penalty", 0.25)
+                            ),
+                            "discriminative_uot_mass_weight": float(
+                                getattr(args, "discriminative_uot_mass_weight", 1.0)
+                            ),
+                            "discriminative_uot_cost_weight": float(
+                                getattr(args, "discriminative_uot_cost_weight", 1.0)
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_discriminative_uot", False), default=False)
                         else {}
                     ),
                     **(
