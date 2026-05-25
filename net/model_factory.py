@@ -2849,6 +2849,19 @@ def build_model_from_args(args):
                             "pulse_support_consensus_eta": float(
                                 getattr(args, "pulse_support_consensus_eta", 0.05)
                             ),
+                            "pulse_evidence_score": _bool_flag(
+                                getattr(args, "pulse_evidence_score", True),
+                                default=True,
+                            ),
+                            "pulse_evidence_mass_weight": float(
+                                getattr(args, "pulse_evidence_mass_weight", 1.0)
+                            ),
+                            "pulse_evidence_cost_weight": float(
+                                getattr(args, "pulse_evidence_cost_weight", 1.0)
+                            ),
+                            "pulse_background_penalty": float(
+                                getattr(args, "pulse_background_penalty", 0.25)
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_pulse_region_uot", False), default=False)

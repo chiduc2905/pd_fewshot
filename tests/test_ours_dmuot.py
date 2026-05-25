@@ -1075,6 +1075,8 @@ def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
     assert torch.isfinite(outputs["logits"]).all()
     assert "pulse_query_saliency" in outputs
     assert "pulse_support_saliency" in outputs
+    assert "pulse_query_evidence" in outputs
+    assert "pulse_support_evidence" in outputs
     assert "pulse_guided_cost_matrix" in outputs
     assert "base_cost_matrix" in outputs
     assert outputs["cost_matrix"].shape == outputs["base_cost_matrix"].shape
@@ -1086,8 +1088,60 @@ def test_pulse_region_uot_enabled_runs_and_exposes_diagnostics():
         "pulse/support_saliency_peak",
         "pulse/region_cost_delta_ratio",
         "pulse/effective_strength",
+        "pulse/evidence_score_enabled",
+        "pulse/background_penalty",
+        "evidence_score_background_penalty",
+        "evidence_score_pair_mean",
     ):
         assert key in outputs, f"Missing diagnostic key: {key}"
+
+
+def test_pulse_region_evidence_mask_expands_single_token_peak():
+    model = _tiny_ours_final(enable_pulse_region_uot=True, pulse_region_kernel_size=3)
+    saliency = torch.zeros(1, 16)
+    saliency[0, 5] = 1.0
+
+    evidence = model._pulse_region_evidence_mask(saliency, spatial_hw=(4, 4))
+
+    assert evidence.shape == saliency.shape
+    assert evidence.max().item() == pytest.approx(1.0)
+    assert int((evidence > 0.0).sum().item()) > 1
+
+
+def test_pulse_evidence_score_changes_logits_and_tracks_background_mass():
+    torch.manual_seed(903)
+    common = dict(
+        enable_pulse_region_uot=True,
+        pulse_region_kernel_size=3,
+        pulse_region_cost_weight=0.25,
+        pulse_saliency_mass_mix=0.5,
+    )
+    baseline = _tiny_ours_final(**common, pulse_evidence_score=False)
+    evidence = _tiny_ours_final(**common, pulse_evidence_score=True, pulse_background_penalty=0.25)
+    evidence.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    evidence.eval()
+
+    query = torch.zeros(1, 2, 3, 64, 64)
+    support = torch.zeros(1, 2, 1, 3, 64, 64)
+    query[:, 0, :, 10:22, 10:22] = 4.0
+    support[:, 0, 0, :, 10:22, 10:22] = 4.0
+    query[:, 1, :, 42:54, 42:54] = 4.0
+    support[:, 1, 0, :, 42:54, 42:54] = 4.0
+
+    with torch.no_grad():
+        baseline_outputs = baseline(query, support, return_aux=True)
+        evidence_outputs = evidence(query, support, return_aux=True)
+
+    assert not torch.allclose(evidence_outputs["logits"], baseline_outputs["logits"])
+    assert "shot_evidence_score_mass" in evidence_outputs
+    assert "shot_evidence_score_background_mass" in evidence_outputs
+    assert torch.all(evidence_outputs["shot_evidence_score_mass"] >= 0.0)
+    assert torch.all(evidence_outputs["shot_evidence_score_background_mass"] >= 0.0)
+    assert torch.all(
+        evidence_outputs["shot_evidence_score_background_mass"]
+        <= evidence_outputs["shot_transported_mass"] + 1e-6
+    )
 
 
 def test_pulse_region_train_schedule_reduces_train_guidance_but_not_eval():
@@ -1166,6 +1220,10 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
         pulse_region_multishot_train_strength=0.25,
         pulse_region_multishot_eval_strength=0.45,
         pulse_support_consensus_weight=0.7,
+        pulse_evidence_score="false",
+        pulse_evidence_mass_weight=1.25,
+        pulse_evidence_cost_weight=0.75,
+        pulse_background_penalty=0.15,
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -1182,6 +1240,10 @@ def test_pulse_region_uot_factory_flags_are_ours_final_only():
     assert ours_final.pulse_region_multishot_train_strength == pytest.approx(0.25)
     assert ours_final.pulse_region_multishot_eval_strength == pytest.approx(0.45)
     assert ours_final.pulse_support_consensus_weight == pytest.approx(0.7)
+    assert not ours_final.pulse_evidence_score
+    assert ours_final.pulse_evidence_mass_weight == pytest.approx(1.25)
+    assert ours_final.pulse_evidence_cost_weight == pytest.approx(0.75)
+    assert ours_final.pulse_background_penalty == pytest.approx(0.15)
 
     with pytest.raises(ValueError, match="--enable_pulse_region_uot is supported only with --model ours_final"):
         build_model_from_args(

@@ -340,6 +340,10 @@ class OursM2(JECOTM2):
         pulse_support_consensus_weight = float(kwargs.pop("pulse_support_consensus_weight", 0.0))
         pulse_support_consensus_beta = float(kwargs.pop("pulse_support_consensus_beta", 5.0))
         pulse_support_consensus_eta = float(kwargs.pop("pulse_support_consensus_eta", 0.05))
+        pulse_evidence_score = _bool_config(kwargs.pop("pulse_evidence_score", True))
+        pulse_evidence_mass_weight = float(kwargs.pop("pulse_evidence_mass_weight", 1.0))
+        pulse_evidence_cost_weight = float(kwargs.pop("pulse_evidence_cost_weight", 1.0))
+        pulse_background_penalty = float(kwargs.pop("pulse_background_penalty", 0.25))
         enable_pot_guide = bool(kwargs.pop("enable_pot_guide", False))
         pot_guide_s = float(kwargs.pop("pot_guide_s", 0.5))
         pot_guide_adaptive_s = bool(kwargs.pop("pot_guide_adaptive_s", False))
@@ -481,6 +485,17 @@ class OursM2(JECOTM2):
             raise ValueError("pulse_support_consensus_beta must be positive")
         if not 0.0 <= self.pulse_support_consensus_eta <= 1.0:
             raise ValueError("pulse_support_consensus_eta must be in [0, 1]")
+        self.pulse_evidence_score = bool(pulse_evidence_score)
+        self.pulse_evidence_mass_weight = float(pulse_evidence_mass_weight)
+        self.pulse_evidence_cost_weight = float(pulse_evidence_cost_weight)
+        self.pulse_background_penalty = float(pulse_background_penalty)
+        for name, value in (
+            ("pulse_evidence_mass_weight", self.pulse_evidence_mass_weight),
+            ("pulse_evidence_cost_weight", self.pulse_evidence_cost_weight),
+            ("pulse_background_penalty", self.pulse_background_penalty),
+        ):
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative")
         if self.enable_pulse_region_uot:
             self.pulse_region_guidance = PulseRegionGuidance(
                 kernel_size=pulse_region_kernel_size,
@@ -650,6 +665,53 @@ class OursM2(JECOTM2):
             saliency = weights[0] * image_norm + weights[1] * feature_norm + weights[2] * contrast
             saliency = saliency.clamp_min(0.0)
             return saliency.flatten(1).to(device=feature_map.device, dtype=feature_map.dtype)
+
+    def _pulse_region_evidence_mask(
+        self,
+        saliency: torch.Tensor,
+        spatial_hw: tuple[int, int],
+    ) -> torch.Tensor:
+        """Convert token saliency into a soft connected pulse-region evidence mask."""
+        if saliency.dim() < 2:
+            raise ValueError(f"saliency must have a token dimension, got {tuple(saliency.shape)}")
+        original_shape = saliency.shape
+        token_count = int(original_shape[-1])
+        height, width = int(spatial_hw[0]), int(spatial_hw[1])
+        flat = torch.nan_to_num(
+            saliency.detach(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0).reshape(-1, token_count)
+        values_min = flat.amin(dim=-1, keepdim=True)
+        values_max = flat.amax(dim=-1, keepdim=True)
+        denom = (values_max - values_min).clamp_min(self.eps)
+        base = (flat - values_min) / denom
+        base = torch.where(
+            (values_max - values_min) > self.eps,
+            base,
+            torch.ones_like(base),
+        )
+        if token_count != height * width:
+            return base.reshape(original_shape).to(device=saliency.device, dtype=saliency.dtype)
+
+        evidence_map = base.reshape(-1, 1, height, width)
+        kernel = int(getattr(getattr(self, "pulse_region_guidance", None), "kernel_size", 3))
+        if kernel > 1:
+            padding = kernel // 2
+            expanded = F.max_pool2d(evidence_map, kernel_size=kernel, stride=1, padding=padding)
+            regional = F.avg_pool2d(
+                expanded,
+                kernel_size=kernel,
+                stride=1,
+                padding=padding,
+                count_include_pad=False,
+            )
+            evidence_map = 0.5 * evidence_map + 0.5 * regional
+        evidence = evidence_map.flatten(1)
+        peak = evidence.amax(dim=-1, keepdim=True)
+        evidence = torch.where(peak > self.eps, evidence / peak.clamp_min(self.eps), torch.ones_like(evidence))
+        return evidence.clamp(0.0, 1.0).reshape(original_shape).to(device=saliency.device, dtype=saliency.dtype)
 
     def _record_pulse_saliency(self, images: torch.Tensor, feature_map: torch.Tensor) -> None:
         if not getattr(self, "enable_pulse_region_uot", False):
@@ -1622,6 +1684,11 @@ class OursM2(JECOTM2):
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
+        score_query_evidence = None
+        score_support_evidence = None
+        score_evidence_mass_weight = float(self.pulse_evidence_mass_weight)
+        score_evidence_cost_weight = float(self.pulse_evidence_cost_weight)
+        score_background_penalty = float(self.pulse_background_penalty)
         mspta_payload: dict[str, torch.Tensor] = {}
         if getattr(self, "enable_mspta", False):
             if query_weight is not None or support_weight is not None:
@@ -1736,6 +1803,39 @@ class OursM2(JECOTM2):
                 pulse_query_weight = q_uniform + pulse_strength * (pulse_query_weight - q_uniform)
                 pulse_support_weight = s_uniform + pulse_strength * (pulse_support_weight - s_uniform)
             pulse_payload["pulse/effective_strength"] = pulse_strength.detach()
+            if getattr(self, "pulse_evidence_score", True):
+                score_query_evidence = self._pulse_region_evidence_mask(query_saliency, spatial_hw)
+                score_support_evidence = self._pulse_region_evidence_mask(support_saliency, spatial_hw)
+                pulse_strength_value = float(pulse_strength.detach().cpu().item())
+                score_evidence_mass_weight = 1.0 + pulse_strength_value * (
+                    float(self.pulse_evidence_mass_weight) - 1.0
+                )
+                score_evidence_cost_weight = 1.0 + pulse_strength_value * (
+                    float(self.pulse_evidence_cost_weight) - 1.0
+                )
+                score_background_penalty = pulse_strength_value * float(self.pulse_background_penalty)
+                if pulse_strength.item() < 1.0:
+                    q_ones = torch.ones_like(score_query_evidence)
+                    s_ones = torch.ones_like(score_support_evidence)
+                    score_query_evidence = q_ones + pulse_strength * (score_query_evidence - q_ones)
+                    score_support_evidence = s_ones + pulse_strength * (score_support_evidence - s_ones)
+                pulse_payload.update(
+                    {
+                        "pulse_query_evidence": score_query_evidence.detach(),
+                        "pulse_support_evidence": score_support_evidence.detach(),
+                        "pulse/evidence_score_enabled": flat_cost.new_tensor(1.0),
+                        "pulse/evidence_mass_weight": flat_cost.new_tensor(score_evidence_mass_weight),
+                        "pulse/evidence_cost_weight": flat_cost.new_tensor(score_evidence_cost_weight),
+                        "pulse/background_penalty": flat_cost.new_tensor(score_background_penalty),
+                        "pulse/background_penalty_config": flat_cost.new_tensor(
+                            float(self.pulse_background_penalty)
+                        ),
+                        "pulse/query_evidence_area50": (score_query_evidence > 0.5).to(flat_cost.dtype).mean().detach(),
+                        "pulse/support_evidence_area50": (
+                            score_support_evidence > 0.5
+                        ).to(flat_cost.dtype).mean().detach(),
+                    }
+                )
             if pulse_strength.item() < 1.0:
                 pulse_payload["pulse_guided_cost_matrix"] = cost_for_transport.reshape(
                     flat_cost.shape[0],
@@ -1818,6 +1918,11 @@ class OursM2(JECOTM2):
             support_tokens=support_tokens,
             query_tokens=query_tokens,
             spatial_hw=spatial_hw,
+            score_query_evidence=score_query_evidence,
+            score_support_evidence=score_support_evidence,
+            score_evidence_mass_weight=score_evidence_mass_weight,
+            score_evidence_cost_weight=score_evidence_cost_weight,
+            score_background_penalty=score_background_penalty,
         )
 
         if dmuot_payload:
@@ -2203,6 +2308,7 @@ class OursM2(JECOTM2):
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
         for key in (
             "pulse_query_saliency",
+            "pulse_query_evidence",
             "pulse_query_marginal_weight",
             "pulse_region_cost_matrix",
             "pulse_guided_cost_matrix",
@@ -2224,6 +2330,7 @@ class OursM2(JECOTM2):
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
         for key in (
             "pulse_support_saliency",
+            "pulse_support_evidence",
             "pulse_support_marginal_weight",
             "adaptive_region_support_masks",
             "adaptive_region_support_weight",

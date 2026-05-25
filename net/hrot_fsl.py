@@ -3072,6 +3072,11 @@ class HROTFSL(BaseConv64FewShotModel):
         support_tokens: torch.Tensor | None = None,
         query_tokens: torch.Tensor | None = None,
         spatial_hw: tuple[int, int] | None = None,
+        score_query_evidence: torch.Tensor | None = None,
+        score_support_evidence: torch.Tensor | None = None,
+        score_evidence_mass_weight: float = 1.0,
+        score_evidence_cost_weight: float = 1.0,
+        score_background_penalty: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
             raise RuntimeError("ECOT variants require an episode_controller")
@@ -3338,6 +3343,52 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
         D_bank = cost_bank.view(num_query, way_num, shot_num, budget_count, query_len, support_len)
+        evidence_pair_bank: torch.Tensor | None = None
+        evidence_mass_bank: torch.Tensor | None = None
+        evidence_cost_bank: torch.Tensor | None = None
+        evidence_background_mass_bank: torch.Tensor | None = None
+        evidence_mass_for_score_bank: torch.Tensor | None = None
+        if (score_query_evidence is None) != (score_support_evidence is None):
+            raise ValueError("score_query_evidence and score_support_evidence must be provided together")
+        if score_query_evidence is not None and score_support_evidence is not None:
+            if tuple(score_query_evidence.shape) != (num_query, query_len):
+                raise ValueError(
+                    "score_query_evidence must have shape (NumQuery, QueryTokens), "
+                    f"got {tuple(score_query_evidence.shape)}"
+                )
+            query_evidence = torch.nan_to_num(
+                score_query_evidence.to(device=flat_cost.device, dtype=flat_cost.dtype),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp(0.0, 1.0)
+            support_evidence = score_support_evidence.to(device=flat_cost.device, dtype=flat_cost.dtype)
+            support_evidence = torch.nan_to_num(support_evidence, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+            if tuple(support_evidence.shape) == (way_num, shot_num, support_len):
+                support_evidence_flat = support_evidence.reshape(num_pairs, support_len)
+            elif tuple(support_evidence.shape) == (num_pairs, support_len):
+                support_evidence_flat = support_evidence
+            else:
+                raise ValueError(
+                    "score_support_evidence must have shape (Way, Shot, SupportTokens) "
+                    f"or (Way*Shot, SupportTokens), got {tuple(score_support_evidence.shape)}"
+                )
+            evidence_pair = torch.sqrt(
+                (
+                    query_evidence[:, None, :, None]
+                    * support_evidence_flat[None, :, None, :]
+                ).clamp_min(0.0)
+            )
+            evidence_pair_bank = evidence_pair.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                query_len,
+                support_len,
+            ).unsqueeze(3).expand(-1, -1, -1, budget_count, -1, -1)
+            evidence_mass_bank = (plan_bank * evidence_pair_bank).sum(dim=(-1, -2))
+            evidence_cost_bank = (plan_bank * D_bank * evidence_pair_bank).sum(dim=(-1, -2))
+            evidence_background_mass_bank = (plan_bank * (1.0 - evidence_pair_bank)).sum(dim=(-1, -2))
         noise_query_mass_bank = (
             None
             if noise_query_mass is None
@@ -3371,27 +3422,46 @@ class HROTFSL(BaseConv64FewShotModel):
 
         mass_for_score_bank = shot_mass_bank
         mass_consensus_bank: torch.Tensor | None = None
+        evidence_mass_consensus_bank: torch.Tensor | None = None
         if self.ecot_m2_mass_score_mode == "shot_consensus":
             mass_consensus_bank = shot_mass_bank.mean(dim=2, keepdim=True)
             alpha_mass = flat_cost.new_tensor(float(self.ecot_m2_consensus_mass_alpha))
             mass_for_score_bank = (1.0 - alpha_mass) * shot_mass_bank + alpha_mass * mass_consensus_bank
+            if evidence_mass_bank is not None:
+                evidence_mass_consensus_bank = evidence_mass_bank.mean(dim=2, keepdim=True)
+                evidence_mass_for_score_bank = (
+                    (1.0 - alpha_mass) * evidence_mass_bank
+                    + alpha_mass * evidence_mass_consensus_bank
+                )
+        elif evidence_mass_bank is not None:
+            evidence_mass_for_score_bank = evidence_mass_bank
         if self.ecot_m2_mass_reward_shot_scaling == "multi_shot_beta" and shot_num > 1:
             mass_reward_beta = flat_cost.new_tensor(float(self.ecot_m2_mass_reward_beta))
         else:
             mass_reward_beta = flat_cost.new_tensor(1.0)
+        evidence_mass_weight = flat_cost.new_tensor(float(score_evidence_mass_weight))
+        evidence_cost_weight = flat_cost.new_tensor(float(score_evidence_cost_weight))
+        evidence_background_penalty = flat_cost.new_tensor(float(score_background_penalty))
+        use_evidence_score = evidence_mass_bank is not None
 
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
+                active_mass_bank = evidence_mass_bank if use_evidence_score else shot_mass_bank
+                active_cost_bank = evidence_cost_bank if use_evidence_score else shot_cost_bank
+                if active_mass_bank is None or active_cost_bank is None:
+                    raise RuntimeError("Evidence score state was not initialized")
                 mass_denom = (
-                    shot_mass_bank.detach()
+                    active_mass_bank.detach()
                     if self.ecot_m2_cost_per_mass_detach_mass
-                    else shot_mass_bank
+                    else active_mass_bank
                 )
                 score_terms = (
                     -float(self.ecot_m2_cost_per_mass_alpha)
-                    * shot_cost_bank
+                    * active_cost_bank
                     / (mass_denom + self.eps)
                 )
+                if use_evidence_score and evidence_background_mass_bank is not None:
+                    score_terms = score_terms - evidence_background_penalty * evidence_background_mass_bank
             else:
                 thr = (
                     torch.zeros_like(active_threshold)
@@ -3399,11 +3469,15 @@ class HROTFSL(BaseConv64FewShotModel):
                     else active_threshold
                 )
                 if self.ecot_m2_pst_scorer is not None and not self.ecot_m2_ablate_threshold_mass:
+                    pst_cost_bank = evidence_cost_bank if use_evidence_score else shot_cost_bank
+                    pst_mass_bank = evidence_mass_bank if use_evidence_score else shot_mass_bank
+                    if pst_cost_bank is None or pst_mass_bank is None:
+                        raise RuntimeError("Evidence score state was not initialized")
                     pst_features = torch.stack(
                         [
-                            shot_cost_bank.detach(),
-                            shot_mass_bank.detach(),
-                            shot_cost_bank.detach() / shot_mass_bank.detach().clamp_min(self.eps),
+                            pst_cost_bank.detach(),
+                            pst_mass_bank.detach(),
+                            pst_cost_bank.detach() / pst_mass_bank.detach().clamp_min(self.eps),
                         ],
                         dim=-1,
                     )
@@ -3415,6 +3489,22 @@ class HROTFSL(BaseConv64FewShotModel):
                     thr = (thr * torch.exp(0.25 * torch.tanh(raw_delta))).clamp_min(self.eps)
                 if self.ecot_m2_use_swts:
                     score_terms = swts_pre_score
+                elif use_evidence_score:
+                    if (
+                        evidence_mass_for_score_bank is None
+                        or evidence_cost_bank is None
+                        or evidence_background_mass_bank is None
+                    ):
+                        raise RuntimeError("Evidence score state was not initialized")
+                    score_terms = (
+                        mass_reward_beta
+                        * thr
+                        * (
+                            evidence_mass_weight * evidence_mass_for_score_bank
+                            - evidence_background_penalty * evidence_background_mass_bank
+                        )
+                        - evidence_cost_weight * evidence_cost_bank
+                    )
                 else:
                     score_terms = mass_reward_beta * thr * mass_for_score_bank - shot_cost_bank
             if sink_penalty_bank is not None:
@@ -3452,6 +3542,13 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_cost_diag = (pi_view * shot_cost_bank).sum(dim=-1)
         shot_mass_diag = (pi_view * shot_mass_bank).sum(dim=-1)
         shot_mass_for_score_diag = (pi_view * mass_for_score_bank).sum(dim=-1)
+        evidence_mass_diag = None if evidence_mass_bank is None else (pi_view * evidence_mass_bank).sum(dim=-1)
+        evidence_cost_diag = None if evidence_cost_bank is None else (pi_view * evidence_cost_bank).sum(dim=-1)
+        evidence_background_mass_diag = (
+            None
+            if evidence_background_mass_bank is None
+            else (pi_view * evidence_background_mass_bank).sum(dim=-1)
+        )
         noise_query_mass_diag = None if noise_query_mass_bank is None else (pi_view * noise_query_mass_bank).sum(dim=-1)
         noise_support_mass_diag = (
             None if noise_support_mass_bank is None else (pi_view * noise_support_mass_bank).sum(dim=-1)
@@ -3559,6 +3656,36 @@ class HROTFSL(BaseConv64FewShotModel):
                     ),
                 }
             )
+        if use_evidence_score:
+            if (
+                evidence_mass_bank is None
+                or evidence_cost_bank is None
+                or evidence_background_mass_bank is None
+                or evidence_mass_diag is None
+                or evidence_cost_diag is None
+                or evidence_background_mass_diag is None
+            ):
+                raise RuntimeError("Evidence score diagnostics were not initialized")
+            payload.update(
+                {
+                    "shot_evidence_score_mass": evidence_mass_diag,
+                    "shot_evidence_score_cost": evidence_cost_diag,
+                    "shot_evidence_score_background_mass": evidence_background_mass_diag,
+                    "evidence_score_mass_bank": evidence_mass_bank,
+                    "evidence_score_cost_bank": evidence_cost_bank,
+                    "evidence_score_background_mass_bank": evidence_background_mass_bank,
+                    "evidence_score_mass_for_score_bank": evidence_mass_for_score_bank,
+                    "evidence_score_mass_weight": evidence_mass_weight.detach(),
+                    "evidence_score_cost_weight": evidence_cost_weight.detach(),
+                    "evidence_score_background_penalty": evidence_background_penalty.detach(),
+                    "evidence_score_pair_mean": evidence_pair_bank.mean().detach(),
+                    "evidence_score_pair_peak": evidence_pair_bank.amax(dim=(-1, -2)).mean().detach(),
+                }
+            )
+            if evidence_mass_consensus_bank is not None:
+                payload["evidence_score_mass_consensus_bank"] = evidence_mass_consensus_bank.expand_as(
+                    evidence_mass_bank
+                )
         if self.ecot_m2_mass_reward_shot_scaling != "none":
             payload["ecot_m2_mass_reward_beta_effective"] = mass_reward_beta
         if swts_w_entropy_mean is not None:
@@ -5211,7 +5338,12 @@ class HROTFSL(BaseConv64FewShotModel):
             "rho": torch.cat([item["rho"] for item in batch_outputs], dim=0),
             "rho_regularization": torch.stack([item["rho_regularization"] for item in batch_outputs]).mean(),
             "rho_rank_loss": torch.stack([item["rho_rank_loss"] for item in batch_outputs]).mean(),
-            "cost_margin_aux_loss": torch.stack([item["cost_margin_aux_loss"] for item in batch_outputs]).mean(),
+            "cost_margin_aux_loss": torch.stack(
+                [
+                    item.get("cost_margin_aux_loss", item["aux_loss"].new_zeros(()))
+                    for item in batch_outputs
+                ]
+            ).mean(),
             "curvature_regularization": torch.stack([item["curvature_regularization"] for item in batch_outputs]).mean(),
             "curvature": torch.stack([item["curvature"] for item in batch_outputs]).mean(),
             "hyperbolic_backend": torch.stack([item["hyperbolic_backend"] for item in batch_outputs]).mean(),
@@ -5240,6 +5372,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_shot_transported_mass_bank",
             "ecot_m2_mass_for_score_bank",
             "ecot_m2_mass_consensus_bank",
+            "evidence_score_mass_bank",
+            "evidence_score_cost_bank",
+            "evidence_score_background_mass_bank",
+            "evidence_score_mass_for_score_bank",
+            "evidence_score_mass_consensus_bank",
             "ecot_noise_sink_query_mass_bank",
             "ecot_noise_sink_support_mass_bank",
             "ecot_noise_sink_self_mass_bank",
@@ -5383,6 +5520,9 @@ class HROTFSL(BaseConv64FewShotModel):
             "shot_logits",
             "shot_pool_weights",
             "shot_mass_for_score",
+            "shot_evidence_score_mass",
+            "shot_evidence_score_cost",
+            "shot_evidence_score_background_mass",
             "q_enhanced_logits",
             "h_anchor_logits",
             "h_anchor_shot_logits",
@@ -5461,6 +5601,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_ccem_uniform_mix",
             "ecot_ccem_tau_q",
             "ecot_ccem_tau_s",
+            "evidence_score_mass_weight",
+            "evidence_score_cost_weight",
+            "evidence_score_background_penalty",
+            "evidence_score_pair_mean",
+            "evidence_score_pair_peak",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

@@ -1658,6 +1658,31 @@ def get_args():
     parser.add_argument("--pulse_support_consensus_beta", type=float, default=5.0)
     parser.add_argument("--pulse_support_consensus_eta", type=float, default=0.05)
     parser.add_argument(
+        "--pulse_evidence_score",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="When pulse-region UOT is enabled, score pulse-to-pulse transported evidence instead of total mass.",
+    )
+    parser.add_argument(
+        "--pulse_evidence_mass_weight",
+        type=float,
+        default=1.0,
+        help="Reward multiplier for pulse-to-pulse transported mass in pulse evidence scoring.",
+    )
+    parser.add_argument(
+        "--pulse_evidence_cost_weight",
+        type=float,
+        default=1.0,
+        help="Cost multiplier for pulse-to-pulse transport cost in pulse evidence scoring.",
+    )
+    parser.add_argument(
+        "--pulse_background_penalty",
+        type=float,
+        default=0.25,
+        help="Threshold-scaled penalty on transported mass outside pulse-to-pulse evidence.",
+    )
+    parser.add_argument(
         "--enable_pot_guide",
         action="store_true",
         default=False,
@@ -3831,6 +3856,10 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_support_consensus_weight",
             "pulse_support_consensus_beta",
             "pulse_support_consensus_eta",
+            "pulse_evidence_score",
+            "pulse_evidence_mass_weight",
+            "pulse_evidence_cost_weight",
+            "pulse_background_penalty",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
