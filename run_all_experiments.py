@@ -386,8 +386,8 @@ def get_args():
         choices=["auto", "true", "false"],
         help=(
             "Forwarded to main.py to export UOT/Partial-OT transport evidence and "
-            "query-to-all-class support comparison figures during final test. "
-            "auto follows main.py defaults, which enable the paper figure for Ours-Final."
+            "support comparison figures during final test. "
+            "auto follows main.py defaults, which enable one-class paper figures for Ours-Final and full_ot."
         ),
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
@@ -1873,8 +1873,21 @@ def uot_evidence_artifacts_exist(
             f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
             f"{shot}shot{tag_suffix}{protocol_suffix}_ep*.png"
         )
-        if not any(Path("results").glob(pattern)):
+        matches = list(Path("results").glob(pattern))
+        main_matches = [
+            path
+            for path in matches
+            if not path.stem.endswith("_transport_matrix") and not path.stem.endswith("_all_classes")
+        ]
+        if not main_matches:
             return False
+        if model in {OURS_FINAL_MODEL_NAME, OURS_FINAL_PARTIAL_OT_MODEL_NAME}:
+            matrix_pattern = (
+                f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
+                f"{shot}shot{tag_suffix}{protocol_suffix}_ep*_transport_matrix.png"
+            )
+            if not any(Path("results").glob(matrix_pattern)):
+                return False
     return True
 
 

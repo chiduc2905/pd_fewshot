@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Polygon, Rectangle
 
 
 PROFILE_METRICS = (
@@ -512,6 +512,65 @@ def _top_transport_matches(
     return matches
 
 
+def _dense_transport_matches(
+    pair_plan: torch.Tensor | np.ndarray,
+    *,
+    match_scores: torch.Tensor | np.ndarray | None = None,
+    max_matches: int = 180,
+    eps: float = 1e-8,
+) -> list[tuple[int, int, float, float]]:
+    if torch.is_tensor(pair_plan):
+        plan = pair_plan.detach().float().cpu()
+    else:
+        plan = torch.as_tensor(pair_plan, dtype=torch.float32)
+    if plan.dim() != 2:
+        raise ValueError(f"pair_plan must be 2-D, got shape={tuple(plan.shape)}")
+    if match_scores is None:
+        scores = plan
+    elif torch.is_tensor(match_scores):
+        scores = match_scores.detach().float().cpu()
+    else:
+        scores = torch.as_tensor(match_scores, dtype=torch.float32)
+    if tuple(scores.shape) != tuple(plan.shape):
+        raise ValueError(f"match_scores must have shape={tuple(plan.shape)}, got {tuple(scores.shape)}")
+    scores = scores.clamp_min(0.0)
+    flat_scores = scores.flatten()
+    positive = torch.nonzero(flat_scores > eps, as_tuple=False).flatten()
+    total_score = float(flat_scores.sum().item())
+    if positive.numel() == 0 or total_score <= eps:
+        return []
+
+    budget = min(max(1, int(max_matches)), int(positive.numel()))
+    if positive.numel() <= budget:
+        chosen = positive
+    else:
+        top_budget = max(1, int(round(0.70 * budget)))
+        spread_budget = max(0, budget - top_budget)
+        _, top_local = torch.topk(flat_scores[positive], k=top_budget)
+        chosen_parts = [positive[top_local]]
+        if spread_budget > 0:
+            spread_positions = torch.linspace(0, positive.numel() - 1, steps=spread_budget).round().long()
+            chosen_parts.append(positive[spread_positions])
+        chosen = torch.unique(torch.cat(chosen_parts), sorted=False)
+        if chosen.numel() < budget:
+            _, fill_local = torch.topk(flat_scores[positive], k=budget)
+            chosen = torch.unique(torch.cat([chosen, positive[fill_local]]), sorted=False)
+        chosen = chosen[:budget]
+
+    width = int(plan.shape[1])
+    matches: list[tuple[int, int, float, float]] = []
+    for flat_idx in chosen.tolist():
+        query_token = int(flat_idx // width)
+        support_token = int(flat_idx % width)
+        mass = float(plan[query_token, support_token].item())
+        score = float(scores[query_token, support_token].item())
+        if score <= eps or mass <= eps:
+            continue
+        matches.append((query_token, support_token, mass, score / max(total_score, eps)))
+    matches.sort(key=lambda item: item[3])
+    return matches
+
+
 def _plot_transport_correspondence(
     ax: plt.Axes,
     query_image: np.ndarray,
@@ -620,58 +679,114 @@ def _plot_paper_transport_correspondence(
     pair_scores: torch.Tensor | None = None,
     title: str = "",
     max_matches: int = 6,
+    matches_per_query: int = 1,
+    dense_lines: bool = False,
     accent: str = "#0f766e",
     muted: bool = False,
 ) -> tuple[float, float, int]:
     """Compact paper-facing UOT panel: only the discriminative correspondences."""
-    pad = 20
-    image_canvas, heat_canvas = _build_pair_canvas(
-        query_image,
-        support_image,
-        query_heatmap,
-        support_heatmap,
-        pad=pad,
+    q_h, q_w = query_image.shape
+    s_h, s_w = support_image.shape
+    max_w = max(q_w, s_w)
+    max_h = max(q_h, s_h)
+    x_shift = max(9, int(round(0.18 * max_w)))
+    y_gap = max(18, int(round(0.30 * max_h)))
+    shadow = max(3, int(round(0.045 * max_h)))
+    q_x = 2
+    q_y = 2
+    s_x = q_x + x_shift
+    s_y = q_y + q_h + y_gap
+    canvas_w = max(q_x + q_w, s_x + s_w) + shadow + 2
+    canvas_h = s_y + s_h + shadow + 2
+
+    ax.set_facecolor("white")
+    ax.set_xlim(0, canvas_w)
+    ax.set_ylim(canvas_h, 0)
+    ax.set_aspect("equal", adjustable="box")
+
+    bridge = np.asarray(
+        [
+            [q_x + q_w, q_y],
+            [s_x + s_w, s_y],
+            [s_x, s_y],
+            [q_x, q_y],
+        ],
+        dtype=np.float32,
     )
-    ax.imshow(image_canvas, cmap="gray", vmin=0.0, vmax=1.0)
+    ax.add_patch(Polygon(bridge, closed=True, facecolor="#94a3b8", edgecolor="none", alpha=0.10, zorder=0))
+    ax.add_patch(
+        Rectangle((q_x + shadow, q_y + shadow), q_w, q_h, facecolor="black", edgecolor="none", alpha=0.13, zorder=1)
+    )
+    ax.add_patch(
+        Rectangle((s_x + shadow, s_y + shadow), s_w, s_h, facecolor="black", edgecolor="none", alpha=0.13, zorder=1)
+    )
     ax.imshow(
-        heat_canvas,
-        cmap="inferno",
-        alpha=0.30 if muted else 0.48,
+        query_image,
+        cmap="gray",
         vmin=0.0,
         vmax=1.0,
+        origin="upper",
+        extent=(q_x, q_x + q_w, q_y + q_h, q_y),
+        zorder=2,
     )
-
-    height = max(query_image.shape[0], support_image.shape[0])
-    q_y = (height - query_image.shape[0]) // 2
-    s_y = (height - support_image.shape[0]) // 2
-    s_x = query_image.shape[1] + pad
+    ax.imshow(
+        support_image,
+        cmap="gray",
+        vmin=0.0,
+        vmax=1.0,
+        origin="upper",
+        extent=(s_x, s_x + s_w, s_y + s_h, s_y),
+        zorder=2,
+    )
+    ax.imshow(
+        query_heatmap,
+        cmap="inferno",
+        alpha=0.26 if muted else 0.38,
+        vmin=0.0,
+        vmax=1.0,
+        origin="upper",
+        extent=(q_x, q_x + q_w, q_y + q_h, q_y),
+        zorder=3,
+    )
+    ax.imshow(
+        support_heatmap,
+        cmap="inferno",
+        alpha=0.26 if muted else 0.38,
+        vmin=0.0,
+        vmax=1.0,
+        origin="upper",
+        extent=(s_x, s_x + s_w, s_y + s_h, s_y),
+        zorder=3,
+    )
     ax.add_patch(
         Rectangle(
-            (-0.5, q_y - 0.5),
-            query_image.shape[1],
-            query_image.shape[0],
+            (q_x - 0.5, q_y - 0.5),
+            q_w,
+            q_h,
             fill=False,
             edgecolor="#111827",
-            linewidth=0.8,
-            alpha=0.75,
+            linewidth=0.9,
+            alpha=0.82,
+            zorder=6,
         )
     )
     ax.add_patch(
         Rectangle(
             (s_x - 0.5, s_y - 0.5),
-            support_image.shape[1],
-            support_image.shape[0],
+            s_w,
+            s_h,
             fill=False,
             edgecolor=accent if not muted else "#64748b",
-            linewidth=1.4 if not muted else 0.9,
+            linewidth=1.3 if not muted else 0.9,
             alpha=0.9,
+            zorder=6,
         )
     )
 
     query_centers = _token_centers_on_canvas(
         num_tokens=int(pair_plan.shape[0]),
         image_hw=tuple(int(dim) for dim in query_image.shape),
-        x_offset=0,
+        x_offset=q_x,
         y_offset=q_y,
     )
     support_centers = _token_centers_on_canvas(
@@ -684,13 +799,20 @@ def _plot_paper_transport_correspondence(
     rank_scores = pair_scores.detach().float().cpu().clamp_min(0.0) if pair_scores is not None else None
     if rank_scores is not None and float(rank_scores.sum().item()) <= 1e-8:
         rank_scores = None
-    matches = _top_transport_matches(
-        pair_plan,
-        match_scores=rank_scores,
-        max_matches=max_matches,
-        matches_per_query=1,
-        min_mass_fraction=0.0,
-    )
+    if dense_lines:
+        matches = _dense_transport_matches(
+            pair_plan,
+            match_scores=rank_scores,
+            max_matches=max_matches,
+        )
+    else:
+        matches = _top_transport_matches(
+            pair_plan,
+            match_scores=rank_scores,
+            max_matches=max_matches,
+            matches_per_query=matches_per_query,
+            min_mass_fraction=0.0,
+        )
     top_match_score_fraction = float(sum(match[3] for match in matches))
     max_match_score_fraction = float(matches[0][3]) if matches else 0.0
 
@@ -699,7 +821,7 @@ def _plot_paper_transport_correspondence(
     support_score = endpoint_scores.sum(dim=-2)
     query_score_max = float(query_score.max().item()) if query_score.numel() else 0.0
     support_score_max = float(support_score.max().item()) if support_score.numel() else 0.0
-    line_color = "#64748b" if muted else accent
+    line_color = "#64748b" if muted else ("#22c55e" if dense_lines else accent)
     dot_color = "#94a3b8" if muted else accent
 
     for query_token, support_token, _mass, fraction in reversed(matches):
@@ -711,8 +833,12 @@ def _plot_paper_transport_correspondence(
         )
         pair_strength = fraction / max(max_match_score_fraction, 1e-8)
         strength = min(1.0, max(pair_strength, 0.45 * endpoint_strength))
-        linewidth = (0.8 if muted else 1.2) + (1.8 if muted else 2.9) * strength
-        alpha = (0.25 if muted else 0.34) + (0.42 if muted else 0.56) * strength
+        if dense_lines:
+            linewidth = (0.25 if muted else 0.35) + (0.9 if muted else 1.15) * strength
+            alpha = (0.025 if muted else 0.045) + (0.18 if muted else 0.26) * strength
+        else:
+            linewidth = (0.8 if muted else 1.2) + (1.8 if muted else 2.9) * strength
+            alpha = (0.25 if muted else 0.34) + (0.42 if muted else 0.56) * strength
         line = ax.plot(
             [qx, sx],
             [qy, sy],
@@ -724,46 +850,84 @@ def _plot_paper_transport_correspondence(
         )[0]
         line.set_path_effects(
             [
-                path_effects.Stroke(linewidth=linewidth + 1.2, foreground="white", alpha=0.48),
+                path_effects.Stroke(
+                    linewidth=linewidth + (0.35 if dense_lines else 1.2),
+                    foreground="white",
+                    alpha=0.18 if dense_lines else 0.48,
+                ),
                 path_effects.Normal(),
             ]
         )
 
     if matches:
-        q_points = np.asarray([query_centers[item[0]] for item in matches], dtype=np.float32)
-        s_points = np.asarray([support_centers[item[1]] for item in matches], dtype=np.float32)
-        sizes = np.asarray(
-            [
-                22.0
-                + 150.0
-                * max(
-                    float(query_score[item[0]].item()) / max(query_score_max, 1e-8),
-                    float(support_score[item[1]].item()) / max(support_score_max, 1e-8),
+        if dense_lines:
+            query_active = query_score > 1e-8
+            support_active = support_score > 1e-8
+            if bool(query_active.any()):
+                q_points = np.asarray(query_centers[query_active.numpy()], dtype=np.float32)
+                q_sizes = 7.0 + 30.0 * (
+                    query_score[query_active].numpy() / max(query_score_max, 1e-8)
                 )
-                for item in matches
-            ],
-            dtype=np.float32,
-        )
-        ax.scatter(
-            q_points[:, 0],
-            q_points[:, 1],
-            s=sizes,
-            c=dot_color,
-            edgecolors="white",
-            linewidths=0.55,
-            alpha=0.92 if not muted else 0.72,
-            zorder=5,
-        )
-        ax.scatter(
-            s_points[:, 0],
-            s_points[:, 1],
-            s=sizes,
-            c=dot_color,
-            edgecolors="white",
-            linewidths=0.55,
-            alpha=0.92 if not muted else 0.72,
-            zorder=5,
-        )
+                ax.scatter(
+                    q_points[:, 0],
+                    q_points[:, 1],
+                    s=q_sizes,
+                    c="#ef4444",
+                    edgecolors="white",
+                    linewidths=0.22,
+                    alpha=0.78,
+                    zorder=5,
+                )
+            if bool(support_active.any()):
+                s_points = np.asarray(support_centers[support_active.numpy()], dtype=np.float32)
+                s_sizes = 7.0 + 30.0 * (
+                    support_score[support_active].numpy() / max(support_score_max, 1e-8)
+                )
+                ax.scatter(
+                    s_points[:, 0],
+                    s_points[:, 1],
+                    s=s_sizes,
+                    c="#2563eb",
+                    edgecolors="white",
+                    linewidths=0.22,
+                    alpha=0.78,
+                    zorder=5,
+                )
+        else:
+            q_points = np.asarray([query_centers[item[0]] for item in matches], dtype=np.float32)
+            s_points = np.asarray([support_centers[item[1]] for item in matches], dtype=np.float32)
+            sizes = np.asarray(
+                [
+                    22.0
+                    + 150.0
+                    * max(
+                        float(query_score[item[0]].item()) / max(query_score_max, 1e-8),
+                        float(support_score[item[1]].item()) / max(support_score_max, 1e-8),
+                    )
+                    for item in matches
+                ],
+                dtype=np.float32,
+            )
+            ax.scatter(
+                q_points[:, 0],
+                q_points[:, 1],
+                s=sizes,
+                c=dot_color,
+                edgecolors="white",
+                linewidths=0.55,
+                alpha=0.92 if not muted else 0.72,
+                zorder=5,
+            )
+            ax.scatter(
+                s_points[:, 0],
+                s_points[:, 1],
+                s=sizes,
+                c=dot_color,
+                edgecolors="white",
+                linewidths=0.55,
+                alpha=0.92 if not muted else 0.72,
+                zorder=5,
+            )
 
     if title:
         ax.set_title(title, fontsize=10.5, weight="bold", color="#111827", pad=6)
@@ -782,6 +946,7 @@ def _transport_pair_payload(
     support_images: torch.Tensor,
     way_num: int,
     shot_num: int,
+    prefer_positive_evidence: bool = True,
 ) -> dict[str, Any]:
     shot_idx = _select_transport_shot(
         outputs,
@@ -819,7 +984,11 @@ def _transport_pair_payload(
         pair_cost=pair_cost,
         threshold=transport_threshold,
     )
-    if positive_evidence is not None and float(positive_evidence.sum().item()) > 1e-8:
+    if (
+        prefer_positive_evidence
+        and positive_evidence is not None
+        and float(positive_evidence.sum().item()) > 1e-8
+    ):
         pair_scores = positive_evidence
         query_values = positive_evidence.sum(dim=-1)
         support_values = positive_evidence.sum(dim=-2)
@@ -1120,6 +1289,98 @@ def _uot_all_class_match_path(save_path: str) -> str:
     return f"{stem}_all_classes{ext or '.png'}"
 
 
+def _uot_transport_matrix_path(save_path: str) -> str:
+    stem, ext = os.path.splitext(save_path)
+    return f"{stem}_transport_matrix{ext or '.png'}"
+
+
+def _normalized_transport_image(values: torch.Tensor | np.ndarray, gamma: float = 0.55) -> np.ndarray:
+    if torch.is_tensor(values):
+        array = values.detach().float().cpu().numpy()
+    else:
+        array = np.asarray(values, dtype=np.float32)
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+    array = np.clip(array, 0.0, None)
+    positive = array[array > 0.0]
+    if positive.size == 0:
+        return array.astype(np.float32)
+    positive_span = float(positive.max() - positive.min())
+    if positive_span <= 1e-12:
+        constant = 0.42 if positive.size == array.size else 0.82
+        return np.where(array > 0.0, constant, 0.0).astype(np.float32)
+    vmax = float(np.quantile(positive, 0.995))
+    if vmax <= 0.0 or not np.isfinite(vmax):
+        vmax = float(positive.max())
+    scaled = np.clip(array / max(vmax, 1e-12), 0.0, 1.0)
+    return np.power(scaled, float(gamma)).astype(np.float32)
+
+
+def _imshow_transport_values(
+    ax: plt.Axes,
+    values: torch.Tensor | np.ndarray,
+    *,
+    aspect: str = "auto",
+    cmap: str = "jet",
+) -> None:
+    ax.imshow(
+        _normalized_transport_image(values),
+        cmap=cmap,
+        vmin=0.0,
+        vmax=1.0,
+        interpolation="nearest",
+        aspect=aspect,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.45)
+        spine.set_edgecolor("#111827")
+        spine.set_alpha(0.42)
+
+
+def _export_transport_matrix_figure(pair_plans: Sequence[torch.Tensor], save_path: str) -> str:
+    if not pair_plans:
+        return ""
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    if len(pair_plans) == 1:
+        pair_plan = pair_plans[0].detach().float().cpu().clamp_min(0.0)
+        fig = plt.figure(figsize=(3.2, 3.2))
+        grid = fig.add_gridspec(
+            2,
+            2,
+            width_ratios=[0.095, 1.0],
+            height_ratios=[0.095, 1.0],
+            wspace=0.02,
+            hspace=0.02,
+        )
+        ax_empty = fig.add_subplot(grid[0, 0])
+        ax_top = fig.add_subplot(grid[0, 1])
+        ax_left = fig.add_subplot(grid[1, 0])
+        ax_matrix = fig.add_subplot(grid[1, 1])
+        ax_empty.axis("off")
+        _imshow_transport_values(ax_top, pair_plan.sum(dim=0, keepdim=True), aspect="auto")
+        _imshow_transport_values(ax_left, pair_plan.sum(dim=1, keepdim=True), aspect="auto")
+        _imshow_transport_values(ax_matrix, pair_plan, aspect="auto")
+        fig.savefig(save_path, dpi=340, bbox_inches="tight", pad_inches=0.015)
+        plt.close(fig)
+        return save_path
+
+    fig, axes = plt.subplots(
+        len(pair_plans),
+        1,
+        figsize=(3.2, max(3.2, 3.05 * len(pair_plans))),
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+    for row_idx, pair_plan in enumerate(pair_plans):
+        _imshow_transport_values(axes[row_idx, 0], pair_plan.detach().float().cpu().clamp_min(0.0), aspect="auto")
+    fig.tight_layout(pad=0.02, h_pad=0.04)
+    fig.savefig(save_path, dpi=340, bbox_inches="tight", pad_inches=0.015)
+    plt.close(fig)
+    return save_path
+
+
 def _shot_tensor_by_class(
     outputs: dict[str, Any] | torch.Tensor,
     key: str,
@@ -1258,35 +1519,23 @@ def _export_uot_paper_evidence_figure(
     transport_kind: str,
     variant_text: str,
     max_matches: int = 6,
+    matches_per_query: int = 1,
 ) -> list[dict[str, Any]]:
     way_num, shot_num = support_images.shape[:2]
-    region_plan = _matrix_by_shot(outputs, "region_uot_sparse_coarse_plan", way_num=way_num, shot_num=shot_num)
-    if region_plan is None:
-        region_plan = _matrix_by_shot(outputs, "region_uot_coarse_plan", way_num=way_num, shot_num=shot_num)
-    region_source = "Region UOT prior"
-    adaptive_region_masks: tuple[torch.Tensor | None, torch.Tensor | None] = (None, None)
-    if region_plan is None:
-        adaptive_region_plan = _matrix_by_shot(outputs, "adaptive_region_plan", way_num=way_num, shot_num=shot_num)
-        adaptive_region_masks = _adaptive_region_masks(outputs, way_num=way_num, shot_num=shot_num)
-        if adaptive_region_plan is not None and adaptive_region_masks[0] is not None and adaptive_region_masks[1] is not None:
-            region_plan = adaptive_region_plan
-            region_source = "Adaptive region prior"
-    has_region_plan = region_plan is not None
-    show_rival = way_num > 1
-    if has_region_plan:
-        num_cols = 4 if show_rival else 3
-        width = 3.4 + 5.55 * (num_cols - 1)
-    else:
-        num_cols = 3 if show_rival else 2
-        width = 3.4 + (5.9 if show_rival else 6.1) * (num_cols - 1)
     fig, axes = plt.subplots(
-        len(query_indices),
-        num_cols,
-        figsize=(width, max(3.4, 3.35 * len(query_indices))),
+        len(query_indices) * 2,
+        1,
+        figsize=(3.55, max(5.35, 5.25 * len(query_indices))),
         squeeze=False,
+        gridspec_kw={
+            "height_ratios": [1.45 if idx % 2 == 0 else 1.0 for idx in range(len(query_indices) * 2)]
+        },
     )
     fig.patch.set_facecolor("white")
     rows: list[dict[str, Any]] = []
+    prefer_positive_evidence = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"}
+    transport_matrix_path = _uot_transport_matrix_path(save_path)
+    matrix_pair_plans: list[torch.Tensor] = []
 
     for row_idx, query_idx_raw in enumerate(query_indices):
         query_idx = int(query_idx_raw)
@@ -1305,176 +1554,41 @@ def _export_uot_paper_evidence_figure(
         decision_margin = true_score - best_wrong_score
 
         query_np = _ensure_numpy_image(query_images[query_idx])
-        ax_query = axes[row_idx, 0]
-        ax_query.imshow(query_np, cmap="gray", vmin=0.0, vmax=1.0)
-        query_edge = "#0f766e" if pred_class == true_class else "#dc2626"
-        ax_query.add_patch(
-            Rectangle(
-                (-0.5, -0.5),
-                query_np.shape[1],
-                query_np.shape[0],
-                fill=False,
-                edgecolor=query_edge,
-                linewidth=1.4,
-                alpha=0.95,
-            )
-        )
-        ax_query.set_title("(a) Query", fontsize=10.5, weight="bold", color="#111827", pad=6)
-        ax_query.axis("off")
-
-        primary_class = pred_class if 0 <= pred_class < way_num else true_class
-        rival_class = best_wrong_class if primary_class == true_class else true_class
-        primary_payload = _transport_pair_payload(
+        selected_class = true_class if 0 <= true_class < way_num else pred_class
+        metric_payload = _transport_pair_payload(
             outputs=outputs,
             plan=plan,
             cost_matrix=cost_matrix,
             query_idx=query_idx,
-            class_idx=primary_class,
+            class_idx=selected_class,
             query_image=query_np,
             support_images=support_images,
             way_num=way_num,
             shot_num=shot_num,
+            prefer_positive_evidence=prefer_positive_evidence,
         )
-        primary_axis = 2 if has_region_plan else 1
-        if has_region_plan and region_plan is not None:
-            if region_source.startswith("Adaptive") and adaptive_region_masks[0] is not None and adaptive_region_masks[1] is not None:
-                region_primary_payload = _adaptive_region_transport_pair_payload(
-                    outputs=outputs,
-                    region_plan=region_plan,
-                    query_masks=adaptive_region_masks[0],
-                    support_masks=adaptive_region_masks[1],
-                    query_idx=query_idx,
-                    class_idx=primary_class,
-                    query_image=query_np,
-                    support_images=support_images,
-                    way_num=way_num,
-                    shot_num=shot_num,
-                    shot_idx=int(primary_payload["shot_idx"]),
-                )
-            else:
-                region_primary_payload = _region_transport_pair_payload(
-                    outputs=outputs,
-                    region_plan=region_plan,
-                    query_idx=query_idx,
-                    class_idx=primary_class,
-                    query_image=query_np,
-                    support_images=support_images,
-                    way_num=way_num,
-                    shot_num=shot_num,
-                    shot_idx=int(primary_payload["shot_idx"]),
-                )
-            _plot_paper_transport_correspondence(
-                axes[row_idx, 1],
-                query_np,
-                region_primary_payload["support_image"],
-                region_primary_payload["pair_plan"],
-                region_primary_payload["query_heat"],
-                region_primary_payload["support_heat"],
-                pair_scores=region_primary_payload["pair_scores"],
-                title=f"(b) {region_source}: {_class_label(class_names, primary_class)}",
-                max_matches=max(4, min(max_matches, 5)),
-                accent="#0f766e" if primary_class == true_class else "#dc2626",
-                muted=False,
-            )
-        primary_top_fraction, primary_max_fraction, primary_match_count = _plot_paper_transport_correspondence(
-            axes[row_idx, primary_axis],
+        top_match_score_fraction, max_match_score_fraction, top_match_count = _plot_paper_transport_correspondence(
+            axes[2 * row_idx, 0],
             query_np,
-            primary_payload["support_image"],
-            primary_payload["pair_plan"],
-            primary_payload["query_heat"],
-            primary_payload["support_heat"],
-            pair_scores=primary_payload["pair_scores"],
-            title=(
-                f"(c) Fine UOT evidence: {_class_label(class_names, primary_class)}"
-                if has_region_plan
-                else f"(b) UOT evidence: {_class_label(class_names, primary_class)}"
-            ),
+            metric_payload["support_image"],
+            metric_payload["pair_plan"],
+            metric_payload["query_heat"],
+            metric_payload["support_heat"],
+            pair_scores=metric_payload["pair_scores"],
+            title="",
             max_matches=max_matches,
-            accent="#0f766e" if primary_class == true_class else "#dc2626",
+            matches_per_query=matches_per_query,
+            dense_lines=True,
+            accent="#0f766e" if pred_class == true_class else "#dc2626",
             muted=False,
         )
-
-        if show_rival:
-            rival_axis = 3 if has_region_plan else 2
-            if has_region_plan and region_plan is not None:
-                if region_source.startswith("Adaptive") and adaptive_region_masks[0] is not None and adaptive_region_masks[1] is not None:
-                    rival_payload = _adaptive_region_transport_pair_payload(
-                        outputs=outputs,
-                        region_plan=region_plan,
-                        query_masks=adaptive_region_masks[0],
-                        support_masks=adaptive_region_masks[1],
-                        query_idx=query_idx,
-                        class_idx=rival_class,
-                        query_image=query_np,
-                        support_images=support_images,
-                        way_num=way_num,
-                        shot_num=shot_num,
-                    )
-                else:
-                    rival_payload = _region_transport_pair_payload(
-                        outputs=outputs,
-                        region_plan=region_plan,
-                        query_idx=query_idx,
-                        class_idx=rival_class,
-                        query_image=query_np,
-                        support_images=support_images,
-                        way_num=way_num,
-                        shot_num=shot_num,
-                    )
-                rival_title = f"(d) {region_source} rival: {_class_label(class_names, rival_class)}"
-            else:
-                rival_payload = _transport_pair_payload(
-                    outputs=outputs,
-                    plan=plan,
-                    cost_matrix=cost_matrix,
-                    query_idx=query_idx,
-                    class_idx=rival_class,
-                    query_image=query_np,
-                    support_images=support_images,
-                    way_num=way_num,
-                    shot_num=shot_num,
-                )
-                rival_title = f"(c) Closest rival: {_class_label(class_names, rival_class)}"
-            _plot_paper_transport_correspondence(
-                axes[row_idx, rival_axis],
-                query_np,
-                rival_payload["support_image"],
-                rival_payload["pair_plan"],
-                rival_payload["query_heat"],
-                rival_payload["support_heat"],
-                pair_scores=rival_payload["pair_scores"],
-                title=rival_title,
-                max_matches=max(3, max_matches - 1),
-                accent="#64748b",
-                muted=True,
-            )
-
-        metric_payload = primary_payload
-        if primary_class != true_class:
-            metric_payload = _transport_pair_payload(
-                outputs=outputs,
-                plan=plan,
-                cost_matrix=cost_matrix,
-                query_idx=query_idx,
-                class_idx=true_class,
-                query_image=query_np,
-                support_images=support_images,
-                way_num=way_num,
-                shot_num=shot_num,
-            )
-            true_top_matches = _top_transport_matches(
-                metric_payload["pair_plan"],
-                match_scores=metric_payload["pair_scores"],
-                max_matches=max_matches,
-                matches_per_query=1,
-            )
-            top_match_score_fraction = float(sum(match[3] for match in true_top_matches))
-            max_match_score_fraction = float(true_top_matches[0][3]) if true_top_matches else 0.0
-            top_match_count = len(true_top_matches)
-        else:
-            top_match_score_fraction = primary_top_fraction
-            max_match_score_fraction = primary_max_fraction
-            top_match_count = primary_match_count
+        _imshow_transport_values(
+            axes[2 * row_idx + 1, 0],
+            metric_payload["pair_plan"],
+            aspect="equal",
+            cmap="jet",
+        )
+        matrix_pair_plans.append(metric_payload["pair_plan"].detach().float().cpu())
 
         rows.append(
             {
@@ -1513,14 +1627,16 @@ def _export_uot_paper_evidence_figure(
                 "evidence_support_background_mass_ratio": None,
                 "noise_sink_mass": metric_payload["sink_mass"],
                 "save_path": save_path,
+                "transport_matrix_path": transport_matrix_path,
                 "all_class_match_path": "",
             }
         )
 
-    fig.tight_layout(pad=0.45, w_pad=0.45, h_pad=0.65)
+    fig.tight_layout(pad=0.02, w_pad=0.0, h_pad=0.04)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    fig.savefig(save_path, dpi=320, bbox_inches="tight", pad_inches=0.04)
+    fig.savefig(save_path, dpi=320, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
+    _export_transport_matrix_figure(matrix_pair_plans, transport_matrix_path)
     return rows
 
 
@@ -1700,6 +1816,7 @@ def export_uot_evidence_figure(
     )
     visual_style = str(visual_style or "legacy").strip().lower().replace("-", "_")
     if visual_style in {"paper", "q1", "compact", "publication"}:
+        paper_full_ot = transport_kind in {"balanced", "balanced_ot", "full_ot", "ot"}
         return _export_uot_paper_evidence_figure(
             outputs=outputs,
             query_images=query_images,
@@ -1715,6 +1832,8 @@ def export_uot_evidence_figure(
             query_indices=selected_indices,
             transport_kind=transport_kind,
             variant_text=variant_text,
+            max_matches=260 if paper_full_ot else 140,
+            matches_per_query=6 if paper_full_ot else 3,
         )
 
     rows: list[dict[str, Any]] = []

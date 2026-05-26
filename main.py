@@ -105,6 +105,12 @@ def _sanitize_wandb_project(name):
     return raw.translate(str.maketrans({c: "-" for c in forbidden}))
 
 
+def _safe_path_token(value):
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    token = token.strip("._")
+    return token or "class"
+
+
 def _wandb_arg_key_irrelevant_for_ours(key: str) -> bool:
     """True for SPIF/AEB/RADA flags that are not used by ``ours`` / ``ours_cpm`` (W&B clutter only)."""
     lk = str(key).lower()
@@ -2519,7 +2525,7 @@ def get_args():
         choices=["auto", "true", "false"],
         help=(
             "Export UOT/Partial-OT evidence figures with positive-evidence overlays, top transported-token correspondences, "
-            "and query-to-all-class support comparison panels. auto enables the compact paper figure for ours_final."
+            "and support comparison panels. auto enables one-class-per-panel paper figures for ours_final, including full_ot."
         ),
     )
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
@@ -6340,6 +6346,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     test_diag_total = 0.0
     exported_q1 = 0
     exported_uot_evidence = 0
+    uot_evidence_seen_classes = set()
     egsm_test_diagnostics = resolve_hrot_ecot_enable_egsm(args) == "true"
     model_name = str(getattr(args, "model", "")).strip().lower()
     if model_name in OURS_ENTRYPOINT_MODEL_NAMES:
@@ -6367,9 +6374,25 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         else "uot"
     )
     uot_variant_label = str(getattr(args, "experiment_tag", "") or f"{args.model}_{ours_ablation_name}")
+    uot_evidence_one_per_class = (
+        uot_evidence_enabled
+        and model_name in OURS_FINAL_MODEL_NAMES
+        and str(uot_evidence_visual_style).strip().lower().replace("-", "_") == "paper"
+    )
+    uot_evidence_target_class_count = max(0, int(getattr(args, "way_num", 0)))
+    uot_evidence_max_exports = uot_evidence_limit
+    if uot_evidence_one_per_class and uot_evidence_limit > 0:
+        uot_evidence_max_exports = max(uot_evidence_limit, uot_evidence_target_class_count)
 
     with torch.no_grad():
         for episode_idx, batch in enumerate(tqdm(loader, desc="Testing")):
+            uot_evidence_complete = (
+                exported_uot_evidence >= uot_evidence_max_exports
+                or (
+                    uot_evidence_one_per_class
+                    and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+                )
+            )
             if len(batch) == 6:
                 query, q_labels, support, support_labels, q_indices, support_indices = batch
                 q_indices_np = q_indices.view(-1).cpu().numpy()
@@ -6400,7 +6423,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 support_targets=support_targets,
                 collect_diagnostics=(
                     collect_test_diagnostics
-                    or (uot_evidence_enabled and exported_uot_evidence < uot_evidence_limit)
+                    or (uot_evidence_enabled and not uot_evidence_complete)
                 ),
             )
             logits = extract_logits(scores)
@@ -6480,47 +6503,102 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         )
                     exported_q1 += 1
 
-            if uot_evidence_enabled and exported_uot_evidence < uot_evidence_limit:
-                if uot_evidence_correct_only:
-                    selected_query_indices = preds.eq(targets).nonzero(as_tuple=True)[0].tolist()
+            uot_evidence_complete = (
+                exported_uot_evidence >= uot_evidence_max_exports
+                or (
+                    uot_evidence_one_per_class
+                    and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+                )
+            )
+            if uot_evidence_enabled and not uot_evidence_complete:
+                if uot_evidence_one_per_class and uot_evidence_correct_only:
+                    correct_query_indices = preds.eq(targets).nonzero(as_tuple=True)[0].tolist()
+                    correct_query_set = set(correct_query_indices)
+                    fallback_query_indices = [
+                        idx for idx in range(int(preds.shape[0])) if idx not in correct_query_set
+                    ]
+                    candidate_query_indices = correct_query_indices + fallback_query_indices
+                elif uot_evidence_correct_only:
+                    candidate_query_indices = preds.eq(targets).nonzero(as_tuple=True)[0].tolist()
                 else:
-                    selected_query_indices = list(range(int(preds.shape[0])))
-                selected_query_indices = selected_query_indices[:uot_evidence_queries_per_episode]
+                    candidate_query_indices = list(range(int(preds.shape[0])))
+                if uot_evidence_one_per_class:
+                    selected_query_indices = []
+                    selected_classes = set()
+                    for query_idx in candidate_query_indices:
+                        class_idx = int(targets[int(query_idx)].item())
+                        if class_idx in uot_evidence_seen_classes or class_idx in selected_classes:
+                            continue
+                        selected_query_indices.append(int(query_idx))
+                        selected_classes.add(class_idx)
+                        if exported_uot_evidence + len(selected_query_indices) >= uot_evidence_max_exports:
+                            break
+                        if len(uot_evidence_seen_classes) + len(selected_classes) >= uot_evidence_target_class_count:
+                            break
+                else:
+                    selected_query_indices = candidate_query_indices[:uot_evidence_queries_per_episode]
 
                 if selected_query_indices:
                     samples_stem = f"{args.training_samples}samples" if args.training_samples else "allsamples"
                     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
                     protocol_suffix = get_test_protocol_suffix(args)
-                    uot_base = os.path.join(
-                        args.path_results,
-                        (
-                            f"uot_evidence_{args.dataset_name}_{args.model}_{samples_stem}_"
-                            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}_ep{episode_idx:04d}.png"
-                        ),
+                    export_groups = (
+                        [[idx] for idx in selected_query_indices]
+                        if uot_evidence_one_per_class
+                        else [selected_query_indices]
                     )
-                    try:
-                        rows = export_uot_evidence_figure(
-                            outputs=scores if isinstance(scores, dict) else {"logits": logits},
-                            query_images=query[0].detach().cpu(),
-                            support_images=support[0].detach().cpu(),
-                            logits=logits.detach().cpu(),
-                            preds=preds.detach().cpu(),
-                            targets=targets.detach().cpu(),
-                            class_names=args.class_names,
-                            save_path=uot_base,
-                            episode_index=episode_idx,
-                            query_indices=selected_query_indices,
-                            transport_kind=uot_transport_kind,
-                            variant_label=uot_variant_label,
-                            visual_style=uot_evidence_visual_style,
+                    for export_query_indices in export_groups:
+                        first_query_idx = int(export_query_indices[0])
+                        class_idx = int(targets[first_query_idx].item())
+                        class_name = args.class_names[class_idx] if class_idx < len(args.class_names) else str(class_idx)
+                        class_suffix = ""
+                        if uot_evidence_one_per_class:
+                            class_suffix = (
+                                f"_q{first_query_idx:03d}_class{class_idx:02d}_"
+                                f"{_safe_path_token(class_name)}"
+                            )
+                        uot_base = os.path.join(
+                            args.path_results,
+                            (
+                                f"uot_evidence_{args.dataset_name}_{args.model}_{samples_stem}_"
+                                f"{args.shot_num}shot{tag_suffix}{protocol_suffix}_ep{episode_idx:04d}"
+                                f"{class_suffix}.png"
+                            ),
                         )
-                    except Exception as exc:
-                        print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")
-                        rows = []
-                    if rows:
-                        uot_evidence_rows.extend(rows)
-                        uot_evidence_paths.append(uot_base)
-                        exported_uot_evidence += 1
+                        try:
+                            rows = export_uot_evidence_figure(
+                                outputs=scores if isinstance(scores, dict) else {"logits": logits},
+                                query_images=query[0].detach().cpu(),
+                                support_images=support[0].detach().cpu(),
+                                logits=logits.detach().cpu(),
+                                preds=preds.detach().cpu(),
+                                targets=targets.detach().cpu(),
+                                class_names=args.class_names,
+                                save_path=uot_base,
+                                episode_index=episode_idx,
+                                query_indices=export_query_indices,
+                                transport_kind=uot_transport_kind,
+                                variant_label=uot_variant_label,
+                                visual_style=uot_evidence_visual_style,
+                            )
+                        except Exception as exc:
+                            print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")
+                            rows = []
+                        if rows:
+                            uot_evidence_rows.extend(rows)
+                            uot_evidence_paths.append(uot_base)
+                            exported_uot_evidence += 1
+                            if uot_evidence_one_per_class:
+                                for row in rows:
+                                    uot_evidence_seen_classes.add(int(row["true_class"]))
+                        if (
+                            exported_uot_evidence >= uot_evidence_max_exports
+                            or (
+                                uot_evidence_one_per_class
+                                and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+                            )
+                        ):
+                            break
 
             if q_indices_np is not None:
                 preds_np = preds.cpu().numpy()

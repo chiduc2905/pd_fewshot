@@ -117,10 +117,48 @@ def test_export_uot_evidence_figure_paper_style_is_compact(tmp_path):
     assert save_path.stat().st_size > 0
     assert len(rows) == 1
     assert 0 < rows[0]["top_match_count"] <= 6
+    assert (tmp_path / "uot_paper_transport_matrix.png").exists()
+    assert rows[0]["transport_matrix_path"].endswith("uot_paper_transport_matrix.png")
     assert rows[0]["all_class_match_path"] == ""
 
 
-def test_export_uot_evidence_figure_paper_style_draws_region_uot_prior(tmp_path):
+def test_export_uot_evidence_figure_paper_style_full_ot_uses_mass_not_threshold(tmp_path):
+    query_images = torch.rand(1, 1, 16, 16)
+    support_images = torch.rand(1, 1, 1, 16, 16)
+    plan = torch.full((1, 1, 1, 4, 4), 1.0 / 16.0)
+    cost = torch.full_like(plan, 0.05)
+    outputs = {
+        "transport_plan": plan,
+        "cost_matrix": cost,
+        "transport_cost_threshold": torch.tensor(0.10),
+        "shot_transported_mass": plan.sum(dim=(-1, -2)),
+        "shot_rho": torch.ones(1, 1, 1),
+    }
+    save_path = tmp_path / "full_ot_paper.png"
+
+    rows = export_uot_evidence_figure(
+        outputs=outputs,
+        query_images=query_images,
+        support_images=support_images,
+        logits=torch.tensor([[1.0]]),
+        preds=torch.tensor([0]),
+        targets=torch.tensor([0]),
+        class_names=["PD-A"],
+        save_path=str(save_path),
+        episode_index=6,
+        query_indices=[0],
+        transport_kind="balanced_ot",
+        visual_style="paper",
+    )
+
+    assert save_path.exists()
+    assert (tmp_path / "full_ot_paper_transport_matrix.png").exists()
+    assert rows[0]["evidence_map_source"] == "transport_mass"
+    assert rows[0]["transport_matrix_path"].endswith("full_ot_paper_transport_matrix.png")
+    assert rows[0]["top_match_count"] > 0
+
+
+def test_export_uot_evidence_figure_paper_style_handles_region_uot_payload(tmp_path):
     query_images = torch.rand(1, 1, 16, 16)
     support_images = torch.rand(2, 1, 1, 16, 16)
     fine_plan = torch.zeros(1, 2, 1, 4, 4)
@@ -162,7 +200,7 @@ def test_export_uot_evidence_figure_paper_style_draws_region_uot_prior(tmp_path)
     assert rows[0]["top_match_count"] == 3
 
 
-def test_export_uot_evidence_figure_paper_style_draws_adaptive_region_prior(tmp_path):
+def test_export_uot_evidence_figure_paper_style_handles_adaptive_region_payload(tmp_path):
     query_images = torch.rand(1, 1, 16, 16)
     support_images = torch.rand(2, 1, 1, 16, 16)
     fine_plan = torch.zeros(1, 2, 1, 4, 4)
