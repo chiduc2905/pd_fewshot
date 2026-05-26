@@ -20,9 +20,20 @@ def _factory_args(model: str = "ta_dsw", **overrides):
         "ta_dsw_num_slices": 4,
         "ta_dsw_sw_p": 2.0,
         "ta_dsw_temperature": 0.1,
+        "ta_dsw_token_dim": 32,
         "ta_dsw_hidden_dim": 16,
+        "ta_dsw_token_weight_hidden_dim": 16,
+        "ta_dsw_token_weight_uniform_mix": 0.2,
         "ta_dsw_num_quantiles": 8,
         "ta_dsw_normalize_tokens": "true",
+        "ta_dsw_train_projection_mode": "deterministic",
+        "ta_dsw_eval_projection_mode": "fixed",
+        "ta_dsw_projection_seed": 7,
+        "ta_dsw_shot_aggregation": "softmin",
+        "ta_dsw_shot_softmin_beta": 5.0,
+        "ta_dsw_proto_scale_init": 10.0,
+        "ta_dsw_sw_scale_init": None,
+        "ta_dsw_learnable_scales": "true",
         "ta_dsw_eps": 1e-8,
     }
     args.update(overrides)
@@ -80,10 +91,12 @@ def test_ta_dsw_training_output_and_gradient_flow():
         hidden_dim=64,
         backbone_name="conv64f",
         image_size=64,
+        token_dim=32,
         num_slices=4,
         sw_p=2.0,
         temperature=0.1,
         task_hidden_dim=16,
+        token_weight_hidden_dim=16,
         num_quantiles=8,
         normalize_tokens=True,
     )
@@ -108,3 +121,20 @@ def test_ta_dsw_training_output_and_gradient_flow():
     backbone_grad = next(param.grad for name, param in model.named_parameters() if name.startswith("backbone."))
     assert backbone_grad is not None
     assert torch.isfinite(backbone_grad).all()
+
+
+def test_ta_dsw_eval_is_deterministic_and_uses_weighted_measures():
+    torch.manual_seed(5)
+    model = build_model_from_args(_factory_args())
+    model.eval()
+
+    query = torch.randn(1, 2, 3, 64, 64)
+    support = torch.randn(1, 3, 2, 3, 64, 64)
+    with torch.no_grad():
+        first = model(query, support, return_aux=True)
+        second = model(query, support, return_aux=True)
+
+    assert torch.allclose(first["logits"], second["logits"])
+    assert first["query_token_weights"].shape[:2] == first["query_tokens"].shape[:2]
+    assert first["support_token_weights"].shape == first["support_tokens"].shape[:3]
+    assert first["ta_dsw_shot_distance"].shape == (2, 3, 2)

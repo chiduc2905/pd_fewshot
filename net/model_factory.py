@@ -534,13 +534,13 @@ MODEL_REGISTRY = {
     },
     "ta_dsw": {
         "display_name": "TA-DSW",
-        "architecture": "Backbone spatial tokens -> task-adaptive vMF slice sampling -> class empirical measures -> sliced Wasserstein classification",
-        "metric": "Task-Adaptive Distributional Sliced Wasserstein",
+        "architecture": "Backbone spatial tokens -> learned token projection/weights -> deterministic task-adaptive slices -> shot-aware weighted SW + cosine prototype hybrid scoring",
+        "metric": "Task-Adaptive Weighted Sliced Wasserstein + Cosine Prototype",
     },
     "ta-dsw": {
         "display_name": "TA-DSW",
-        "architecture": "Alias for TA-DSW with task-adaptive vMF slice sampling and sliced Wasserstein classification",
-        "metric": "Task-Adaptive Distributional Sliced Wasserstein",
+        "architecture": "Alias for TA-DSW with learned token projection/weights, deterministic task-adaptive slices, and hybrid scoring",
+        "metric": "Task-Adaptive Weighted Sliced Wasserstein + Cosine Prototype",
     },
     "sc_lfi": {
         "display_name": "SC-LFI",
@@ -1494,6 +1494,7 @@ def build_model_from_args(args):
         return TADSW(
             in_channels=3,
             hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "ta_dsw_token_dim", 128)),
             backbone_name=fewshot_backbone,
             image_size=image_size,
             resnet12_drop_rate=0.0,
@@ -1502,8 +1503,22 @@ def build_model_from_args(args):
             sw_p=float(getattr(args, "ta_dsw_sw_p", 2.0)),
             temperature=float(getattr(args, "ta_dsw_temperature", 0.1)),
             task_hidden_dim=int(getattr(args, "ta_dsw_hidden_dim", 256)),
+            token_weight_hidden_dim=int(getattr(args, "ta_dsw_token_weight_hidden_dim", 64)),
+            token_weight_uniform_mix=float(getattr(args, "ta_dsw_token_weight_uniform_mix", 0.2)),
             num_quantiles=int(getattr(args, "ta_dsw_num_quantiles", 256)),
             normalize_tokens=_bool_flag(getattr(args, "ta_dsw_normalize_tokens", "true"), default=True),
+            train_projection_mode=str(getattr(args, "ta_dsw_train_projection_mode", "deterministic")),
+            eval_projection_mode=str(getattr(args, "ta_dsw_eval_projection_mode", "fixed")),
+            projection_seed=int(getattr(args, "ta_dsw_projection_seed", 7)),
+            shot_aggregation=str(getattr(args, "ta_dsw_shot_aggregation", "softmin")),
+            shot_softmin_beta=float(getattr(args, "ta_dsw_shot_softmin_beta", 5.0)),
+            proto_scale_init=float(getattr(args, "ta_dsw_proto_scale_init", 10.0)),
+            sw_scale_init=(
+                None
+                if getattr(args, "ta_dsw_sw_scale_init", None) is None
+                else float(getattr(args, "ta_dsw_sw_scale_init"))
+            ),
+            learnable_scales=_bool_flag(getattr(args, "ta_dsw_learnable_scales", "true"), default=True),
             eps=float(getattr(args, "ta_dsw_eps", 1e-8)),
         )
     if args.model == "sc_lfi":

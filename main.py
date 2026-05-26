@@ -594,9 +594,30 @@ def get_args():
     parser.add_argument("--ta_dsw_num_slices", type=int, default=64)
     parser.add_argument("--ta_dsw_sw_p", type=float, default=2.0)
     parser.add_argument("--ta_dsw_temperature", type=float, default=0.1)
+    parser.add_argument("--ta_dsw_token_dim", type=int, default=128)
     parser.add_argument("--ta_dsw_hidden_dim", type=int, default=256)
+    parser.add_argument("--ta_dsw_token_weight_hidden_dim", type=int, default=64)
+    parser.add_argument("--ta_dsw_token_weight_uniform_mix", type=float, default=0.2)
     parser.add_argument("--ta_dsw_num_quantiles", type=int, default=256)
     parser.add_argument("--ta_dsw_normalize_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--ta_dsw_train_projection_mode",
+        type=str,
+        default="deterministic",
+        choices=["deterministic", "fixed", "resample", "vmf"],
+    )
+    parser.add_argument(
+        "--ta_dsw_eval_projection_mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "deterministic", "resample"],
+    )
+    parser.add_argument("--ta_dsw_projection_seed", type=int, default=7)
+    parser.add_argument("--ta_dsw_shot_aggregation", type=str, default="softmin", choices=["concat", "mean", "softmin"])
+    parser.add_argument("--ta_dsw_shot_softmin_beta", type=float, default=5.0)
+    parser.add_argument("--ta_dsw_proto_scale_init", type=float, default=10.0)
+    parser.add_argument("--ta_dsw_sw_scale_init", type=float, default=None)
+    parser.add_argument("--ta_dsw_learnable_scales", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--ta_dsw_eps", type=float, default=1e-8)
     parser.add_argument("--spif_stable_dim", type=int, default=64)
     parser.add_argument("--spif_variant_dim", type=int, default=64)
