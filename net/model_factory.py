@@ -76,6 +76,7 @@ OURS_FINAL_MODEL_NAMES = frozenset(
 OURS_ENTRYPOINT_MODEL_NAMES = frozenset(set(OURS_MODEL_NAMES) | set(OURS_FINAL_MODEL_NAMES))
 OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
 SGPOT_MODEL_NAMES = frozenset({"sg_pot"})
+TA_DSW_MODEL_NAMES = frozenset({"ta_dsw", "ta-dsw"})
 M2_LIKE_MODEL_NAMES = frozenset(
     set(M2_MODEL_NAMES) | set(OURS_ENTRYPOINT_MODEL_NAMES) | set(OURS_CPM_MODEL_NAMES) | set(SGPOT_MODEL_NAMES)
 )
@@ -530,6 +531,16 @@ MODEL_REGISTRY = {
         "display_name": "HS-SW",
         "architecture": "Backbone token pyramid -> scale-budgeted shot measures -> exact weighted sliced Wasserstein -> support-aware hierarchical inference",
         "metric": "Hierarchical Support Sliced-Wasserstein",
+    },
+    "ta_dsw": {
+        "display_name": "TA-DSW",
+        "architecture": "Backbone spatial tokens -> task-adaptive vMF slice sampling -> class empirical measures -> sliced Wasserstein classification",
+        "metric": "Task-Adaptive Distributional Sliced Wasserstein",
+    },
+    "ta-dsw": {
+        "display_name": "TA-DSW",
+        "architecture": "Alias for TA-DSW with task-adaptive vMF slice sampling and sliced Wasserstein classification",
+        "metric": "Task-Adaptive Distributional Sliced Wasserstein",
     },
     "sc_lfi": {
         "display_name": "SC-LFI",
@@ -1476,6 +1487,24 @@ def build_model_from_args(args):
             logit_scale_init=float(getattr(args, "hssw_logit_scale_init", 10.0)),
             logit_scale_max=float(getattr(args, "hssw_logit_scale_max", 100.0)),
             eps=float(getattr(args, "hssw_eps", 1e-6)),
+        )
+    if args.model in TA_DSW_MODEL_NAMES:
+        TADSW = _load_symbol("net.ta_dsw", "TaskAdaptiveDistributionalSlicedWassersteinNet")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return TADSW(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            resnet12_drop_rate=0.0,
+            resnet12_dropblock_size=5,
+            num_slices=int(getattr(args, "ta_dsw_num_slices", 64)),
+            sw_p=float(getattr(args, "ta_dsw_sw_p", 2.0)),
+            temperature=float(getattr(args, "ta_dsw_temperature", 0.1)),
+            task_hidden_dim=int(getattr(args, "ta_dsw_hidden_dim", 256)),
+            num_quantiles=int(getattr(args, "ta_dsw_num_quantiles", 256)),
+            normalize_tokens=_bool_flag(getattr(args, "ta_dsw_normalize_tokens", "true"), default=True),
+            eps=float(getattr(args, "ta_dsw_eps", 1e-8)),
         )
     if args.model == "sc_lfi":
         SupportConditionedLatentFlowInferenceNet = _load_symbol(

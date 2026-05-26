@@ -591,6 +591,13 @@ def get_args():
     parser.add_argument("--hssw_logit_scale_init", type=float, default=10.0)
     parser.add_argument("--hssw_logit_scale_max", type=float, default=100.0)
     parser.add_argument("--hssw_eps", type=float, default=1e-6)
+    parser.add_argument("--ta_dsw_num_slices", type=int, default=64)
+    parser.add_argument("--ta_dsw_sw_p", type=float, default=2.0)
+    parser.add_argument("--ta_dsw_temperature", type=float, default=0.1)
+    parser.add_argument("--ta_dsw_hidden_dim", type=int, default=256)
+    parser.add_argument("--ta_dsw_num_quantiles", type=int, default=256)
+    parser.add_argument("--ta_dsw_normalize_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--ta_dsw_eps", type=float, default=1e-8)
     parser.add_argument("--spif_stable_dim", type=int, default=64)
     parser.add_argument("--spif_variant_dim", type=int, default=64)
     parser.add_argument("--spif_gate_hidden", type=int, default=16)
@@ -4499,6 +4506,14 @@ def forward_scores(
         return net(query, support, query_targets=query_targets, support_targets=support_targets)
     if args.model == "hierarchical_support_sw_net":
         return net(query, support, return_aux=collect_diagnostics)
+    if args.model in {"ta_dsw", "ta-dsw"}:
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
     if args.model == "sc_lfi":
         return net(query, support, return_aux=collect_diagnostics)
     if args.model == "sc_lfi_v2":
