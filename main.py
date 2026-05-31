@@ -111,6 +111,22 @@ def _safe_path_token(value):
     return token or "class"
 
 
+def _remove_stale_uot_evidence_artifacts(path_prefix):
+    directory = os.path.dirname(path_prefix)
+    prefix = os.path.basename(path_prefix)
+    if not directory or not prefix or not os.path.isdir(directory):
+        return
+    for name in os.listdir(directory):
+        if not name.startswith(prefix):
+            continue
+        if not name.lower().endswith((".png", ".csv")):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError:
+            pass
+
+
 def _wandb_arg_key_irrelevant_for_ours(key: str) -> bool:
     """True for SPIF/AEB/RADA flags that are not used by ``ours`` / ``ours_cpm`` (W&B clutter only)."""
     lk = str(key).lower()
@@ -6542,6 +6558,15 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                     samples_stem = f"{args.training_samples}samples" if args.training_samples else "allsamples"
                     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
                     protocol_suffix = get_test_protocol_suffix(args)
+                    uot_base_prefix = os.path.join(
+                        args.path_results,
+                        (
+                            f"uot_evidence_{args.dataset_name}_{args.model}_{samples_stem}_"
+                            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}_ep{episode_idx:04d}"
+                        ),
+                    )
+                    if uot_evidence_one_per_class:
+                        _remove_stale_uot_evidence_artifacts(uot_base_prefix)
                     export_groups = (
                         [[idx] for idx in selected_query_indices]
                         if uot_evidence_one_per_class
@@ -6560,9 +6585,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         uot_base = os.path.join(
                             args.path_results,
                             (
-                                f"uot_evidence_{args.dataset_name}_{args.model}_{samples_stem}_"
-                                f"{args.shot_num}shot{tag_suffix}{protocol_suffix}_ep{episode_idx:04d}"
-                                f"{class_suffix}.png"
+                                f"{os.path.basename(uot_base_prefix)}{class_suffix}.png"
                             ),
                         )
                         try:

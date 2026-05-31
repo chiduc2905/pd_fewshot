@@ -7,7 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from net.model_factory import get_model_choices, get_model_metadata
 
@@ -52,23 +52,70 @@ MODEL_GROUP_ALIASES = {
     "image_baselines": PAPER_BASELINE_MODELS,
     "table_baselines": PAPER_BASELINE_MODELS,
 }
+DEFAULT_DATASET_ROOT = PurePosixPath("/workspace/pd_fewshot")
+BASE_SCALOGRAM_DATASET = "scalogram_27_1"
+MOTHERWAVE_DATASET_FOLDERS = ("scalogram_27_1_cgau4", "scalogram_27_1_fbsp3")
+NOISE_BENCHMARK_SUFFIX = "_pd_noise_benchmark_test_moderate"
 
 
-def default_dataset_path():
-    local = Path(__file__).resolve().parent.parent.parent / "dataset" / "scalogram_27_1"
-    return str(local) if local.is_dir() else "/workspace/pd_fewshot/scalogram_27_1"
+def default_dataset_path(dataset_folder=BASE_SCALOGRAM_DATASET):
+    return str(DEFAULT_DATASET_ROOT / dataset_folder)
 
 
-def default_noise_test_root():
-    local = (
-        Path(__file__).resolve().parent.parent.parent
-        / "dataset"
-        / "scalogram_27_1_pd_noise_benchmark_test_moderate"
-    )
-    if local.is_dir():
-        return str(local)
-    workspace = Path("/workspace/pd_fewshot/scalogram_27_1_pd_noise_benchmark_test_moderate")
-    return str(workspace) if workspace.is_dir() else None
+def default_noise_test_root(dataset_folder=BASE_SCALOGRAM_DATASET):
+    return str(DEFAULT_DATASET_ROOT / f"{dataset_folder}{NOISE_BENCHMARK_SUFFIX}")
+
+
+def motherwave_dataset_name(base_dataset_name, dataset_folder):
+    suffix_prefix = f"{BASE_SCALOGRAM_DATASET}_"
+    suffix = dataset_folder[len(suffix_prefix):] if dataset_folder.startswith(suffix_prefix) else dataset_folder
+    base = str(base_dataset_name or "").strip()
+    if not base or base == dataset_folder or base.endswith(f"_{suffix}"):
+        return base or dataset_folder
+    return f"{base}_{suffix}"
+
+
+def dataset_root_for_child_paths(dataset_path):
+    dataset_path = str(dataset_path)
+    if dataset_path.startswith("/"):
+        path = PurePosixPath(dataset_path)
+    else:
+        path = Path(dataset_path)
+    known_dataset_names = {BASE_SCALOGRAM_DATASET, *MOTHERWAVE_DATASET_FOLDERS}
+    if path.name in known_dataset_names or path.name.endswith(NOISE_BENCHMARK_SUFFIX):
+        return path.parent
+    return path
+
+
+def build_dataset_specs(args):
+    if str(getattr(args, "test_motherwave_datasets", "false")).lower() != "true":
+        return [
+            {
+                "path": str(args.dataset_path),
+                "name": str(args.dataset_name),
+                "noise_test_root": args.noise_test_root,
+            }
+        ]
+
+    dataset_root = dataset_root_for_child_paths(args.dataset_path)
+    return [
+        {
+            "path": str(dataset_root / dataset_folder),
+            "name": motherwave_dataset_name(args.dataset_name, dataset_folder),
+            "noise_test_root": str(dataset_root / f"{dataset_folder}{NOISE_BENCHMARK_SUFFIX}"),
+        }
+        for dataset_folder in MOTHERWAVE_DATASET_FOLDERS
+    ]
+
+
+def print_dataset_plan(dataset_specs):
+    if len(dataset_specs) == 1:
+        spec = dataset_specs[0]
+        print(f"Dataset     : {spec['path']} ({spec['name']})")
+        return
+    print("Datasets    :")
+    for spec in dataset_specs:
+        print(f"  - {spec['path']} ({spec['name']})")
 
 
 def log_cli_command(args, log_path="results/cli_commands.log"):
@@ -122,6 +169,18 @@ def get_args():
         type=str,
         default="auto",
         help="Comma-separated SNR split folders to test, or auto to use all test_snr* folders.",
+    )
+    parser.add_argument(
+        "--test_motherwave_datasets",
+        "--motherwave_datasets",
+        dest="test_motherwave_datasets",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Run the same experiment plan on the alternate mother-wave scalogram datasets "
+            "scalogram_27_1_cgau4 and scalogram_27_1_fbsp3 under /workspace/pd_fewshot."
+        ),
     )
     parser.add_argument(
         "--extra_test_protocols",
@@ -1937,6 +1996,7 @@ def run_experiment(
     selection_offset = selection_episode_seed_offset(seed, selection_seed)
     print(f"Shot        : {shot}")
     print(f"Samples     : {samples if samples else 'All'}")
+    print(f"Dataset     : {dataset_path} ({dataset_name})")
     print(f"Backbone    : {applied_backbone}")
     print(f"Train Seed  : {seed}")
     print(f"Val Seed    : {selection_seed}+{DEFAULT_SELECTION_EPISODE_SEED_OFFSET}+epoch")
@@ -2409,8 +2469,8 @@ def format_training_seed_line(training_seeds):
     return f"Train Seeds : seeds={','.join(str(seed) for seed in training_seeds)}"
 
 
-def format_planned_total(experiments, training_seeds, suffix):
-    return f"Total       : {len(experiments) * len(training_seeds)} {suffix}"
+def format_planned_total(experiments, training_seeds, suffix, dataset_count=1):
+    return f"Total       : {len(experiments) * len(training_seeds) * dataset_count} {suffix}"
 
 
 def join_result_tags(*parts):
@@ -2785,42 +2845,57 @@ def main():
     )
     if args.spif_global_only == "true" and args.spif_local_only == "true":
         raise ValueError("`--spif_global_only` and `--spif_local_only` cannot both be true.")
-    if dataset_has_noise_benchmark_layout(args.dataset_path) and not dataset_has_training_layout(args.dataset_path):
-        args.noise_test_root = args.dataset_path
-        inferred_dataset_path = infer_training_dataset_path(args.dataset_path)
-        if inferred_dataset_path is None:
-            raise ValueError(
-                "--dataset_path points to a noise benchmark root. "
-                "Pass the clean train/val/test dataset with --dataset_path, "
-                "or place the matching clean dataset beside the noise root."
+    dataset_specs = []
+    for spec in build_dataset_specs(args):
+        spec = dict(spec)
+        if dataset_has_noise_benchmark_layout(spec["path"]) and not dataset_has_training_layout(spec["path"]):
+            spec["noise_test_root"] = spec["path"]
+            inferred_dataset_path = infer_training_dataset_path(spec["path"])
+            if inferred_dataset_path is None:
+                raise ValueError(
+                    "--dataset_path points to a noise benchmark root. "
+                    "Pass the clean train/val/test dataset with --dataset_path, "
+                    "or place the matching clean dataset beside the noise root."
+                )
+            print(
+                "Interpreting dataset path as --noise_test_root; "
+                f"using clean dataset: {inferred_dataset_path}"
             )
-        print(
-            "Interpreting --dataset_path as --noise_test_root; "
-            f"using clean dataset: {inferred_dataset_path}"
+            spec["path"] = str(inferred_dataset_path)
+
+        spec["test_protocol"] = resolve_test_protocol(
+            args.test_protocol,
+            spec.get("noise_test_root"),
+            args.noise_test_splits,
         )
-        args.dataset_path = str(inferred_dataset_path)
-    effective_test_protocol = resolve_test_protocol(
-        args.test_protocol,
-        args.noise_test_root,
-        args.noise_test_splits,
-    )
-    noise_test_split_names = (
-        discover_noise_test_splits(args.noise_test_root, args.noise_test_splits)
-        if effective_test_protocol == "noise"
-        else []
-    )
-    extra_test_protocols = [
-        protocol for protocol in requested_extra_test_protocols if protocol != effective_test_protocol
-    ]
-    if "noise" in extra_test_protocols:
-        extra_noise_splits = discover_noise_test_splits(args.noise_test_root, args.noise_test_splits)
-        if not extra_noise_splits:
-            raise ValueError(
-                "--extra_test_protocols noise requires --noise_test_root with at least one SNR test folder."
+        spec["noise_test_split_names"] = (
+            discover_noise_test_splits(spec.get("noise_test_root"), args.noise_test_splits)
+            if spec["test_protocol"] == "noise"
+            else []
+        )
+        spec["extra_test_protocols"] = [
+            protocol for protocol in requested_extra_test_protocols if protocol != spec["test_protocol"]
+        ]
+        if "noise" in spec["extra_test_protocols"]:
+            extra_noise_splits = discover_noise_test_splits(
+                spec.get("noise_test_root"),
+                args.noise_test_splits,
             )
-        if not noise_test_split_names:
-            noise_test_split_names = extra_noise_splits
-    args.extra_test_protocols = extra_test_protocols
+            if not extra_noise_splits:
+                raise ValueError(
+                    "--extra_test_protocols noise requires --noise_test_root with at least one SNR test folder."
+                )
+            if not spec["noise_test_split_names"]:
+                spec["noise_test_split_names"] = extra_noise_splits
+        dataset_specs.append(spec)
+
+    primary_dataset_spec = dataset_specs[0]
+    args.dataset_path = primary_dataset_spec["path"]
+    args.dataset_name = primary_dataset_spec["name"]
+    args.noise_test_root = primary_dataset_spec.get("noise_test_root")
+    effective_test_protocol = primary_dataset_spec["test_protocol"]
+    noise_test_split_names = primary_dataset_spec["noise_test_split_names"]
+    args.extra_test_protocols = primary_dataset_spec["extra_test_protocols"]
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
     requested_models = parse_requested_models(args.models)
     valid_models = set(get_model_choices())
@@ -2885,7 +2960,7 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -2912,7 +2987,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.ours_final_ablation_suite != "none":
         suite_name = args.ours_final_ablation_suite
@@ -2992,6 +3067,7 @@ def main():
             suite_name in {"contrib", "complete", "partial_ot"}
             and effective_test_protocol != "noise"
             and mode1_sample_count in samples_list
+            and bool(discover_noise_test_splits(args.noise_test_root, args.noise_test_splits))
         )
         def include_mode1_noise(variant):
             return suite_name == "complete" or variant.get("mode1_noise", False)
@@ -3189,7 +3265,7 @@ def main():
                 "Noise Splits: "
                 f"{', '.join(mode1_noise_splits)}"
             )
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -3216,7 +3292,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.spot_ablation_suite != "none":
         if requested_models != [MM_SPOT_MODEL_NAME]:
@@ -3271,7 +3347,7 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -3294,7 +3370,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.pare_ablation_suite != "none":
         if requested_models != [PARE_FSL_MODEL_NAME]:
@@ -3349,7 +3425,7 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -3372,7 +3448,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.sgpot_ablation_suite != "none":
         if requested_models != [SGPOT_MODEL_NAME]:
@@ -3426,7 +3502,7 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -3449,7 +3525,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.spifce_ablation_suite != "none":
         if requested_models != ["spifce"]:
@@ -3493,7 +3569,7 @@ def main():
         print("Variants    :")
         for variant in ablation_variants:
             print(f"  - {variant['tag']}: {variant['label']}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"GPU         : {args.gpu_id}")
         print(
             f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
@@ -3520,7 +3596,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif parsed_mode_ids is not None:
         experiments = [
@@ -3545,7 +3621,7 @@ def main():
         print(f"Backbone    : {args.fewshot_backbone}")
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"Test Proto  : {effective_test_protocol}")
         print(format_final_test_seed_line(args))
         print_extra_test_protocol_line(args)
@@ -3572,7 +3648,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.mode_id is not None:
         samples = EXPERIMENT_MODES[args.mode_id]
@@ -3597,7 +3673,7 @@ def main():
         print(f"Backbone    : {args.fewshot_backbone}")
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"Test Proto  : {effective_test_protocol}")
         print(format_final_test_seed_line(args))
         print_extra_test_protocol_line(args)
@@ -3624,7 +3700,7 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "experiment(s)"))
+        print(format_planned_total(experiments, training_seeds, "experiment(s)", len(dataset_specs)))
         print("=" * 72)
     else:
         experiments = [
@@ -3651,7 +3727,7 @@ def main():
         print(f"Backbone    : {args.fewshot_backbone}")
         if any(model.startswith("spif") for model in requested_models):
             print(f"SPIF Ablate : global_only={args.spif_global_only}, local_only={args.spif_local_only}")
-        print(f"Dataset     : {args.dataset_path} ({args.dataset_name})")
+        print_dataset_plan(dataset_specs)
         print(f"Test Proto  : {effective_test_protocol}")
         print(format_final_test_seed_line(args))
         print_extra_test_protocol_line(args)
@@ -3678,73 +3754,90 @@ def main():
         if effective_test_protocol == "noise":
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
-        print(format_planned_total(experiments, training_seeds, "experiments"))
+        print(format_planned_total(experiments, training_seeds, "experiments", len(dataset_specs)))
         print("=" * 72)
 
-    total_runs = len(experiments) * len(training_seeds)
+    total_runs = len(dataset_specs) * len(experiments) * len(training_seeds)
     multiple_training_seeds = len(training_seeds) > 1
-    if multiple_training_seeds or str(getattr(args, "experiment_tag", "") or "").strip():
+    multiple_datasets = len(dataset_specs) > 1
+    if multiple_datasets or multiple_training_seeds or str(getattr(args, "experiment_tag", "") or "").strip():
         print("\n" + "=" * 72)
         print("Run Expansion")
         print("=" * 72)
+        if multiple_datasets:
+            print(f"Datasets    : {len(dataset_specs)}")
         print(format_training_seed_line(training_seeds))
         if str(getattr(args, "experiment_tag", "") or "").strip():
             print(f"Base Tag    : {args.experiment_tag}")
-        print(f"Runs        : {len(experiments)} experiment spec(s) x {len(training_seeds)} seed(s) = {total_runs}")
+        print(
+            f"Runs        : {len(dataset_specs)} dataset(s) x "
+            f"{len(experiments)} experiment spec(s) x {len(training_seeds)} seed(s) = {total_runs}"
+        )
         print("=" * 72)
 
     success_count = 0
     failed_experiments = []
 
-    for seed_index, train_seed in enumerate(training_seeds):
-        for experiment_index, experiment in enumerate(experiments, 1):
-            idx = seed_index * len(experiments) + experiment_index
-            model = experiment["model"]
-            samples = experiment["samples"]
-            shot = experiment["shot"]
-            experiment_tag, checkpoint_tag = build_effective_run_tags(
-                experiment,
-                args.experiment_tag,
-                train_seed,
-                multiple_training_seeds,
-            )
-            print(f"\n[{idx}/{total_runs}]", end=" ")
-            success = run_experiment(
-                model=model,
-                shot=shot,
-                samples=samples,
-                dataset_path=args.dataset_path,
-                dataset_name=args.dataset_name,
-                project=args.project,
-                seed=train_seed,
-                selection_seed=args.selection_seed,
-                final_test_seed=args.final_test_seed,
-                gpu_id=args.gpu_id,
-                fewshot_backbone=args.fewshot_backbone,
-                num_workers=args.num_workers,
-                pin_memory=args.pin_memory,
-                persistent_workers=args.persistent_workers,
-                prefetch_factor=args.prefetch_factor,
-                spif_global_only=args.spif_global_only,
-                spif_local_only=args.spif_local_only,
-                test_protocol=effective_test_protocol,
-                noise_test_root=args.noise_test_root,
-                noise_test_splits=args.noise_test_splits,
-                passthrough_args=args.passthrough_args,
-                variant_args=experiment["variant_args"],
-                experiment_tag=experiment_tag,
-                checkpoint_tag=checkpoint_tag,
-                experiment_label=experiment["experiment_label"],
-                extra_final_test_seeds=args.extra_final_test_seeds,
-                extra_test_protocols=experiment.get("extra_test_protocols", args.extra_test_protocols),
-                extra_noise_test_splits=experiment.get("extra_noise_test_splits"),
-                skip_existing=str(getattr(args, "skip_existing", "false")).lower() == "true",
-            )
-            if success:
-                success_count += 1
-            else:
-                tag_suffix = f"_{experiment_tag}" if experiment_tag else f"_seed{train_seed}"
-                failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples{tag_suffix}")
+    for dataset_index, dataset_spec in enumerate(dataset_specs):
+        for seed_index, train_seed in enumerate(training_seeds):
+            for experiment_index, experiment in enumerate(experiments, 1):
+                idx = (
+                    dataset_index * len(training_seeds) * len(experiments)
+                    + seed_index * len(experiments)
+                    + experiment_index
+                )
+                model = experiment["model"]
+                samples = experiment["samples"]
+                shot = experiment["shot"]
+                experiment_tag, checkpoint_tag = build_effective_run_tags(
+                    experiment,
+                    args.experiment_tag,
+                    train_seed,
+                    multiple_training_seeds,
+                )
+                print(f"\n[{idx}/{total_runs}]", end=" ")
+                success = run_experiment(
+                    model=model,
+                    shot=shot,
+                    samples=samples,
+                    dataset_path=dataset_spec["path"],
+                    dataset_name=dataset_spec["name"],
+                    project=args.project,
+                    seed=train_seed,
+                    selection_seed=args.selection_seed,
+                    final_test_seed=args.final_test_seed,
+                    gpu_id=args.gpu_id,
+                    fewshot_backbone=args.fewshot_backbone,
+                    num_workers=args.num_workers,
+                    pin_memory=args.pin_memory,
+                    persistent_workers=args.persistent_workers,
+                    prefetch_factor=args.prefetch_factor,
+                    spif_global_only=args.spif_global_only,
+                    spif_local_only=args.spif_local_only,
+                    test_protocol=dataset_spec["test_protocol"],
+                    noise_test_root=dataset_spec.get("noise_test_root"),
+                    noise_test_splits=args.noise_test_splits,
+                    passthrough_args=args.passthrough_args,
+                    variant_args=experiment["variant_args"],
+                    experiment_tag=experiment_tag,
+                    checkpoint_tag=checkpoint_tag,
+                    experiment_label=experiment["experiment_label"],
+                    extra_final_test_seeds=args.extra_final_test_seeds,
+                    extra_test_protocols=merge_extra_test_protocols(
+                        dataset_spec.get("extra_test_protocols"),
+                        experiment.get("extra_test_protocols"),
+                    ),
+                    extra_noise_test_splits=experiment.get("extra_noise_test_splits"),
+                    skip_existing=str(getattr(args, "skip_existing", "false")).lower() == "true",
+                )
+                if success:
+                    success_count += 1
+                else:
+                    tag_suffix = f"_{experiment_tag}" if experiment_tag else f"_seed{train_seed}"
+                    failed_experiments.append(
+                        f"{dataset_spec['name']}_{model}_{shot}shot_"
+                        f"{samples if samples else 'all'}samples{tag_suffix}"
+                    )
 
     print("\n" + "=" * 60)
     print("EXPERIMENT SUMMARY")
@@ -3763,24 +3856,31 @@ def main():
         and args.ours_final_ablation_suite == "none"
         and args.spot_ablation_suite == "none"
         and args.pare_ablation_suite == "none"
+        and args.sgpot_ablation_suite == "none"
         and args.result_artifacts == "all"
     ):
         print("\n" + "=" * 60)
         print("Generating comparison charts...")
         print("=" * 60)
-        generate_comparison_charts(
-            args.dataset_name,
-            shots,
-            requested_models,
-            effective_test_protocol,
-            noise_test_split_names if effective_test_protocol == "noise" else None,
-        )
+        for dataset_spec in dataset_specs:
+            generate_comparison_charts(
+                dataset_spec["name"],
+                shots,
+                requested_models,
+                dataset_spec["test_protocol"],
+                (
+                    dataset_spec["noise_test_split_names"]
+                    if dataset_spec["test_protocol"] == "noise"
+                    else None
+                ),
+            )
     elif (
         args.spifce_ablation_suite == "none"
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
         and args.spot_ablation_suite == "none"
         and args.pare_ablation_suite == "none"
+        and args.sgpot_ablation_suite == "none"
         and args.result_artifacts != "all"
     ):
         print("\n" + "=" * 60)
@@ -3792,6 +3892,7 @@ def main():
         or args.ours_final_ablation_suite != "none"
         or args.spot_ablation_suite != "none"
         or args.pare_ablation_suite != "none"
+        or args.sgpot_ablation_suite != "none"
     ):
         print("\n" + "=" * 60)
         print("Skipping standard comparison charts for tagged ablation runs.")
