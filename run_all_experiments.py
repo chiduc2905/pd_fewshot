@@ -18,6 +18,7 @@ OURS_ABLATION_SAMPLE_COUNTS = [60, 240]
 OURS_FINAL_SAMPLE_COUNTS = SAMPLES_LIST
 OURS_FINAL_MODEL_NAME = "ours_final"
 OURS_FINAL_PARTIAL_OT_MODEL_NAME = "ours_final_partial_ot"
+CFUGET_MODEL_NAME = "cfuget"
 SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
@@ -373,6 +374,28 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--cfuget_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "contrib", "runtime", "complete"],
+        help=(
+            "Expand C-FUGET runs with tagged variants. "
+            "contrib=full, no_structure, no_rival, no_coherent_score, cost_only, feature_only; "
+            "runtime=fast solver and low-structure checks; complete=contrib+runtime."
+        ),
+    )
+    parser.add_argument(
+        "--cfuget_ablation_variants",
+        type=str,
+        default="all",
+        help=(
+            "Comma-separated C-FUGET variant subset for --cfuget_ablation_suite. "
+            "Aliases: full, no_structure, no_rival, no_coherent_score, cost_only, "
+            "feature_only, fast, fgw1, sink30, no_spatial, alpha020. "
+            "Default all keeps the suite's normal variants."
+        ),
+    )
+    parser.add_argument(
         "--spot_ablation_suite",
         type=str,
         default="none",
@@ -570,6 +593,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "jecot_m2_full_ot",
     "crj_fsl",
     "fgwuot_fsl",
+    CFUGET_MODEL_NAME,
     "jsc_wdro",
     "sg_pot",
 }
@@ -1391,6 +1415,154 @@ def build_ours_final_evidence_marginal_variants():
             }
         )
     return variants
+
+
+def _cfuget_base_args(
+    ablation_mode="full",
+    fgw_iters="3",
+    sinkhorn_iters="50",
+    alpha_init="0.35",
+    spatial_structure_weight="0.15",
+    rival_temperature="0.07",
+    rival_margin="0.02",
+    shot_aggregation="j_logmeanexp",
+):
+    """Explicit C-FUGET defaults; variant args are appended after passthrough args."""
+    return [
+        "--cfuget_token_dim",
+        "128",
+        "--cfuget_rho",
+        "0.8",
+        "--cfuget_tau",
+        "0.5",
+        "--cfuget_eps_sinkhorn",
+        "0.08",
+        "--cfuget_fgw_iters",
+        str(fgw_iters),
+        "--cfuget_sinkhorn_iters",
+        str(sinkhorn_iters),
+        "--cfuget_sinkhorn_tol",
+        "1e-5",
+        "--cfuget_alpha_init",
+        str(alpha_init),
+        "--cfuget_score_scale_init",
+        "16.0",
+        "--cfuget_threshold_init",
+        "0.5",
+        "--cfuget_rival_temperature",
+        str(rival_temperature),
+        "--cfuget_rival_margin",
+        str(rival_margin),
+        "--cfuget_coherent_temperature",
+        "0.10",
+        "--cfuget_spatial_structure_weight",
+        str(spatial_structure_weight),
+        "--cfuget_mass_weight",
+        "1.0",
+        "--cfuget_cost_weight",
+        "1.0",
+        "--cfuget_normalize_tokens",
+        "true",
+        "--cfuget_structure_detach",
+        "false",
+        "--cfuget_rival_detach",
+        "true",
+        "--cfuget_ablation_mode",
+        str(ablation_mode),
+        "--cfuget_shot_aggregation",
+        str(shot_aggregation),
+        "--cfuget_eps",
+        "1e-8",
+    ]
+
+
+def build_cfuget_contrib_variants():
+    base = _cfuget_base_args()
+    return [
+        {
+            "tag": "cfuget_full",
+            "checkpoint_tag": "ablation_full",
+            "label": "C-FUGET: FGW-UOT + rival coherent evidence + threshold-mass score",
+            "extra_args": base,
+        },
+        {
+            "tag": "cfuget_no_structure",
+            "checkpoint_tag": "ablation_no_structure",
+            "label": "C-FUGET ablation: remove FGW structure, keep rival coherent evidence",
+            "extra_args": _cfuget_base_args(ablation_mode="no_structure"),
+        },
+        {
+            "tag": "cfuget_no_rival",
+            "checkpoint_tag": "ablation_no_rival",
+            "label": "C-FUGET ablation: remove rival-class evidence gate",
+            "extra_args": _cfuget_base_args(ablation_mode="no_rival"),
+        },
+        {
+            "tag": "cfuget_no_coherent_score",
+            "checkpoint_tag": "ablation_no_coherent_score",
+            "label": "C-FUGET ablation: score raw UOT mass-cost instead of coherent gated evidence",
+            "extra_args": _cfuget_base_args(ablation_mode="no_coherent_score"),
+        },
+        {
+            "tag": "cfuget_cost_only",
+            "checkpoint_tag": "ablation_cost_only",
+            "label": "C-FUGET ablation: remove threshold-mass reward from coherent score",
+            "extra_args": _cfuget_base_args(ablation_mode="cost_only"),
+        },
+        {
+            "tag": "cfuget_feature_only",
+            "checkpoint_tag": "ablation_feature_only",
+            "label": "C-FUGET ablation: feature-cost UOT baseline, no structure and no rival evidence",
+            "extra_args": _cfuget_base_args(ablation_mode="feature_only"),
+        },
+    ]
+
+
+def build_cfuget_runtime_variants():
+    return [
+        {
+            "tag": "cfuget_fast_fgw1_sink30",
+            "checkpoint_tag": "runtime_fast_fgw1_sink30",
+            "label": "C-FUGET runtime: FGW iters=1, Sinkhorn iters=30",
+            "extra_args": _cfuget_base_args(fgw_iters="1", sinkhorn_iters="30"),
+        },
+        {
+            "tag": "cfuget_fgw1",
+            "checkpoint_tag": "runtime_fgw1",
+            "label": "C-FUGET runtime: FGW iters=1 with default Sinkhorn",
+            "extra_args": _cfuget_base_args(fgw_iters="1"),
+        },
+        {
+            "tag": "cfuget_sink30",
+            "checkpoint_tag": "runtime_sink30",
+            "label": "C-FUGET runtime: Sinkhorn iters=30 with default FGW",
+            "extra_args": _cfuget_base_args(sinkhorn_iters="30"),
+        },
+        {
+            "tag": "cfuget_no_spatial",
+            "checkpoint_tag": "runtime_no_spatial",
+            "label": "C-FUGET structure check: feature self-structure only, no spatial grid mix",
+            "extra_args": _cfuget_base_args(spatial_structure_weight="0.0"),
+        },
+        {
+            "tag": "cfuget_alpha020",
+            "checkpoint_tag": "runtime_alpha020",
+            "label": "C-FUGET structure check: lower FGW alpha init=0.20",
+            "extra_args": _cfuget_base_args(alpha_init="0.20"),
+        },
+    ]
+
+
+def build_cfuget_ablation_variants(suite_name):
+    contrib = build_cfuget_contrib_variants()
+    runtime = build_cfuget_runtime_variants()
+    if suite_name == "contrib":
+        return contrib
+    if suite_name == "runtime":
+        return runtime
+    if suite_name == "complete":
+        return contrib + runtime
+    raise ValueError(f"Unknown C-FUGET ablation suite: {suite_name}")
 
 
 MM_SPOT_MODEL_NAME = "mm_spot_fsl"
@@ -2625,6 +2797,79 @@ def filter_ours_final_variants(variants, allowed_tags):
     return [variant for variant in variants if variant["tag"] in allowed_tags]
 
 
+def parse_cfuget_variant_filter(variants_str):
+    if variants_str is None:
+        return None
+    raw = str(variants_str).strip()
+    if not raw or raw.lower() in {"all", "none", "*"}:
+        return None
+
+    aliases = {
+        "full": "cfuget_full",
+        "default": "cfuget_full",
+        "cfuget": "cfuget_full",
+        "cfuget_full": "cfuget_full",
+        "no_structure": "cfuget_no_structure",
+        "nostructure": "cfuget_no_structure",
+        "no_fgw": "cfuget_no_structure",
+        "structure_off": "cfuget_no_structure",
+        "cfuget_no_structure": "cfuget_no_structure",
+        "no_rival": "cfuget_no_rival",
+        "rival_off": "cfuget_no_rival",
+        "gate_off": "cfuget_no_rival",
+        "cfuget_no_rival": "cfuget_no_rival",
+        "no_coherent": "cfuget_no_coherent_score",
+        "no_coherent_score": "cfuget_no_coherent_score",
+        "raw_score": "cfuget_no_coherent_score",
+        "raw_mass": "cfuget_no_coherent_score",
+        "cfuget_no_coherent_score": "cfuget_no_coherent_score",
+        "cost_only": "cfuget_cost_only",
+        "mass_off": "cfuget_cost_only",
+        "cfuget_cost_only": "cfuget_cost_only",
+        "feature_only": "cfuget_feature_only",
+        "uot_only": "cfuget_feature_only",
+        "plain_uot": "cfuget_feature_only",
+        "cfuget_feature_only": "cfuget_feature_only",
+        "fast": "cfuget_fast_fgw1_sink30",
+        "fast_fgw1_sink30": "cfuget_fast_fgw1_sink30",
+        "cfuget_fast_fgw1_sink30": "cfuget_fast_fgw1_sink30",
+        "fgw1": "cfuget_fgw1",
+        "cfuget_fgw1": "cfuget_fgw1",
+        "sink30": "cfuget_sink30",
+        "sinkhorn30": "cfuget_sink30",
+        "cfuget_sink30": "cfuget_sink30",
+        "no_spatial": "cfuget_no_spatial",
+        "spatial_off": "cfuget_no_spatial",
+        "cfuget_no_spatial": "cfuget_no_spatial",
+        "alpha020": "cfuget_alpha020",
+        "alpha0p20": "cfuget_alpha020",
+        "alpha_0p20": "cfuget_alpha020",
+        "cfuget_alpha020": "cfuget_alpha020",
+    }
+
+    parsed = []
+    for token in raw.split(","):
+        name = token.strip().lower().replace("-", "_")
+        if not name:
+            continue
+        tag = aliases.get(name)
+        if tag is None:
+            raise ValueError(
+                f"Invalid --cfuget_ablation_variants token '{token}'. "
+                "Use full, no_structure, no_rival, no_coherent_score, cost_only, "
+                "feature_only, fast, fgw1, sink30, no_spatial, alpha020, or exact tags."
+            )
+        if tag not in parsed:
+            parsed.append(tag)
+    return set(parsed) if parsed else None
+
+
+def filter_cfuget_variants(variants, allowed_tags):
+    if allowed_tags is None:
+        return list(variants)
+    return [variant for variant in variants if variant["tag"] in allowed_tags]
+
+
 def parse_mm_spot_variant_filter(variants_str):
     if variants_str is None:
         return None
@@ -2834,6 +3079,9 @@ def main():
     ours_final_variant_filter = parse_ours_final_variant_filter(
         getattr(args, "ours_final_ablation_variants", "all")
     )
+    cfuget_variant_filter = parse_cfuget_variant_filter(
+        getattr(args, "cfuget_ablation_variants", "all")
+    )
     mm_spot_variant_filter = parse_mm_spot_variant_filter(
         getattr(args, "spot_ablation_variants", "all")
     )
@@ -2914,6 +3162,7 @@ def main():
             ("--spifce_ablation_suite", args.spifce_ablation_suite),
             ("--ours_ablation_suite", args.ours_ablation_suite),
             ("--ours_final_ablation_suite", args.ours_final_ablation_suite),
+            ("--cfuget_ablation_suite", args.cfuget_ablation_suite),
             ("--spot_ablation_suite", args.spot_ablation_suite),
             ("--pare_ablation_suite", args.pare_ablation_suite),
             ("--sgpot_ablation_suite", args.sgpot_ablation_suite),
@@ -3283,6 +3532,84 @@ def main():
             f"train SFC steps={DEEPEMD_5SHOT_TRAIN_SFC_STEPS}, "
             f"train SFC bs={DEEPEMD_5SHOT_TRAIN_SFC_BS}, "
             f"test exact={DEEPEMD_5SHOT_TEST_EXACT}, test SFC={DEEPEMD_5SHOT_TEST_SFC}"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
+        print("=" * 72)
+    elif args.cfuget_ablation_suite != "none":
+        if requested_models != [CFUGET_MODEL_NAME]:
+            raise ValueError(
+                f"`--cfuget_ablation_suite` currently supports only `--models {CFUGET_MODEL_NAME}` "
+                f"(got {requested_models})"
+            )
+        suite_name = args.cfuget_ablation_suite
+        ablation_variants = filter_cfuget_variants(
+            build_cfuget_ablation_variants(suite_name),
+            cfuget_variant_filter,
+        )
+        if not ablation_variants:
+            requested = ", ".join(sorted(cfuget_variant_filter or [])) or "all"
+            raise ValueError(
+                f"No C-FUGET variants selected for suite={suite_name!r} "
+                f"with --cfuget_ablation_variants={requested}."
+            )
+        if args.mode_id is not None:
+            samples_list = [EXPERIMENT_MODES[args.mode_id]]
+        elif parsed_mode_ids is not None:
+            samples_list = [EXPERIMENT_MODES[mode_id] for mode_id in parsed_mode_ids]
+        else:
+            samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
+        experiments = [
+            {
+                "model": CFUGET_MODEL_NAME,
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                "experiment_label": variant["label"],
+                "extra_test_protocols": args.extra_test_protocols,
+                "extra_noise_test_splits": None,
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - C-FUGET Ablation Suite")
+        print("=" * 72)
+        sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
+        print(f"Samples     : {sample_text}")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.cfuget_ablation_suite}")
+        if cfuget_variant_filter is not None:
+            print(f"Variant Pick: {', '.join(sorted(cfuget_variant_filter))}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            print(f"  - {variant['tag']}: {variant['label']}")
+        print_dataset_plan(dataset_specs)
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        print(
+            "Overrides   : "
+            "scheduler=cosine(warmup=5, warmup_start=0.1, eta_min=1e-6), "
+            "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
+            "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
+            "augment=off, masks=off, "
+            "C-FUGET: fixed rho=0.8 FGW-UOT, rival coherent evidence gate, threshold-mass score"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")
@@ -3854,6 +4181,7 @@ def main():
         args.spifce_ablation_suite == "none"
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
+        and args.cfuget_ablation_suite == "none"
         and args.spot_ablation_suite == "none"
         and args.pare_ablation_suite == "none"
         and args.sgpot_ablation_suite == "none"
@@ -3878,6 +4206,7 @@ def main():
         args.spifce_ablation_suite == "none"
         and args.ours_ablation_suite == "none"
         and args.ours_final_ablation_suite == "none"
+        and args.cfuget_ablation_suite == "none"
         and args.spot_ablation_suite == "none"
         and args.pare_ablation_suite == "none"
         and args.sgpot_ablation_suite == "none"
@@ -3890,6 +4219,7 @@ def main():
         args.spifce_ablation_suite != "none"
         or args.ours_ablation_suite != "none"
         or args.ours_final_ablation_suite != "none"
+        or args.cfuget_ablation_suite != "none"
         or args.spot_ablation_suite != "none"
         or args.pare_ablation_suite != "none"
         or args.sgpot_ablation_suite != "none"

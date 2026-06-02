@@ -2284,6 +2284,38 @@ def get_args():
         choices=["mean", "j_logmeanexp"],
     )
     parser.add_argument("--fgwuot_eps", type=float, default=1e-8)
+    parser.add_argument("--cfuget_token_dim", type=int, default=128)
+    parser.add_argument("--cfuget_rho", type=float, default=0.8)
+    parser.add_argument("--cfuget_tau", type=float, default=0.5)
+    parser.add_argument("--cfuget_eps_sinkhorn", type=float, default=0.08)
+    parser.add_argument("--cfuget_fgw_iters", type=int, default=3)
+    parser.add_argument("--cfuget_sinkhorn_iters", type=int, default=50)
+    parser.add_argument("--cfuget_sinkhorn_tol", type=float, default=1e-5)
+    parser.add_argument("--cfuget_alpha_init", type=float, default=0.35)
+    parser.add_argument("--cfuget_score_scale_init", type=float, default=16.0)
+    parser.add_argument("--cfuget_threshold_init", type=float, default=0.5)
+    parser.add_argument("--cfuget_rival_temperature", type=float, default=0.07)
+    parser.add_argument("--cfuget_rival_margin", type=float, default=0.02)
+    parser.add_argument("--cfuget_coherent_temperature", type=float, default=0.10)
+    parser.add_argument("--cfuget_spatial_structure_weight", type=float, default=0.15)
+    parser.add_argument("--cfuget_mass_weight", type=float, default=1.0)
+    parser.add_argument("--cfuget_cost_weight", type=float, default=1.0)
+    parser.add_argument("--cfuget_normalize_tokens", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--cfuget_structure_detach", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--cfuget_rival_detach", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--cfuget_ablation_mode",
+        type=str,
+        default="full",
+        choices=["full", "no_structure", "no_rival", "no_coherent_score", "cost_only", "feature_only"],
+    )
+    parser.add_argument(
+        "--cfuget_shot_aggregation",
+        type=str,
+        default="j_logmeanexp",
+        choices=["mean", "j_logmeanexp"],
+    )
+    parser.add_argument("--cfuget_eps", type=float, default=1e-8)
     parser.add_argument("--jsc_wdro_token_dim", type=int, default=None)
     parser.add_argument("--jsc_wdro_score_scale", type=float, default=16.0)
     parser.add_argument("--jsc_wdro_sinkhorn_epsilon", type=float, default=0.05)
@@ -3607,6 +3639,20 @@ def get_model(args):
             f"sinkhorn_eps={getattr(args, 'fgwuot_eps_sinkhorn', 0.1)}, "
             f"fgw_iters={getattr(args, 'fgwuot_fgw_iters', 8)})"
         )
+    if args.model == "cfuget":
+        print(
+            "  cfuget: fixed-budget FGW-UOT -> rival coherent evidence gate -> "
+            "threshold-mass score "
+            f"(token_dim={getattr(args, 'cfuget_token_dim', 128)}, "
+            f"rho={getattr(args, 'cfuget_rho', 0.8)}, "
+            f"alpha_init={getattr(args, 'cfuget_alpha_init', 0.35)}, "
+            f"fgw_iters={getattr(args, 'cfuget_fgw_iters', 3)}, "
+            f"sinkhorn_iters={getattr(args, 'cfuget_sinkhorn_iters', 50)}, "
+            f"rival_tau={getattr(args, 'cfuget_rival_temperature', 0.07)}, "
+            f"rival_margin={getattr(args, 'cfuget_rival_margin', 0.02)}, "
+            f"spatial_mix={getattr(args, 'cfuget_spatial_structure_weight', 0.15)}, "
+            f"ablation={getattr(args, 'cfuget_ablation_mode', 'full')})"
+        )
     if args.model == "jsc_wdro":
         print(
             "  jsc_wdro: backbone spatial tokens -> class Wasserstein barycenter -> "
@@ -4632,6 +4678,14 @@ def forward_scores(
             return_aux=collect_diagnostics,
         )
     if args.model == "fgwuot_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
+    if args.model == "cfuget":
         return net(
             query,
             support,

@@ -785,6 +785,12 @@ MODEL_REGISTRY = {
         "architecture": "Backbone spatial tokens -> FGW-UOT per-shot matching -> J-style log-mean-exp shot pooling",
         "metric": "FGW Unbalanced OT with J-style Shot Pooling",
     },
+    "cfuget": {
+        "display_name": "C-FUGET",
+        "paper_name": "Class-Contrastive Fused Unbalanced Gromov Evidence Transport",
+        "architecture": "Backbone spatial tokens -> fixed-budget FGW-UOT -> rival-class coherent evidence gate -> threshold-mass evidence score",
+        "metric": "Class-Contrastive Coherent FGW-UOT Evidence",
+    },
     "jsc_wdro": {
         "display_name": "JSC-WDRO",
         "architecture": "Backbone spatial tokens -> POT fixed-support Wasserstein/UOT barycenter per class -> adaptive WDRO radius -> POT/native robust query-class OT score",
@@ -3595,6 +3601,37 @@ def build_model_from_args(args):
                 getattr(args, "fgwuot_normalize_tokens", "true"), default=True),
             shot_aggregation=str(getattr(args, "fgwuot_shot_aggregation", "j_logmeanexp")),
             eps=float(getattr(args, "fgwuot_eps", 1e-8)),
+        )
+    if args.model == "cfuget":
+        CFUGETFewShot = _load_symbol("net.cfuget", "CFUGETFewShot")
+        hidden_dim = fewshot_backbone_output_dim(fewshot_backbone)
+        return CFUGETFewShot(
+            in_channels=3,
+            hidden_dim=hidden_dim,
+            token_dim=int(getattr(args, "cfuget_token_dim", 128)),
+            backbone_name=fewshot_backbone,
+            image_size=image_size,
+            rho=float(getattr(args, "cfuget_rho", 0.8)),
+            tau=float(getattr(args, "cfuget_tau", 0.5)),
+            eps_sinkhorn=float(getattr(args, "cfuget_eps_sinkhorn", 0.08)),
+            fgw_iters=int(getattr(args, "cfuget_fgw_iters", 3)),
+            sinkhorn_iters=int(getattr(args, "cfuget_sinkhorn_iters", 50)),
+            sinkhorn_tol=float(getattr(args, "cfuget_sinkhorn_tol", 1e-5)),
+            alpha_init=float(getattr(args, "cfuget_alpha_init", 0.35)),
+            score_scale_init=float(getattr(args, "cfuget_score_scale_init", 16.0)),
+            threshold_init=float(getattr(args, "cfuget_threshold_init", 0.5)),
+            rival_temperature=float(getattr(args, "cfuget_rival_temperature", 0.07)),
+            rival_margin=float(getattr(args, "cfuget_rival_margin", 0.02)),
+            coherent_temperature=float(getattr(args, "cfuget_coherent_temperature", 0.10)),
+            spatial_structure_weight=float(getattr(args, "cfuget_spatial_structure_weight", 0.15)),
+            mass_weight=float(getattr(args, "cfuget_mass_weight", 1.0)),
+            cost_weight=float(getattr(args, "cfuget_cost_weight", 1.0)),
+            normalize_tokens=_bool_flag(getattr(args, "cfuget_normalize_tokens", "true"), default=True),
+            structure_detach=_bool_flag(getattr(args, "cfuget_structure_detach", "false"), default=False),
+            rival_detach=_bool_flag(getattr(args, "cfuget_rival_detach", "true"), default=True),
+            ablation_mode=str(getattr(args, "cfuget_ablation_mode", "full")),
+            shot_aggregation=str(getattr(args, "cfuget_shot_aggregation", "j_logmeanexp")),
+            eps=float(getattr(args, "cfuget_eps", 1e-8)),
         )
     if args.model == "jsc_wdro":
         JSCWDRO = _load_symbol("net.jsc_wdro", "JSCWDRO")
