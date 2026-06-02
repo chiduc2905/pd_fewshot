@@ -1420,15 +1420,9 @@ def build_ours_final_evidence_marginal_variants():
 
 
 def build_ours_final_pulse_region_variants():
-    """Pulse-region comparison suite with an explicit Ours-Final baseline."""
+    """Pulse-region comparison suite without the Ours-Final baseline."""
     base = _ours_final_base_args()
     return [
-        {
-            "tag": "ours_final_pulse_baseline",
-            "checkpoint_tag": "pulse_baseline",
-            "label": "Ours-Final baseline: UOT rho=0.8 + threshold-mass score, no pulse guidance",
-            "extra_args": base,
-        },
         {
             "tag": "ours_final_pulse_cost",
             "checkpoint_tag": "pulse_cost",
