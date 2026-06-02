@@ -6724,6 +6724,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     acc_worst = episode_accuracies.min()
     acc_best = episode_accuracies.max()
     acc_ci95 = 1.96 * acc_std / np.sqrt(len(episode_accuracies))
+    acc_micro = float((all_preds == all_targets).mean()) if all_targets.size > 0 else 0.0
     time_mean = episode_times.mean()
     time_std = episode_times.std()
 
@@ -6740,6 +6741,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     print("ACCURACY METRICS")
     print("=" * 60)
     print(f"  Mean Accuracy : {acc_mean * 100:.2f} +/- {acc_ci95 * 100:.2f}% (95% CI)")
+    print(f"  Query Accuracy: {acc_micro * 100:.2f}%")
     print(f"  Std Deviation : {acc_std * 100:.2f}%")
     print(f"  Worst-case    : {acc_worst * 100:.2f}%")
     print(f"  Best-case     : {acc_best * 100:.2f}%")
@@ -6758,9 +6760,16 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     test_diag_summary = format_diagnostic_summary(test_diag)
     if test_diag_summary:
         print(f"  TestDiag: {test_diag_summary}")
+    diag_pred_acc = test_diag.get("pred_acc")
+    if diag_pred_acc is not None and abs(float(diag_pred_acc) - acc_micro) > 1e-6:
+        print(
+            "  Warning: diag pred_acc and query accuracy differ "
+            f"({float(diag_pred_acc):.6f} vs {acc_micro:.6f})."
+        )
 
     test_metrics = {
         "test_accuracy_mean": acc_mean,
+        "test_accuracy_micro": acc_micro,
         "test_accuracy_std": acc_std,
         "test_accuracy_ci95": acc_ci95,
         "test_accuracy_worst": acc_worst,
@@ -7009,6 +7018,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         )
         handle.write("-" * 40 + "\n")
         handle.write(f"Accuracy : {acc_mean:.4f} +/- {acc_std:.4f}\n")
+        handle.write(f"Query Accuracy : {acc_micro:.4f}\n")
         handle.write(f"Worst-case : {acc_worst:.4f}\n")
         handle.write(f"Best-case : {acc_best:.4f}\n")
         handle.write(f"Precision : {prec:.4f}\n")
@@ -7020,6 +7030,13 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             handle.write(f"Support Pairwise Distance Mean: {support_summary['support_pairwise_distance_mean']:.4f}\n")
             handle.write(f"Support Outlier Score Max: {support_summary['support_outlier_score_max']:.4f}\n")
             handle.write(f"Support Entropy Std Mean: {support_summary['support_entropy_std_mean']:.4f}\n")
+        if test_diag:
+            handle.write("-" * 40 + "\n")
+            handle.write("Test Diagnostics\n")
+            for key in sorted(test_diag):
+                value = test_diag[key]
+                if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+                    handle.write(f"{key}: {float(value):.6f}\n")
     print(f"Results saved to {txt_path}")
     if not save_aux_artifacts:
         print("Result artifact mode: figures_only (kept result txt plus confusion matrix and t-SNE PNG/PDF).")
