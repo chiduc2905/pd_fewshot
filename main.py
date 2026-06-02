@@ -2288,16 +2288,16 @@ def get_args():
     parser.add_argument("--cfuget_rho", type=float, default=0.8)
     parser.add_argument("--cfuget_tau", type=float, default=0.5)
     parser.add_argument("--cfuget_eps_sinkhorn", type=float, default=0.08)
-    parser.add_argument("--cfuget_fgw_iters", type=int, default=3)
+    parser.add_argument("--cfuget_fgw_iters", type=int, default=1)
     parser.add_argument("--cfuget_sinkhorn_iters", type=int, default=50)
     parser.add_argument("--cfuget_sinkhorn_tol", type=float, default=1e-5)
-    parser.add_argument("--cfuget_alpha_init", type=float, default=0.35)
+    parser.add_argument("--cfuget_alpha_init", type=float, default=1e-6)
     parser.add_argument("--cfuget_score_scale_init", type=float, default=16.0)
     parser.add_argument("--cfuget_threshold_init", type=float, default=0.5)
     parser.add_argument("--cfuget_rival_temperature", type=float, default=0.07)
     parser.add_argument("--cfuget_rival_margin", type=float, default=0.02)
     parser.add_argument("--cfuget_coherent_temperature", type=float, default=0.10)
-    parser.add_argument("--cfuget_spatial_structure_weight", type=float, default=0.15)
+    parser.add_argument("--cfuget_spatial_structure_weight", type=float, default=0.0)
     parser.add_argument("--cfuget_mass_weight", type=float, default=1.0)
     parser.add_argument("--cfuget_cost_weight", type=float, default=1.0)
     parser.add_argument("--cfuget_normalize_tokens", type=str, default="true", choices=["true", "false"])
@@ -2307,7 +2307,15 @@ def get_args():
         "--cfuget_ablation_mode",
         type=str,
         default="full",
-        choices=["full", "no_structure", "no_rival", "no_coherent_score", "cost_only", "feature_only"],
+        choices=[
+            "full",
+            "no_structure",
+            "no_rival",
+            "no_coherent_score",
+            "cost_only",
+            "feature_only",
+            "with_structure",
+        ],
     )
     parser.add_argument(
         "--cfuget_shot_aggregation",
@@ -3641,16 +3649,13 @@ def get_model(args):
         )
     if args.model == "cfuget":
         print(
-            "  cfuget: fixed-budget FGW-UOT -> rival coherent evidence gate -> "
+            "  cfuget: fixed-budget UOT -> rival coherent evidence gate -> "
             "threshold-mass score "
             f"(token_dim={getattr(args, 'cfuget_token_dim', 128)}, "
             f"rho={getattr(args, 'cfuget_rho', 0.8)}, "
-            f"alpha_init={getattr(args, 'cfuget_alpha_init', 0.35)}, "
-            f"fgw_iters={getattr(args, 'cfuget_fgw_iters', 3)}, "
             f"sinkhorn_iters={getattr(args, 'cfuget_sinkhorn_iters', 50)}, "
             f"rival_tau={getattr(args, 'cfuget_rival_temperature', 0.07)}, "
             f"rival_margin={getattr(args, 'cfuget_rival_margin', 0.02)}, "
-            f"spatial_mix={getattr(args, 'cfuget_spatial_structure_weight', 0.15)}, "
             f"ablation={getattr(args, 'cfuget_ablation_mode', 'full')})"
         )
     if args.model == "jsc_wdro":

@@ -337,6 +337,7 @@ def get_args():
             "mass_on",
             "pst_dm",
             "evidence",
+            "pulse_region",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -349,7 +350,8 @@ def get_args():
             "pooling=class-pooled support before OT plus fixed shot pooling; "
             "dmuot=token-g, cost modulation, and discriminative marginal sweeps; "
             "mass_on=shot-consensus threshold-mass score variants; "
-            "evidence=cost-derived evidence marginal ablation (query/support/both/rival)."
+            "evidence=cost-derived evidence marginal ablation (query/support/both/rival); "
+            "pulse_region=baseline Ours-Final plus pulse cost guidance and pulse evidence-score controls."
         ),
     )
     parser.add_argument(
@@ -379,9 +381,9 @@ def get_args():
         default="none",
         choices=["none", "contrib", "runtime", "complete"],
         help=(
-            "Expand C-FUGET runs with tagged variants. "
-            "contrib=full, no_structure, no_rival, no_coherent_score, cost_only, feature_only; "
-            "runtime=fast solver and low-structure checks; complete=contrib+runtime."
+            "Expand RC-UOT runs with tagged variants. "
+            "contrib=full, no_rival, no_coherent_score, cost_only; "
+            "runtime=solver/evidence-temperature checks; complete=contrib+runtime."
         ),
     )
     parser.add_argument(
@@ -389,9 +391,9 @@ def get_args():
         type=str,
         default="all",
         help=(
-            "Comma-separated C-FUGET variant subset for --cfuget_ablation_suite. "
-            "Aliases: full, no_structure, no_rival, no_coherent_score, cost_only, "
-            "feature_only, fast, fgw1, sink30, no_spatial, alpha020. "
+            "Comma-separated RC-UOT variant subset for --cfuget_ablation_suite. "
+            "Aliases: full, no_rival, no_coherent_score, cost_only, sink30, sink70, "
+            "tau005, tau010, margin0, margin005. "
             "Default all keeps the suite's normal variants."
         ),
     )
@@ -1417,17 +1419,75 @@ def build_ours_final_evidence_marginal_variants():
     return variants
 
 
+def build_ours_final_pulse_region_variants():
+    """Pulse-region comparison suite with an explicit Ours-Final baseline."""
+    base = _ours_final_base_args()
+    return [
+        {
+            "tag": "ours_final_pulse_baseline",
+            "checkpoint_tag": "pulse_baseline",
+            "label": "Ours-Final baseline: UOT rho=0.8 + threshold-mass score, no pulse guidance",
+            "extra_args": base,
+        },
+        {
+            "tag": "ours_final_pulse_cost",
+            "checkpoint_tag": "pulse_cost",
+            "label": "Pulse-region cost/marginal guidance only; evidence score disabled",
+            "extra_args": base
+            + [
+                "--enable_pulse_region_uot",
+                "--pulse_evidence_score",
+                "false",
+                "--pulse_discriminative_evidence",
+                "false",
+            ],
+        },
+        {
+            "tag": "ours_final_pulse_score_only",
+            "checkpoint_tag": "pulse_score_only",
+            "label": "Pulse-region score-only evidence: keep UOT cost/marginals unchanged",
+            "extra_args": base
+            + [
+                "--enable_pulse_region_uot",
+                "--pulse_region_cost_weight",
+                "0.0",
+                "--pulse_saliency_mass_mix",
+                "0.0",
+                "--pulse_saliency_cost_discount",
+                "0.0",
+                "--pulse_evidence_score",
+                "true",
+                "--pulse_discriminative_evidence",
+                "true",
+            ],
+        },
+        {
+            "tag": "ours_final_pulse_full_evidence",
+            "checkpoint_tag": "pulse_full_evidence",
+            "label": "Pulse-region cost/marginal guidance plus rival-aware pulse evidence score",
+            "extra_args": base
+            + [
+                "--enable_pulse_region_uot",
+                "--pulse_evidence_score",
+                "true",
+                "--pulse_discriminative_evidence",
+                "true",
+            ],
+        },
+    ]
+
+
 def _cfuget_base_args(
     ablation_mode="full",
-    fgw_iters="3",
+    fgw_iters="1",
     sinkhorn_iters="50",
-    alpha_init="0.35",
-    spatial_structure_weight="0.15",
+    alpha_init="1e-6",
+    spatial_structure_weight="0.0",
     rival_temperature="0.07",
     rival_margin="0.02",
     shot_aggregation="j_logmeanexp",
 ):
-    """Explicit C-FUGET defaults; variant args are appended after passthrough args."""
+    """Explicit RC-UOT defaults; variant args are appended after passthrough args."""
     return [
         "--cfuget_token_dim",
         "128",
@@ -1482,38 +1542,26 @@ def build_cfuget_contrib_variants():
         {
             "tag": "cfuget_full",
             "checkpoint_tag": "ablation_full",
-            "label": "C-FUGET: FGW-UOT + rival coherent evidence + threshold-mass score",
+            "label": "RC-UOT: UOT + rival coherent evidence + threshold-mass score",
             "extra_args": base,
-        },
-        {
-            "tag": "cfuget_no_structure",
-            "checkpoint_tag": "ablation_no_structure",
-            "label": "C-FUGET ablation: remove FGW structure, keep rival coherent evidence",
-            "extra_args": _cfuget_base_args(ablation_mode="no_structure"),
         },
         {
             "tag": "cfuget_no_rival",
             "checkpoint_tag": "ablation_no_rival",
-            "label": "C-FUGET ablation: remove rival-class evidence gate",
+            "label": "RC-UOT ablation: evidence gate without rival-class subtraction",
             "extra_args": _cfuget_base_args(ablation_mode="no_rival"),
         },
         {
             "tag": "cfuget_no_coherent_score",
             "checkpoint_tag": "ablation_no_coherent_score",
-            "label": "C-FUGET ablation: score raw UOT mass-cost instead of coherent gated evidence",
+            "label": "RC-UOT ablation: score raw UOT mass-cost instead of coherent gated evidence",
             "extra_args": _cfuget_base_args(ablation_mode="no_coherent_score"),
         },
         {
             "tag": "cfuget_cost_only",
             "checkpoint_tag": "ablation_cost_only",
-            "label": "C-FUGET ablation: remove threshold-mass reward from coherent score",
+            "label": "RC-UOT ablation: remove threshold-mass reward from coherent score",
             "extra_args": _cfuget_base_args(ablation_mode="cost_only"),
-        },
-        {
-            "tag": "cfuget_feature_only",
-            "checkpoint_tag": "ablation_feature_only",
-            "label": "C-FUGET ablation: feature-cost UOT baseline, no structure and no rival evidence",
-            "extra_args": _cfuget_base_args(ablation_mode="feature_only"),
         },
     ]
 
@@ -1521,34 +1569,40 @@ def build_cfuget_contrib_variants():
 def build_cfuget_runtime_variants():
     return [
         {
-            "tag": "cfuget_fast_fgw1_sink30",
-            "checkpoint_tag": "runtime_fast_fgw1_sink30",
-            "label": "C-FUGET runtime: FGW iters=1, Sinkhorn iters=30",
-            "extra_args": _cfuget_base_args(fgw_iters="1", sinkhorn_iters="30"),
-        },
-        {
-            "tag": "cfuget_fgw1",
-            "checkpoint_tag": "runtime_fgw1",
-            "label": "C-FUGET runtime: FGW iters=1 with default Sinkhorn",
-            "extra_args": _cfuget_base_args(fgw_iters="1"),
-        },
-        {
             "tag": "cfuget_sink30",
             "checkpoint_tag": "runtime_sink30",
-            "label": "C-FUGET runtime: Sinkhorn iters=30 with default FGW",
+            "label": "RC-UOT runtime: Sinkhorn iters=30",
             "extra_args": _cfuget_base_args(sinkhorn_iters="30"),
         },
         {
-            "tag": "cfuget_no_spatial",
-            "checkpoint_tag": "runtime_no_spatial",
-            "label": "C-FUGET structure check: feature self-structure only, no spatial grid mix",
-            "extra_args": _cfuget_base_args(spatial_structure_weight="0.0"),
+            "tag": "cfuget_sink70",
+            "checkpoint_tag": "runtime_sink70",
+            "label": "RC-UOT runtime: Sinkhorn iters=70",
+            "extra_args": _cfuget_base_args(sinkhorn_iters="70"),
         },
         {
-            "tag": "cfuget_alpha020",
-            "checkpoint_tag": "runtime_alpha020",
-            "label": "C-FUGET structure check: lower FGW alpha init=0.20",
-            "extra_args": _cfuget_base_args(alpha_init="0.20"),
+            "tag": "cfuget_tau005",
+            "checkpoint_tag": "runtime_tau005",
+            "label": "RC-UOT evidence check: sharper rival evidence temperature=0.05",
+            "extra_args": _cfuget_base_args(rival_temperature="0.05"),
+        },
+        {
+            "tag": "cfuget_tau010",
+            "checkpoint_tag": "runtime_tau010",
+            "label": "RC-UOT evidence check: smoother rival evidence temperature=0.10",
+            "extra_args": _cfuget_base_args(rival_temperature="0.10"),
+        },
+        {
+            "tag": "cfuget_margin0",
+            "checkpoint_tag": "runtime_margin0",
+            "label": "RC-UOT evidence check: no rival margin",
+            "extra_args": _cfuget_base_args(rival_margin="0.0"),
+        },
+        {
+            "tag": "cfuget_margin005",
+            "checkpoint_tag": "runtime_margin005",
+            "label": "RC-UOT evidence check: stronger rival margin=0.05",
+            "extra_args": _cfuget_base_args(rival_margin="0.05"),
         },
     ]
 
@@ -2746,6 +2800,20 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_dm": "ours_final_dm",
         "pst_dm": "ours_final_pst_dm",
         "ours_final_pst_dm": "ours_final_pst_dm",
+        "pulse_baseline": "ours_final_pulse_baseline",
+        "pulse_base": "ours_final_pulse_baseline",
+        "ours_final_pulse_baseline": "ours_final_pulse_baseline",
+        "pulse_cost": "ours_final_pulse_cost",
+        "pulse_region": "ours_final_pulse_cost",
+        "ours_final_pulse_cost": "ours_final_pulse_cost",
+        "pulse_score_only": "ours_final_pulse_score_only",
+        "score_only": "ours_final_pulse_score_only",
+        "pulse_evidence_score": "ours_final_pulse_score_only",
+        "ours_final_pulse_score_only": "ours_final_pulse_score_only",
+        "pulse_full": "ours_final_pulse_full_evidence",
+        "pulse_full_evidence": "ours_final_pulse_full_evidence",
+        "pulse_evidence": "ours_final_pulse_full_evidence",
+        "ours_final_pulse_full_evidence": "ours_final_pulse_full_evidence",
         "mass_scaled": "ours_final_mass_scaled_b0p5",
         "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
         "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
@@ -2830,21 +2898,32 @@ def parse_cfuget_variant_filter(variants_str):
         "uot_only": "cfuget_feature_only",
         "plain_uot": "cfuget_feature_only",
         "cfuget_feature_only": "cfuget_feature_only",
-        "fast": "cfuget_fast_fgw1_sink30",
-        "fast_fgw1_sink30": "cfuget_fast_fgw1_sink30",
-        "cfuget_fast_fgw1_sink30": "cfuget_fast_fgw1_sink30",
-        "fgw1": "cfuget_fgw1",
-        "cfuget_fgw1": "cfuget_fgw1",
+        "fast": "cfuget_sink30",
+        "fast_fgw1_sink30": "cfuget_sink30",
+        "cfuget_fast_fgw1_sink30": "cfuget_sink30",
+        "fgw1": "cfuget_sink30",
+        "cfuget_fgw1": "cfuget_sink30",
         "sink30": "cfuget_sink30",
         "sinkhorn30": "cfuget_sink30",
         "cfuget_sink30": "cfuget_sink30",
-        "no_spatial": "cfuget_no_spatial",
-        "spatial_off": "cfuget_no_spatial",
-        "cfuget_no_spatial": "cfuget_no_spatial",
-        "alpha020": "cfuget_alpha020",
-        "alpha0p20": "cfuget_alpha020",
-        "alpha_0p20": "cfuget_alpha020",
-        "cfuget_alpha020": "cfuget_alpha020",
+        "sink70": "cfuget_sink70",
+        "sinkhorn70": "cfuget_sink70",
+        "cfuget_sink70": "cfuget_sink70",
+        "tau005": "cfuget_tau005",
+        "tau0p05": "cfuget_tau005",
+        "tau_0p05": "cfuget_tau005",
+        "cfuget_tau005": "cfuget_tau005",
+        "tau010": "cfuget_tau010",
+        "tau0p10": "cfuget_tau010",
+        "tau_0p10": "cfuget_tau010",
+        "cfuget_tau010": "cfuget_tau010",
+        "margin0": "cfuget_margin0",
+        "margin_0": "cfuget_margin0",
+        "cfuget_margin0": "cfuget_margin0",
+        "margin005": "cfuget_margin005",
+        "margin0p05": "cfuget_margin005",
+        "margin_0p05": "cfuget_margin005",
+        "cfuget_margin005": "cfuget_margin005",
     }
 
     parsed = []
@@ -2856,8 +2935,8 @@ def parse_cfuget_variant_filter(variants_str):
         if tag is None:
             raise ValueError(
                 f"Invalid --cfuget_ablation_variants token '{token}'. "
-                "Use full, no_structure, no_rival, no_coherent_score, cost_only, "
-                "feature_only, fast, fgw1, sink30, no_spatial, alpha020, or exact tags."
+                "Use full, no_rival, no_coherent_score, cost_only, sink30, sink70, "
+                "tau005, tau010, margin0, margin005, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)
@@ -3263,6 +3342,7 @@ def main():
         dmuot_variants = build_ours_final_dmuot_variants()
         pst_dm_variants = build_ours_final_pst_dm_variants()
         evidence_variants = build_ours_final_evidence_marginal_variants()
+        pulse_region_variants = build_ours_final_pulse_region_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -3277,6 +3357,7 @@ def main():
         dmuot_variants = filter_ours_final_variants(dmuot_variants, ours_final_variant_filter)
         pst_dm_variants = filter_ours_final_variants(pst_dm_variants, ours_final_variant_filter)
         evidence_variants = filter_ours_final_variants(evidence_variants, ours_final_variant_filter)
+        pulse_region_variants = filter_ours_final_variants(pulse_region_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -3291,6 +3372,8 @@ def main():
             ablation_variants = pst_dm_variants
         elif suite_name == "evidence":
             ablation_variants = evidence_variants
+        elif suite_name == "pulse_region":
+            ablation_variants = pulse_region_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -3431,6 +3514,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in mass_on_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "pulse_region":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in pulse_region_variants
                 for samples in samples_list
                 for shot in shots
             )
@@ -3583,7 +3683,7 @@ def main():
             for shot in shots
         ]
         print("=" * 72)
-        print("pulse_fewshot - C-FUGET Ablation Suite")
+        print("pulse_fewshot - RC-UOT Ablation Suite")
         print("=" * 72)
         sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
         print(f"Samples     : {sample_text}")
@@ -3609,7 +3709,7 @@ def main():
             "lr=5e-4, grad_clip=0.0, label_smoothing=0.0, "
             "query(train/val/test)=1/1/1, episodes(train/val/test)=130/150/150, selection=val, merge_val_into_train=false, "
             "augment=off, masks=off, "
-            "C-FUGET: fixed rho=0.8 FGW-UOT, rival coherent evidence gate, threshold-mass score"
+            "RC-UOT: fixed rho=0.8 UOT, rival coherent evidence gate, threshold-mass score"
         )
         if args.passthrough_args:
             print(f"Forwarded   : {' '.join(args.passthrough_args)}")

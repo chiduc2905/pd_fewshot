@@ -1,4 +1,4 @@
-"""Class-contrastive fused unbalanced Gromov evidence transport."""
+"""Class-contrastive rival-calibrated unbalanced evidence transport."""
 
 import math
 from typing import Any, Dict, Optional
@@ -23,6 +23,7 @@ ABLATION_MODES = {
     "no_coherent_score",
     "cost_only",
     "feature_only",
+    "with_structure",
 }
 
 
@@ -36,7 +37,7 @@ class CFUGETResult(dict):
 
 
 class CFUGETFewShot(BaseConv64FewShotModel):
-    """Few-shot classifier with rival-calibrated coherent FGW-UOT evidence."""
+    """Few-shot classifier with rival-calibrated coherent UOT evidence."""
 
     def __init__(
         self,
@@ -48,16 +49,16 @@ class CFUGETFewShot(BaseConv64FewShotModel):
         rho: float = 0.8,
         tau: float = 0.5,
         eps_sinkhorn: float = 0.08,
-        fgw_iters: int = 3,
+        fgw_iters: int = 1,
         sinkhorn_iters: int = 50,
         sinkhorn_tol: float = 1e-5,
-        alpha_init: float = 0.35,
+        alpha_init: float = 1e-6,
         score_scale_init: float = 16.0,
         threshold_init: float = 0.5,
         rival_temperature: float = 0.07,
         rival_margin: float = 0.02,
         coherent_temperature: float = 0.10,
-        spatial_structure_weight: float = 0.15,
+        spatial_structure_weight: float = 0.0,
         mass_weight: float = 1.0,
         cost_weight: float = 1.0,
         normalize_tokens: bool = True,
@@ -150,11 +151,11 @@ class CFUGETFewShot(BaseConv64FewShotModel):
 
     @property
     def uses_structure(self) -> bool:
-        return self.ablation_mode not in {"no_structure", "feature_only"}
+        return self.ablation_mode == "with_structure"
 
     @property
-    def uses_rival_gate(self) -> bool:
-        return self.ablation_mode not in {"no_rival", "no_coherent_score", "feature_only"}
+    def uses_evidence_gate(self) -> bool:
+        return self.ablation_mode not in {"no_coherent_score", "feature_only"}
 
     @property
     def uses_coherent_score(self) -> bool:
@@ -277,7 +278,7 @@ class CFUGETFewShot(BaseConv64FewShotModel):
         class_evidence = token_evidence.mean(dim=2)
         gate_source = class_evidence.detach() if self.rival_detach else class_evidence
 
-        if way_num <= 1:
+        if way_num <= 1 or self.ablation_mode == "no_rival":
             rival_evidence = torch.zeros_like(gate_source)
         else:
             rivals = gate_source.unsqueeze(1).expand(num_query, way_num, way_num, token_q)
@@ -285,7 +286,7 @@ class CFUGETFewShot(BaseConv64FewShotModel):
             rival_evidence = rivals.masked_fill(eye, float("-inf")).amax(dim=2)
             rival_evidence = rival_evidence.clamp_min(0.0)
 
-        if self.uses_rival_gate:
+        if self.uses_evidence_gate:
             gate_logits = (gate_source - rival_evidence - self.rival_margin) / self.rival_temperature
             query_token_gate = torch.sigmoid(gate_logits)
         else:
