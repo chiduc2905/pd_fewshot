@@ -3029,6 +3029,12 @@ def build_model_from_args(args):
                                 getattr(args, "pulse_evidence_score", False),
                                 default=False,
                             ),
+                            "pulse_evidence_score_mode": str(
+                                getattr(args, "pulse_evidence_score_mode", "replace")
+                            ),
+                            "pulse_evidence_score_mix": float(
+                                getattr(args, "pulse_evidence_score_mix", 1.0)
+                            ),
                             "pulse_evidence_mass_weight": float(
                                 getattr(args, "pulse_evidence_mass_weight", 1.0)
                             ),

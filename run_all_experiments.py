@@ -351,7 +351,7 @@ def get_args():
             "dmuot=token-g, cost modulation, and discriminative marginal sweeps; "
             "mass_on=shot-consensus threshold-mass score variants; "
             "evidence=cost-derived evidence marginal ablation (query/support/both/rival); "
-            "pulse_region=baseline Ours-Final plus pulse cost guidance and pulse evidence-score controls."
+            "pulse_region=pulse cost guidance and conservative pulse mass-mix candidates."
         ),
     )
     parser.add_argument(
@@ -1420,7 +1420,7 @@ def build_ours_final_evidence_marginal_variants():
 
 
 def build_ours_final_pulse_region_variants():
-    """Pulse-region comparison suite without the Ours-Final baseline."""
+    """Pulse-region candidates without the Ours-Final baseline."""
     base = _ours_final_base_args()
     return [
         {
@@ -1437,35 +1437,22 @@ def build_ours_final_pulse_region_variants():
             ],
         },
         {
-            "tag": "ours_final_pulse_score_only",
-            "checkpoint_tag": "pulse_score_only",
-            "label": "Pulse-region score-only evidence: keep UOT cost/marginals unchanged",
-            "extra_args": base
-            + [
-                "--enable_pulse_region_uot",
-                "--pulse_region_cost_weight",
-                "0.0",
-                "--pulse_saliency_mass_mix",
-                "0.0",
-                "--pulse_saliency_cost_discount",
-                "0.0",
-                "--pulse_evidence_score",
-                "true",
-                "--pulse_discriminative_evidence",
-                "true",
-            ],
-        },
-        {
-            "tag": "ours_final_pulse_full_evidence",
-            "checkpoint_tag": "pulse_full_evidence",
-            "label": "Pulse-region cost/marginal guidance plus rival-aware pulse evidence score",
+            "tag": "ours_final_pulse_mass_mix",
+            "checkpoint_tag": "pulse_mass_mix",
+            "label": "Pulse-region cost/marginals plus conservative pulse mass-reward mix",
             "extra_args": base
             + [
                 "--enable_pulse_region_uot",
                 "--pulse_evidence_score",
                 "true",
+                "--pulse_evidence_score_mode",
+                "mass_mix",
+                "--pulse_evidence_score_mix",
+                "0.25",
+                "--pulse_background_penalty",
+                "0.05",
                 "--pulse_discriminative_evidence",
-                "true",
+                "false",
             ],
         },
     ]
@@ -2800,14 +2787,11 @@ def parse_ours_final_variant_filter(variants_str):
         "pulse_cost": "ours_final_pulse_cost",
         "pulse_region": "ours_final_pulse_cost",
         "ours_final_pulse_cost": "ours_final_pulse_cost",
-        "pulse_score_only": "ours_final_pulse_score_only",
-        "score_only": "ours_final_pulse_score_only",
-        "pulse_evidence_score": "ours_final_pulse_score_only",
-        "ours_final_pulse_score_only": "ours_final_pulse_score_only",
-        "pulse_full": "ours_final_pulse_full_evidence",
-        "pulse_full_evidence": "ours_final_pulse_full_evidence",
-        "pulse_evidence": "ours_final_pulse_full_evidence",
-        "ours_final_pulse_full_evidence": "ours_final_pulse_full_evidence",
+        "pulse_mass_mix": "ours_final_pulse_mass_mix",
+        "mass_mix": "ours_final_pulse_mass_mix",
+        "pulse_evidence_score": "ours_final_pulse_mass_mix",
+        "pulse_evidence": "ours_final_pulse_mass_mix",
+        "ours_final_pulse_mass_mix": "ours_final_pulse_mass_mix",
         "mass_scaled": "ours_final_mass_scaled_b0p5",
         "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
         "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",

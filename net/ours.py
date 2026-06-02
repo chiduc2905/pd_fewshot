@@ -52,6 +52,7 @@ TOKEN_G_KINDS = frozenset({"none", "episode_mean_dist", "token_norm_pre_l2", "le
 DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
 DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
 PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_only"})
+PULSE_EVIDENCE_SCORE_MODES = frozenset({"replace", "mass_mix"})
 MSPTA_GUIDANCE_SOURCES = frozenset({"image", "feature", "mixed"})
 
 
@@ -223,6 +224,25 @@ def _normalize_pulse_train_schedule(value: str | None) -> str:
     return name
 
 
+def _normalize_pulse_evidence_score_mode(value: str | None) -> str:
+    name = "replace" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "score_only": "replace",
+        "masked": "replace",
+        "masked_score": "replace",
+        "mass": "mass_mix",
+        "mixed_mass": "mass_mix",
+        "mass_reward": "mass_mix",
+    }
+    name = aliases.get(name, name)
+    if name not in PULSE_EVIDENCE_SCORE_MODES:
+        raise ValueError(
+            f"Unsupported pulse_evidence_score_mode: {value}. "
+            f"Expected one of {sorted(PULSE_EVIDENCE_SCORE_MODES)}"
+        )
+    return name
+
+
 def _normalize_mspta_guidance_source(value: str | None) -> str:
     name = "mixed" if value is None else str(value).strip().lower().replace("-", "_")
     aliases = {
@@ -348,6 +368,10 @@ class OursM2(JECOTM2):
         pulse_support_consensus_beta = float(kwargs.pop("pulse_support_consensus_beta", 5.0))
         pulse_support_consensus_eta = float(kwargs.pop("pulse_support_consensus_eta", 0.05))
         pulse_evidence_score = _bool_config(kwargs.pop("pulse_evidence_score", False))
+        pulse_evidence_score_mode = _normalize_pulse_evidence_score_mode(
+            kwargs.pop("pulse_evidence_score_mode", "replace")
+        )
+        pulse_evidence_score_mix = float(kwargs.pop("pulse_evidence_score_mix", 1.0))
         pulse_evidence_mass_weight = float(kwargs.pop("pulse_evidence_mass_weight", 1.0))
         pulse_evidence_cost_weight = float(kwargs.pop("pulse_evidence_cost_weight", 1.0))
         pulse_background_penalty = float(kwargs.pop("pulse_background_penalty", 0.25))
@@ -521,6 +545,8 @@ class OursM2(JECOTM2):
         if not 0.0 <= self.pulse_support_consensus_eta <= 1.0:
             raise ValueError("pulse_support_consensus_eta must be in [0, 1]")
         self.pulse_evidence_score = bool(pulse_evidence_score)
+        self.pulse_evidence_score_mode = str(pulse_evidence_score_mode)
+        self.pulse_evidence_score_mix = float(pulse_evidence_score_mix)
         self.pulse_evidence_mass_weight = float(pulse_evidence_mass_weight)
         self.pulse_evidence_cost_weight = float(pulse_evidence_cost_weight)
         self.pulse_background_penalty = float(pulse_background_penalty)
@@ -546,6 +572,7 @@ class OursM2(JECOTM2):
             ("pulse_evidence_mass_weight", self.pulse_evidence_mass_weight),
             ("pulse_evidence_cost_weight", self.pulse_evidence_cost_weight),
             ("pulse_background_penalty", self.pulse_background_penalty),
+            ("pulse_evidence_score_mix", self.pulse_evidence_score_mix),
             ("discriminative_uot_margin", self.discriminative_uot_margin),
             ("discriminative_uot_background_penalty", self.discriminative_uot_background_penalty),
             ("discriminative_uot_mass_weight", self.discriminative_uot_mass_weight),
@@ -554,6 +581,8 @@ class OursM2(JECOTM2):
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if not 0.0 <= self.pulse_evidence_score_mix <= 1.0:
+            raise ValueError("pulse_evidence_score_mix must be in [0, 1]")
         if self.discriminative_uot_tau <= 0.0:
             raise ValueError("discriminative_uot_tau must be positive")
         if not 0.0 <= self.discriminative_uot_mix <= 1.0:
@@ -2086,6 +2115,12 @@ class OursM2(JECOTM2):
                         "pulse_query_evidence": score_query_evidence.detach(),
                         "pulse_support_evidence": score_support_evidence.detach(),
                         "pulse/evidence_score_enabled": flat_cost.new_tensor(1.0),
+                        "pulse/evidence_score_mode_id": flat_cost.new_tensor(
+                            0.0 if self.pulse_evidence_score_mode == "replace" else 1.0
+                        ),
+                        "pulse/evidence_score_mix": flat_cost.new_tensor(
+                            float(self.pulse_evidence_score_mix)
+                        ),
                         "pulse/evidence_mass_weight": flat_cost.new_tensor(score_evidence_mass_weight),
                         "pulse/evidence_cost_weight": flat_cost.new_tensor(score_evidence_cost_weight),
                         "pulse/background_penalty": flat_cost.new_tensor(score_background_penalty),
@@ -2202,6 +2237,8 @@ class OursM2(JECOTM2):
             score_evidence_mass_weight=score_evidence_mass_weight,
             score_evidence_cost_weight=score_evidence_cost_weight,
             score_background_penalty=score_background_penalty,
+            score_evidence_mode=self.pulse_evidence_score_mode,
+            score_evidence_mix=self.pulse_evidence_score_mix,
         )
 
         if dmuot_payload:

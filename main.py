@@ -1759,6 +1759,22 @@ def get_args():
         help="When pulse-region UOT is enabled, score pulse-to-pulse transported evidence instead of total mass.",
     )
     parser.add_argument(
+        "--pulse_evidence_score_mode",
+        type=str,
+        default="replace",
+        choices=["replace", "mass_mix"],
+        help=(
+            "replace uses the masked pulse evidence score; mass_mix preserves the original Ours-Final cost "
+            "and softly mixes pulse evidence into the mass reward."
+        ),
+    )
+    parser.add_argument(
+        "--pulse_evidence_score_mix",
+        type=float,
+        default=1.0,
+        help="Mix weight for pulse evidence when pulse_evidence_score_mode=mass_mix.",
+    )
+    parser.add_argument(
         "--pulse_evidence_mass_weight",
         type=float,
         default=1.0,
@@ -4075,6 +4091,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_support_consensus_beta",
             "pulse_support_consensus_eta",
             "pulse_evidence_score",
+            "pulse_evidence_score_mode",
+            "pulse_evidence_score_mix",
             "pulse_evidence_mass_weight",
             "pulse_evidence_cost_weight",
             "pulse_background_penalty",
@@ -5284,6 +5302,8 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/support_consistency_mean",
         "pulse/support_consistency_sigma_peak",
         "pulse/evidence_score_enabled",
+        "pulse/evidence_score_mode_id",
+        "pulse/evidence_score_mix",
         "pulse/evidence_mass_weight",
         "pulse/evidence_cost_weight",
         "pulse/background_penalty",

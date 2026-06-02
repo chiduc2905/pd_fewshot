@@ -3078,6 +3078,8 @@ class HROTFSL(BaseConv64FewShotModel):
         score_evidence_mass_weight: float = 1.0,
         score_evidence_cost_weight: float = 1.0,
         score_background_penalty: float = 0.0,
+        score_evidence_mode: str = "replace",
+        score_evidence_mix: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
             raise RuntimeError("ECOT variants require an episode_controller")
@@ -3470,12 +3472,29 @@ class HROTFSL(BaseConv64FewShotModel):
         evidence_mass_weight = flat_cost.new_tensor(float(score_evidence_mass_weight))
         evidence_cost_weight = flat_cost.new_tensor(float(score_evidence_cost_weight))
         evidence_background_penalty = flat_cost.new_tensor(float(score_background_penalty))
+        evidence_score_mode = str(score_evidence_mode).strip().lower().replace("-", "_")
+        evidence_score_mode = {
+            "score_only": "replace",
+            "masked": "replace",
+            "masked_score": "replace",
+            "mass": "mass_mix",
+            "mixed_mass": "mass_mix",
+            "mass_reward": "mass_mix",
+        }.get(evidence_score_mode, evidence_score_mode)
+        if evidence_score_mode not in {"replace", "mass_mix"}:
+            raise ValueError("score_evidence_mode must be 'replace' or 'mass_mix'")
+        evidence_score_mix_value = float(score_evidence_mix)
+        if not 0.0 <= evidence_score_mix_value <= 1.0:
+            raise ValueError("score_evidence_mix must be in [0, 1]")
+        evidence_score_mix = flat_cost.new_tensor(evidence_score_mix_value)
+        evidence_score_mode_id = flat_cost.new_tensor(0.0 if evidence_score_mode == "replace" else 1.0)
         use_evidence_score = evidence_mass_bank is not None
 
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_cost_per_mass_score:
-                active_mass_bank = evidence_mass_bank if use_evidence_score else shot_mass_bank
-                active_cost_bank = evidence_cost_bank if use_evidence_score else shot_cost_bank
+                replace_with_evidence = use_evidence_score and evidence_score_mode == "replace"
+                active_mass_bank = evidence_mass_bank if replace_with_evidence else shot_mass_bank
+                active_cost_bank = evidence_cost_bank if replace_with_evidence else shot_cost_bank
                 if active_mass_bank is None or active_cost_bank is None:
                     raise RuntimeError("Evidence score state was not initialized")
                 mass_denom = (
@@ -3489,7 +3508,10 @@ class HROTFSL(BaseConv64FewShotModel):
                     / (mass_denom + self.eps)
                 )
                 if use_evidence_score and evidence_background_mass_bank is not None:
-                    score_terms = score_terms - evidence_background_penalty * evidence_background_mass_bank
+                    background_scale = evidence_background_penalty
+                    if evidence_score_mode == "mass_mix":
+                        background_scale = evidence_score_mix * background_scale
+                    score_terms = score_terms - background_scale * evidence_background_mass_bank
             else:
                 thr = (
                     torch.zeros_like(active_threshold)
@@ -3497,8 +3519,9 @@ class HROTFSL(BaseConv64FewShotModel):
                     else active_threshold
                 )
                 if self.ecot_m2_pst_scorer is not None and not self.ecot_m2_ablate_threshold_mass:
-                    pst_cost_bank = evidence_cost_bank if use_evidence_score else shot_cost_bank
-                    pst_mass_bank = evidence_mass_bank if use_evidence_score else shot_mass_bank
+                    pst_uses_evidence = use_evidence_score and evidence_score_mode == "replace"
+                    pst_cost_bank = evidence_cost_bank if pst_uses_evidence else shot_cost_bank
+                    pst_mass_bank = evidence_mass_bank if pst_uses_evidence else shot_mass_bank
                     if pst_cost_bank is None or pst_mass_bank is None:
                         raise RuntimeError("Evidence score state was not initialized")
                     pst_features = torch.stack(
@@ -3524,15 +3547,26 @@ class HROTFSL(BaseConv64FewShotModel):
                         or evidence_background_mass_bank is None
                     ):
                         raise RuntimeError("Evidence score state was not initialized")
-                    score_terms = (
-                        mass_reward_beta
-                        * thr
-                        * (
+                    if evidence_score_mode == "mass_mix":
+                        pulse_mass_reward_bank = (
                             evidence_mass_weight * evidence_mass_for_score_bank
                             - evidence_background_penalty * evidence_background_mass_bank
+                        ).clamp_min(0.0)
+                        mixed_mass_bank = (
+                            (1.0 - evidence_score_mix) * mass_for_score_bank
+                            + evidence_score_mix * pulse_mass_reward_bank
                         )
-                        - evidence_cost_weight * evidence_cost_bank
-                    )
+                        score_terms = mass_reward_beta * thr * mixed_mass_bank - shot_cost_bank
+                    else:
+                        score_terms = (
+                            mass_reward_beta
+                            * thr
+                            * (
+                                evidence_mass_weight * evidence_mass_for_score_bank
+                                - evidence_background_penalty * evidence_background_mass_bank
+                            )
+                            - evidence_cost_weight * evidence_cost_bank
+                        )
                 else:
                     score_terms = mass_reward_beta * thr * mass_for_score_bank - shot_cost_bank
             if sink_penalty_bank is not None:
@@ -3706,6 +3740,8 @@ class HROTFSL(BaseConv64FewShotModel):
                     "evidence_score_mass_weight": evidence_mass_weight.detach(),
                     "evidence_score_cost_weight": evidence_cost_weight.detach(),
                     "evidence_score_background_penalty": evidence_background_penalty.detach(),
+                    "evidence_score_mix": evidence_score_mix.detach(),
+                    "evidence_score_mode_id": evidence_score_mode_id.detach(),
                     "evidence_score_pair_mean": evidence_pair_bank.mean().detach(),
                     "evidence_score_pair_peak": evidence_pair_bank.amax(dim=(-1, -2)).mean().detach(),
                 }
@@ -5627,6 +5663,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "evidence_score_mass_weight",
             "evidence_score_cost_weight",
             "evidence_score_background_penalty",
+            "evidence_score_mix",
+            "evidence_score_mode_id",
             "evidence_score_pair_mean",
             "evidence_score_pair_peak",
         ):
