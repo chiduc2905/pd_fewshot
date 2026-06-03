@@ -361,6 +361,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_pulse_region_uot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_global_residual_score", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_global_residual_score is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_discriminative_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2832,6 +2836,17 @@ def build_model_from_args(args):
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
                     **(resolve_ours_final_evidence_config(args) if is_ours_final_model else {}),
+                    **(
+                        {
+                            "enable_global_residual_score": True,
+                            "global_residual_weight": float(
+                                getattr(args, "global_residual_weight", 0.15)
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_global_residual_score", False), default=False)
+                        else {}
+                    ),
                     **(
                         {
                             "enable_multiscale_ot": True,

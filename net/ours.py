@@ -386,6 +386,8 @@ class OursM2(JECOTM2):
         pulse_discriminative_tau = float(kwargs.pop("pulse_discriminative_tau", 0.05))
         pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
         pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
+        enable_global_residual_score = _bool_config(kwargs.pop("enable_global_residual_score", False))
+        global_residual_weight = float(kwargs.pop("global_residual_weight", 0.15))
         enable_label_ot = _bool_config(
             kwargs.pop("enable_label_ot", kwargs.pop("enable_transductive_label_ot", False))
         )
@@ -561,6 +563,8 @@ class OursM2(JECOTM2):
         self.pulse_discriminative_tau = float(pulse_discriminative_tau)
         self.pulse_discriminative_margin = float(pulse_discriminative_margin)
         self.pulse_discriminative_mix = float(pulse_discriminative_mix)
+        self.enable_global_residual_score = bool(enable_global_residual_score)
+        self.global_residual_weight = float(global_residual_weight)
         self.enable_label_ot = bool(enable_label_ot)
         self.label_ot_epsilon = float(label_ot_epsilon)
         self.label_ot_iterations = int(label_ot_iterations)
@@ -578,6 +582,7 @@ class OursM2(JECOTM2):
             ("discriminative_uot_mass_weight", self.discriminative_uot_mass_weight),
             ("discriminative_uot_cost_weight", self.discriminative_uot_cost_weight),
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
+            ("global_residual_weight", self.global_residual_weight),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
@@ -2275,7 +2280,75 @@ class OursM2(JECOTM2):
             payload.update(evidence_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
+        if (
+            getattr(self, "enable_global_residual_score", False)
+            and query_tokens is not None
+            and support_tokens is not None
+        ):
+            self._apply_global_residual_score(
+                payload,
+                query_tokens=query_tokens,
+                support_tokens=support_tokens,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
         return payload
+
+    def _global_prototype_logits(
+        self,
+        *,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> torch.Tensor:
+        if query_tokens.dim() != 3:
+            raise ValueError(f"query_tokens must have shape (NumQuery, Tokens, Dim), got {tuple(query_tokens.shape)}")
+        if support_tokens.dim() != 4:
+            raise ValueError(
+                "support_tokens must have shape (Way, Shot, Tokens, Dim), "
+                f"got {tuple(support_tokens.shape)}"
+            )
+        if tuple(support_tokens.shape[:2]) != (int(way_num), int(shot_num)):
+            raise ValueError(
+                f"support_tokens shape {tuple(support_tokens.shape)} does not match way/shot={way_num}/{shot_num}"
+            )
+        query_global = F.normalize(query_tokens.mean(dim=1), p=2, dim=-1, eps=self.eps)
+        support_shot_global = support_tokens.mean(dim=2)
+        support_global = F.normalize(support_shot_global.mean(dim=1), p=2, dim=-1, eps=self.eps)
+        logits = self.score_scale * torch.einsum("qd,wd->qw", query_global, support_global)
+        return logits - logits.mean(dim=1, keepdim=True)
+
+    def _apply_global_residual_score(
+        self,
+        payload: dict[str, torch.Tensor],
+        *,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> None:
+        base_logits = payload.get("logits")
+        if not torch.is_tensor(base_logits):
+            return
+        global_logits = self._global_prototype_logits(
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=way_num,
+            shot_num=shot_num,
+        ).to(device=base_logits.device, dtype=base_logits.dtype)
+        if tuple(global_logits.shape) != tuple(base_logits.shape):
+            raise ValueError(
+                f"global residual logits shape {tuple(global_logits.shape)} does not match base logits "
+                f"{tuple(base_logits.shape)}"
+            )
+        weight = base_logits.new_tensor(float(self.global_residual_weight))
+        fused_logits = base_logits + weight * global_logits
+        payload["local_scores"] = base_logits
+        payload["global_scores"] = global_logits
+        payload["logits"] = fused_logits
+        payload["class_scores"] = fused_logits
+        payload["global_residual_weight"] = weight.detach()
 
     def _update_differential_mode_template(self, episode_template: torch.Tensor) -> None:
         if not self.training:

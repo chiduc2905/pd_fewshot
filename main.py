@@ -1818,6 +1818,18 @@ def get_args():
         help="Blend strength for rival-aware pulse evidence gate.",
     )
     parser.add_argument(
+        "--enable_global_residual_score",
+        action="store_true",
+        default=False,
+        help="Ours-Final only: add a small global prototype cosine residual to the local UOT logits.",
+    )
+    parser.add_argument(
+        "--global_residual_weight",
+        type=float,
+        default=0.15,
+        help="Weight of the global prototype residual logits when enable_global_residual_score is set.",
+    )
+    parser.add_argument(
         "--enable_discriminative_uot",
         action="store_true",
         default=False,
@@ -4100,6 +4112,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_discriminative_tau",
             "pulse_discriminative_margin",
             "pulse_discriminative_mix",
+            "enable_global_residual_score",
+            "global_residual_weight",
             "enable_discriminative_uot",
             "discriminative_uot_tau",
             "discriminative_uot_margin",
@@ -5314,6 +5328,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/discriminative_tau",
         "pulse/discriminative_margin",
         "pulse/discriminative_mix",
+        "global_residual_weight",
         "pulse/discriminative_gate_mean",
         "pulse/discriminative_gate_low_share",
         "pulse/rival_advantage_mean",
