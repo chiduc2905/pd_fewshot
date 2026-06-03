@@ -1824,6 +1824,13 @@ def get_args():
         help="Ours-Final only: add a small global prototype cosine residual to the local UOT logits.",
     )
     parser.add_argument(
+        "--global_residual_mode",
+        type=str,
+        default="residual",
+        choices=["residual", "global_only"],
+        help="residual adds global prototype logits to local UOT logits; global_only scores by global prototypes only.",
+    )
+    parser.add_argument(
         "--global_residual_weight",
         type=float,
         default=0.15,
@@ -4113,6 +4120,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_discriminative_margin",
             "pulse_discriminative_mix",
             "enable_global_residual_score",
+            "global_residual_mode",
             "global_residual_weight",
             "enable_discriminative_uot",
             "discriminative_uot_tau",
@@ -5329,6 +5337,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/discriminative_margin",
         "pulse/discriminative_mix",
         "global_residual_weight",
+        "global_residual_mode_id",
         "pulse/discriminative_gate_mean",
         "pulse/discriminative_gate_low_share",
         "pulse/rival_advantage_mean",
@@ -5689,6 +5698,8 @@ def format_diagnostic_summary(metrics):
         "local_margin",
         "global_branch_ce",
         "local_branch_ce",
+        "global_residual_weight",
+        "global_residual_mode_id",
         "compact_loss",
         "decorr_loss",
         "entropy_loss",

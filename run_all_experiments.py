@@ -338,6 +338,7 @@ def get_args():
             "pst_dm",
             "evidence",
             "pulse_region",
+            "global_residual",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -351,7 +352,8 @@ def get_args():
             "dmuot=token-g, cost modulation, and discriminative marginal sweeps; "
             "mass_on=shot-consensus threshold-mass score variants; "
             "evidence=cost-derived evidence marginal ablation (query/support/both/rival); "
-            "pulse_region=pulse cost guidance and conservative pulse mass-mix candidates."
+            "pulse_region=pulse cost guidance and conservative pulse mass-mix candidates; "
+            "global_residual=global-only plus global residual weight grid."
         ),
     )
     parser.add_argument(
@@ -1456,6 +1458,44 @@ def build_ours_final_pulse_region_variants():
             ],
         },
     ]
+
+
+def build_ours_final_global_residual_variants():
+    """Global decision-head candidates without the local-only Ours-Final baseline."""
+    base = _ours_final_base_args()
+    variants = [
+        {
+            "tag": "ours_final_global_only",
+            "checkpoint_tag": "global_only",
+            "label": "Global prototype classifier only; local UOT logits disabled at the decision head",
+            "extra_args": base
+            + [
+                "--enable_global_residual_score",
+                "--global_residual_mode",
+                "global_only",
+                "--global_residual_weight",
+                "1.0",
+            ],
+        }
+    ]
+    for weight in (0.10, 0.20, 0.30):
+        tag_value = str(weight).replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_global_res_w{tag_value}",
+                "checkpoint_tag": f"global_res_w{tag_value}",
+                "label": f"Ours-Final local UOT plus global prototype residual weight={weight:g}",
+                "extra_args": base
+                + [
+                    "--enable_global_residual_score",
+                    "--global_residual_mode",
+                    "residual",
+                    "--global_residual_weight",
+                    f"{weight:g}",
+                ],
+            }
+        )
+    return variants
 
 
 def _cfuget_base_args(
@@ -2792,6 +2832,22 @@ def parse_ours_final_variant_filter(variants_str):
         "pulse_evidence_score": "ours_final_pulse_mass_mix",
         "pulse_evidence": "ours_final_pulse_mass_mix",
         "ours_final_pulse_mass_mix": "ours_final_pulse_mass_mix",
+        "global_only": "ours_final_global_only",
+        "prototype_only": "ours_final_global_only",
+        "ours_final_global_only": "ours_final_global_only",
+        "global_res_w0p1": "ours_final_global_res_w0p1",
+        "global_res_w0p10": "ours_final_global_res_w0p1",
+        "global_res_w0p2": "ours_final_global_res_w0p2",
+        "global_res_w0p20": "ours_final_global_res_w0p2",
+        "global_res_w0p3": "ours_final_global_res_w0p3",
+        "global_res_w0p30": "ours_final_global_res_w0p3",
+        "global_residual_w0p1": "ours_final_global_res_w0p1",
+        "global_residual_w0p10": "ours_final_global_res_w0p1",
+        "global_residual_w0p2": "ours_final_global_res_w0p2",
+        "global_residual_w0p20": "ours_final_global_res_w0p2",
+        "global_residual_w0p3": "ours_final_global_res_w0p3",
+        "global_residual_w0p30": "ours_final_global_res_w0p3",
+        "global_residual": "ours_final_global_res_w0p1",
         "mass_scaled": "ours_final_mass_scaled_b0p5",
         "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
         "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
@@ -3321,6 +3377,7 @@ def main():
         pst_dm_variants = build_ours_final_pst_dm_variants()
         evidence_variants = build_ours_final_evidence_marginal_variants()
         pulse_region_variants = build_ours_final_pulse_region_variants()
+        global_residual_variants = build_ours_final_global_residual_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -3336,6 +3393,10 @@ def main():
         pst_dm_variants = filter_ours_final_variants(pst_dm_variants, ours_final_variant_filter)
         evidence_variants = filter_ours_final_variants(evidence_variants, ours_final_variant_filter)
         pulse_region_variants = filter_ours_final_variants(pulse_region_variants, ours_final_variant_filter)
+        global_residual_variants = filter_ours_final_variants(
+            global_residual_variants,
+            ours_final_variant_filter,
+        )
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -3352,6 +3413,8 @@ def main():
             ablation_variants = evidence_variants
         elif suite_name == "pulse_region":
             ablation_variants = pulse_region_variants
+        elif suite_name == "global_residual":
+            ablation_variants = global_residual_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -3509,6 +3572,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in pulse_region_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "global_residual":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in global_residual_variants
                 for samples in samples_list
                 for shot in shots
             )

@@ -53,6 +53,7 @@ DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
 DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
 PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_only"})
 PULSE_EVIDENCE_SCORE_MODES = frozenset({"replace", "mass_mix"})
+GLOBAL_RESIDUAL_SCORE_MODES = frozenset({"residual", "global_only"})
 MSPTA_GUIDANCE_SOURCES = frozenset({"image", "feature", "mixed"})
 
 
@@ -243,6 +244,27 @@ def _normalize_pulse_evidence_score_mode(value: str | None) -> str:
     return name
 
 
+def _normalize_global_residual_score_mode(value: str | None) -> str:
+    name = "residual" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "add": "residual",
+        "additive": "residual",
+        "fuse": "residual",
+        "fusion": "residual",
+        "global": "global_only",
+        "only_global": "global_only",
+        "prototype": "global_only",
+        "prototype_only": "global_only",
+    }
+    name = aliases.get(name, name)
+    if name not in GLOBAL_RESIDUAL_SCORE_MODES:
+        raise ValueError(
+            f"Unsupported global_residual_mode: {value}. "
+            f"Expected one of {sorted(GLOBAL_RESIDUAL_SCORE_MODES)}"
+        )
+    return name
+
+
 def _normalize_mspta_guidance_source(value: str | None) -> str:
     name = "mixed" if value is None else str(value).strip().lower().replace("-", "_")
     aliases = {
@@ -387,6 +409,9 @@ class OursM2(JECOTM2):
         pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
         pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
         enable_global_residual_score = _bool_config(kwargs.pop("enable_global_residual_score", False))
+        global_residual_mode = _normalize_global_residual_score_mode(
+            kwargs.pop("global_residual_mode", "residual")
+        )
         global_residual_weight = float(kwargs.pop("global_residual_weight", 0.15))
         enable_label_ot = _bool_config(
             kwargs.pop("enable_label_ot", kwargs.pop("enable_transductive_label_ot", False))
@@ -564,6 +589,7 @@ class OursM2(JECOTM2):
         self.pulse_discriminative_margin = float(pulse_discriminative_margin)
         self.pulse_discriminative_mix = float(pulse_discriminative_mix)
         self.enable_global_residual_score = bool(enable_global_residual_score)
+        self.global_residual_mode = str(global_residual_mode)
         self.global_residual_weight = float(global_residual_weight)
         self.enable_label_ot = bool(enable_label_ot)
         self.label_ot_epsilon = float(label_ot_epsilon)
@@ -2343,12 +2369,20 @@ class OursM2(JECOTM2):
                 f"{tuple(base_logits.shape)}"
             )
         weight = base_logits.new_tensor(float(self.global_residual_weight))
-        fused_logits = base_logits + weight * global_logits
+        if self.global_residual_mode == "global_only":
+            fused_logits = global_logits
+            effective_weight = base_logits.new_tensor(1.0)
+            mode_id = base_logits.new_tensor(1.0)
+        else:
+            fused_logits = base_logits + weight * global_logits
+            effective_weight = weight
+            mode_id = base_logits.new_tensor(0.0)
         payload["local_scores"] = base_logits
         payload["global_scores"] = global_logits
         payload["logits"] = fused_logits
         payload["class_scores"] = fused_logits
-        payload["global_residual_weight"] = weight.detach()
+        payload["global_residual_weight"] = effective_weight.detach()
+        payload["global_residual_mode_id"] = mode_id.detach()
 
     def _update_differential_mode_template(self, episode_template: torch.Tensor) -> None:
         if not self.training:

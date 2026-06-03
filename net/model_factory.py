@@ -2839,6 +2839,9 @@ def build_model_from_args(args):
                     **(
                         {
                             "enable_global_residual_score": True,
+                            "global_residual_mode": str(
+                                getattr(args, "global_residual_mode", "residual")
+                            ),
                             "global_residual_weight": float(
                                 getattr(args, "global_residual_weight", 0.15)
                             ),
