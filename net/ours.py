@@ -408,6 +408,11 @@ class OursM2(JECOTM2):
         pulse_discriminative_tau = float(kwargs.pop("pulse_discriminative_tau", 0.05))
         pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
         pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
+        enable_verified_uot_score = _bool_config(kwargs.pop("enable_verified_uot_score", False))
+        verified_uot_beta = float(kwargs.pop("verified_uot_beta", 0.75))
+        verified_uot_tau = float(kwargs.pop("verified_uot_tau", 0.10))
+        verified_uot_ratio_threshold = float(kwargs.pop("verified_uot_ratio_threshold", 0.35))
+        verified_uot_kernel_size = int(kwargs.pop("verified_uot_kernel_size", 3))
         enable_global_residual_score = _bool_config(kwargs.pop("enable_global_residual_score", False))
         global_residual_mode = _normalize_global_residual_score_mode(
             kwargs.pop("global_residual_mode", "residual")
@@ -588,6 +593,11 @@ class OursM2(JECOTM2):
         self.pulse_discriminative_tau = float(pulse_discriminative_tau)
         self.pulse_discriminative_margin = float(pulse_discriminative_margin)
         self.pulse_discriminative_mix = float(pulse_discriminative_mix)
+        self.enable_verified_uot_score = bool(enable_verified_uot_score)
+        self.verified_uot_beta = float(verified_uot_beta)
+        self.verified_uot_tau = float(verified_uot_tau)
+        self.verified_uot_ratio_threshold = float(verified_uot_ratio_threshold)
+        self.verified_uot_kernel_size = int(verified_uot_kernel_size)
         self.enable_global_residual_score = bool(enable_global_residual_score)
         self.global_residual_mode = str(global_residual_mode)
         self.global_residual_weight = float(global_residual_weight)
@@ -608,10 +618,17 @@ class OursM2(JECOTM2):
             ("discriminative_uot_mass_weight", self.discriminative_uot_mass_weight),
             ("discriminative_uot_cost_weight", self.discriminative_uot_cost_weight),
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
+            ("verified_uot_ratio_threshold", self.verified_uot_ratio_threshold),
             ("global_residual_weight", self.global_residual_weight),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if not 0.0 <= self.verified_uot_beta <= 1.0:
+            raise ValueError("verified_uot_beta must be in [0, 1]")
+        if self.verified_uot_tau <= 0.0:
+            raise ValueError("verified_uot_tau must be positive")
+        if self.verified_uot_kernel_size < 1 or self.verified_uot_kernel_size % 2 != 1:
+            raise ValueError("verified_uot_kernel_size must be an odd positive integer")
         if not 0.0 <= self.pulse_evidence_score_mix <= 1.0:
             raise ValueError("pulse_evidence_score_mix must be in [0, 1]")
         if self.discriminative_uot_tau <= 0.0:
@@ -1889,6 +1906,192 @@ class OursM2(JECOTM2):
         transport_mass = pair_transport_mass.reshape(num_query, num_way)
         return plan, transport_cost, transport_mass
 
+    def _local_average_excluding_center(
+        self,
+        values: torch.Tensor,
+        *,
+        spatial_hw: tuple[int, int],
+        kernel_size: int,
+    ) -> torch.Tensor:
+        height, width = int(spatial_hw[0]), int(spatial_hw[1])
+        if values.shape[-1] != height * width:
+            raise ValueError(
+                f"spatial_hw={spatial_hw} does not match token count {values.shape[-1]}"
+            )
+        if kernel_size <= 1:
+            return torch.zeros_like(values)
+        pad = kernel_size // 2
+        original_shape = values.shape
+        grid = values.reshape(-1, 1, height, width)
+        kernel = grid.new_ones((1, 1, kernel_size, kernel_size))
+        summed = F.conv2d(grid, kernel, padding=pad) - grid
+        counts = F.conv2d(torch.ones_like(grid), kernel, padding=pad) - 1.0
+        averaged = summed / counts.clamp_min(1.0)
+        return averaged.reshape(original_shape)
+
+    def _verified_uot_shot_logits(
+        self,
+        *,
+        flat_cost: torch.Tensor,
+        transport_plan: torch.Tensor,
+        threshold: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+        spatial_hw: tuple[int, int] | None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match way*shot={way_num * shot_num}")
+        if tuple(transport_plan.shape) != (num_query, int(way_num), int(shot_num), query_len, support_len):
+            raise ValueError(
+                "transport_plan must have shape (Nq, Way, Shot, Lq, Ls), "
+                f"got {tuple(transport_plan.shape)}"
+            )
+
+        query_hw = spatial_hw if spatial_hw is not None and query_len == int(spatial_hw[0]) * int(spatial_hw[1]) else _infer_token_hw(query_len)
+        support_hw = (
+            spatial_hw
+            if spatial_hw is not None and support_len == int(spatial_hw[0]) * int(spatial_hw[1])
+            else _infer_token_hw(support_len)
+        )
+        cost_view = flat_cost.reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+        active_threshold = threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        while active_threshold.dim() < cost_view.dim():
+            active_threshold = active_threshold.unsqueeze(-1)
+
+        affinity = (active_threshold - cost_view).clamp_min(0.0)
+        detached_affinity = affinity.detach()
+        q_neighbors = self._local_average_excluding_center(
+            detached_affinity.permute(0, 1, 2, 4, 3).reshape(-1, query_len),
+            spatial_hw=query_hw,
+            kernel_size=self.verified_uot_kernel_size,
+        ).reshape(num_query, int(way_num), int(shot_num), support_len, query_len).permute(0, 1, 2, 4, 3)
+        s_neighbors = self._local_average_excluding_center(
+            detached_affinity.reshape(-1, support_len),
+            spatial_hw=support_hw,
+            kernel_size=self.verified_uot_kernel_size,
+        ).reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+        neighborhood_support = torch.sqrt((q_neighbors * s_neighbors).clamp_min(0.0))
+        support_ratio = neighborhood_support / detached_affinity.clamp_min(float(self.eps))
+        gate = torch.sigmoid(
+            (support_ratio - float(self.verified_uot_ratio_threshold))
+            / max(float(self.verified_uot_tau), float(self.eps))
+        )
+        beta = flat_cost.new_tensor(float(self.verified_uot_beta))
+        positive_multiplier = (1.0 - beta) + beta * gate
+
+        raw_terms = transport_plan.to(device=flat_cost.device, dtype=flat_cost.dtype) * (
+            active_threshold - cost_view
+        )
+        positive_mask = raw_terms > 0.0
+        verified_terms = torch.where(positive_mask, raw_terms * positive_multiplier, raw_terms)
+        verified_shot_logits = self.score_scale * verified_terms.sum(dim=(-1, -2))
+
+        positive_multiplier_det = positive_multiplier.detach()
+        positive_mask_f = positive_mask.to(dtype=flat_cost.dtype)
+        positive_count = positive_mask_f.sum().clamp_min(1.0)
+        payload = {
+            "verified_uot/enabled": flat_cost.new_tensor(1.0),
+            "verified_uot/beta": flat_cost.new_tensor(float(self.verified_uot_beta)),
+            "verified_uot/tau": flat_cost.new_tensor(float(self.verified_uot_tau)),
+            "verified_uot/ratio_threshold": flat_cost.new_tensor(float(self.verified_uot_ratio_threshold)),
+            "verified_uot/kernel_size": flat_cost.new_tensor(float(self.verified_uot_kernel_size)),
+            "verified_uot/gate_mean": gate.detach().mean(),
+            "verified_uot/gate_positive_mean": (gate.detach() * positive_mask_f).sum() / positive_count,
+            "verified_uot/support_ratio_positive_mean": (
+                support_ratio.detach() * positive_mask_f
+            ).sum() / positive_count,
+            "verified_uot/positive_share": positive_mask_f.mean(),
+            "verified_uot/positive_suppression_mean": (
+                (1.0 - positive_multiplier_det) * positive_mask_f
+            ).sum() / positive_count,
+            "verified_uot/raw_positive_evidence": raw_terms.clamp_min(0.0).sum(dim=(-1, -2)).detach(),
+            "verified_uot/verified_positive_evidence": verified_terms.clamp_min(0.0).sum(dim=(-1, -2)).detach(),
+        }
+        return verified_shot_logits, payload
+
+    def _apply_verified_uot_score(
+        self,
+        payload: dict[str, torch.Tensor],
+        *,
+        flat_cost: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+        spatial_hw: tuple[int, int] | None,
+    ) -> dict[str, torch.Tensor]:
+        if not getattr(self, "enable_verified_uot_score", False):
+            return payload
+        transport_plan = payload.get("transport_plan")
+        if not torch.is_tensor(transport_plan):
+            return payload
+        threshold = payload.get("ecot_threshold")
+        if not torch.is_tensor(threshold):
+            threshold = self.transport_cost_threshold
+        verified_shot_logits, verified_payload = self._verified_uot_shot_logits(
+            flat_cost=flat_cost,
+            transport_plan=transport_plan,
+            threshold=threshold,
+            way_num=way_num,
+            shot_num=shot_num,
+            spatial_hw=spatial_hw,
+        )
+
+        old_shot_logits = payload.get("shot_logits")
+        if torch.is_tensor(old_shot_logits):
+            payload["unverified_shot_logits"] = old_shot_logits.detach()
+            verified_payload["verified_uot/shot_logit_delta"] = (
+                verified_shot_logits.detach() - old_shot_logits.detach()
+            ).mean()
+            verified_payload["verified_uot/shot_logit_delta_abs"] = (
+                verified_shot_logits.detach() - old_shot_logits.detach()
+            ).abs().mean()
+
+        shot_cost = payload.get("shot_transport_cost")
+        shot_mass = payload.get("shot_transported_mass")
+        if not torch.is_tensor(shot_cost) or not torch.is_tensor(shot_mass):
+            raise RuntimeError("Verified-UOT requires shot_transport_cost and shot_transported_mass in ECOT payload")
+        tau_shot = payload.get("ecot_tau_shot")
+        if torch.is_tensor(tau_shot):
+            scaled = verified_shot_logits / tau_shot.clamp_min(float(self.eps))
+            if verified_shot_logits.shape[-1] == 1:
+                shot_pool_weights = torch.ones_like(verified_shot_logits)
+                logits = verified_shot_logits.squeeze(-1)
+            else:
+                shot_pool_weights = torch.softmax(scaled, dim=-1)
+                logits = tau_shot * (
+                    torch.logsumexp(scaled, dim=-1) - math.log(float(verified_shot_logits.shape[-1]))
+                )
+            transport_cost = (shot_pool_weights * shot_cost).sum(dim=-1)
+            transport_mass = (shot_pool_weights * shot_mass).sum(dim=-1)
+        else:
+            logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
+                verified_shot_logits,
+                shot_cost,
+                shot_mass,
+            )
+
+        payload["shot_logits"] = verified_shot_logits
+        payload["logits"] = logits
+        payload["class_scores"] = logits
+        payload["transport_cost"] = transport_cost
+        payload["transported_mass"] = transport_mass
+        payload["shot_pool_weights"] = shot_pool_weights
+        payload["verified_uot_logits"] = logits.detach()
+        if torch.is_tensor(payload.get("ecot_base_score")):
+            payload["unverified_ecot_base_score"] = payload["ecot_base_score"].detach()
+            payload["ecot_base_score"] = verified_shot_logits
+        if torch.is_tensor(payload.get("ecot_score")):
+            payload["unverified_ecot_score"] = payload["ecot_score"].detach()
+            payload["ecot_score"] = verified_shot_logits
+        budget_scores = payload.get("ecot_budget_scores")
+        if torch.is_tensor(budget_scores) and budget_scores.shape[-1] == 1:
+            payload["unverified_ecot_budget_scores"] = budget_scores.detach()
+            payload["ecot_budget_scores"] = verified_shot_logits.unsqueeze(-1)
+        payload.update(verified_payload)
+        return payload
+
     def _mspta_weights_for_ecot(
         self,
         flat_cost: torch.Tensor,
@@ -2270,6 +2473,13 @@ class OursM2(JECOTM2):
             score_background_penalty=score_background_penalty,
             score_evidence_mode=self.pulse_evidence_score_mode,
             score_evidence_mix=self.pulse_evidence_score_mix,
+        )
+        payload = self._apply_verified_uot_score(
+            payload,
+            flat_cost=cost_for_transport,
+            way_num=way_num,
+            shot_num=shot_num,
+            spatial_hw=spatial_hw,
         )
 
         if dmuot_payload:

@@ -1818,6 +1818,19 @@ def get_args():
         help="Blend strength for rival-aware pulse evidence gate.",
     )
     parser.add_argument(
+        "--enable_verified_uot_score",
+        action="store_true",
+        default=False,
+        help=(
+            "Ours-Final only: verify positive UOT evidence by local cost-neighborhood "
+            "coherence before forming T*M-C logits."
+        ),
+    )
+    parser.add_argument("--verified_uot_beta", type=float, default=0.75)
+    parser.add_argument("--verified_uot_tau", type=float, default=0.10)
+    parser.add_argument("--verified_uot_ratio_threshold", type=float, default=0.35)
+    parser.add_argument("--verified_uot_kernel_size", type=int, default=3)
+    parser.add_argument(
         "--enable_global_residual_score",
         action="store_true",
         default=False,
@@ -4119,6 +4132,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_discriminative_tau",
             "pulse_discriminative_margin",
             "pulse_discriminative_mix",
+            "enable_verified_uot_score",
+            "verified_uot_beta",
+            "verified_uot_tau",
+            "verified_uot_ratio_threshold",
+            "verified_uot_kernel_size",
             "enable_global_residual_score",
             "global_residual_mode",
             "global_residual_weight",
@@ -5336,6 +5354,18 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/discriminative_tau",
         "pulse/discriminative_margin",
         "pulse/discriminative_mix",
+        "verified_uot/enabled",
+        "verified_uot/beta",
+        "verified_uot/tau",
+        "verified_uot/ratio_threshold",
+        "verified_uot/kernel_size",
+        "verified_uot/gate_mean",
+        "verified_uot/gate_positive_mean",
+        "verified_uot/support_ratio_positive_mean",
+        "verified_uot/positive_share",
+        "verified_uot/positive_suppression_mean",
+        "verified_uot/shot_logit_delta",
+        "verified_uot/shot_logit_delta_abs",
         "global_residual_weight",
         "global_residual_mode_id",
         "pulse/discriminative_gate_mean",
@@ -5698,6 +5728,12 @@ def format_diagnostic_summary(metrics):
         "local_margin",
         "global_branch_ce",
         "local_branch_ce",
+        "verified_uot/enabled",
+        "verified_uot/gate_positive_mean",
+        "verified_uot/support_ratio_positive_mean",
+        "verified_uot/positive_suppression_mean",
+        "verified_uot/shot_logit_delta",
+        "verified_uot/shot_logit_delta_abs",
         "global_residual_weight",
         "global_residual_mode_id",
         "compact_loss",

@@ -69,9 +69,12 @@ M2_MODEL_NAMES = frozenset(
 )
 OURS_MODEL_NAMES = frozenset({"ours"})
 CANONICAL_OURS_FINAL_MODEL_NAMES = frozenset({"ours_final"})
+OURS_FINAL_VERIFIED_UOT_MODEL_NAMES = frozenset({"ours_final_verified_uot"})
 OURS_FINAL_PARTIAL_OT_MODEL_NAMES = frozenset({"ours_final_partial_ot"})
 OURS_FINAL_MODEL_NAMES = frozenset(
-    set(CANONICAL_OURS_FINAL_MODEL_NAMES) | set(OURS_FINAL_PARTIAL_OT_MODEL_NAMES)
+    set(CANONICAL_OURS_FINAL_MODEL_NAMES)
+    | set(OURS_FINAL_VERIFIED_UOT_MODEL_NAMES)
+    | set(OURS_FINAL_PARTIAL_OT_MODEL_NAMES)
 )
 OURS_ENTRYPOINT_MODEL_NAMES = frozenset(set(OURS_MODEL_NAMES) | set(OURS_FINAL_MODEL_NAMES))
 OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
@@ -361,6 +364,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_pulse_region_uot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_verified_uot_score", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() not in OURS_FINAL_MODEL_NAMES
+    ):
+        raise ValueError("--enable_verified_uot_score is supported only with Ours-Final models")
     if _bool_flag(getattr(args, "enable_global_residual_score", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -754,6 +761,12 @@ MODEL_REGISTRY = {
         "paper_name": "Ours-Final",
         "architecture": "Backbone local descriptors -> single-budget rho=0.8 UOT -> threshold-mass score T*M-C -> episode-calibrated shot pooling; EGSM is disabled by default",
         "metric": "Single-Budget Threshold-Mass Token UOT",
+    },
+    "ours_final_verified_uot": {
+        "display_name": "Ours-Final Verified-UOT",
+        "paper_name": "Neighborhood-Verified Evidence UOT",
+        "architecture": "Backbone local descriptors -> single-budget rho=0.8 UOT -> neighborhood-verified positive evidence score -> episode-calibrated shot pooling",
+        "metric": "Neighborhood-Verified Threshold-Mass Token UOT",
     },
     "ours_final_partial_ot": {
         "display_name": "Ours-Final-PartialOT",
@@ -2764,6 +2777,7 @@ def build_model_from_args(args):
         )
     if args.model in HROT_FSL_MODEL_NAMES:
         is_ours_final_model = args.model in OURS_FINAL_MODEL_NAMES
+        is_ours_final_verified_uot_model = args.model in OURS_FINAL_VERIFIED_UOT_MODEL_NAMES
         is_ours_final_partial_ot_model = args.model in OURS_FINAL_PARTIAL_OT_MODEL_NAMES
         is_ours_entrypoint_model = args.model in OURS_ENTRYPOINT_MODEL_NAMES
         is_m2_model = args.model in M2_MODEL_NAMES
@@ -2836,6 +2850,23 @@ def build_model_from_args(args):
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
                     **(resolve_ours_final_evidence_config(args) if is_ours_final_model else {}),
+                    **(
+                        {
+                            "enable_verified_uot_score": True,
+                            "verified_uot_beta": float(getattr(args, "verified_uot_beta", 0.75)),
+                            "verified_uot_tau": float(getattr(args, "verified_uot_tau", 0.10)),
+                            "verified_uot_ratio_threshold": float(
+                                getattr(args, "verified_uot_ratio_threshold", 0.35)
+                            ),
+                            "verified_uot_kernel_size": int(getattr(args, "verified_uot_kernel_size", 3)),
+                        }
+                        if is_ours_final_model
+                        and (
+                            is_ours_final_verified_uot_model
+                            or _bool_flag(getattr(args, "enable_verified_uot_score", False), default=False)
+                        )
+                        else {}
+                    ),
                     **(
                         {
                             "enable_global_residual_score": True,

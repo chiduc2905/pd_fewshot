@@ -5667,6 +5667,18 @@ class HROTFSL(BaseConv64FewShotModel):
             "evidence_score_mode_id",
             "evidence_score_pair_mean",
             "evidence_score_pair_peak",
+            "verified_uot/enabled",
+            "verified_uot/beta",
+            "verified_uot/tau",
+            "verified_uot/ratio_threshold",
+            "verified_uot/kernel_size",
+            "verified_uot/gate_mean",
+            "verified_uot/gate_positive_mean",
+            "verified_uot/support_ratio_positive_mean",
+            "verified_uot/positive_share",
+            "verified_uot/positive_suppression_mean",
+            "verified_uot/shot_logit_delta",
+            "verified_uot/shot_logit_delta_abs",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

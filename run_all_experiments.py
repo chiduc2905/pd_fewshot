@@ -17,7 +17,13 @@ SAMPLES_LIST = [60, 160, 240, None]
 OURS_ABLATION_SAMPLE_COUNTS = [60, 240]
 OURS_FINAL_SAMPLE_COUNTS = SAMPLES_LIST
 OURS_FINAL_MODEL_NAME = "ours_final"
+OURS_FINAL_VERIFIED_UOT_MODEL_NAME = "ours_final_verified_uot"
 OURS_FINAL_PARTIAL_OT_MODEL_NAME = "ours_final_partial_ot"
+OURS_FINAL_FAMILY_MODEL_NAMES = {
+    OURS_FINAL_MODEL_NAME,
+    OURS_FINAL_VERIFIED_UOT_MODEL_NAME,
+    OURS_FINAL_PARTIAL_OT_MODEL_NAME,
+}
 CFUGET_MODEL_NAME = "cfuget"
 SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 1
@@ -587,6 +593,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     "m2",
     "ours",
     OURS_FINAL_MODEL_NAME,
+    OURS_FINAL_VERIFIED_UOT_MODEL_NAME,
     OURS_FINAL_PARTIAL_OT_MODEL_NAME,
     "mm_spot_fsl",
     "pare_fsl",
@@ -2187,7 +2194,7 @@ def uot_evidence_artifacts_exist(
         ]
         if not main_matches:
             return False
-        if model in {OURS_FINAL_MODEL_NAME, OURS_FINAL_PARTIAL_OT_MODEL_NAME}:
+        if model in OURS_FINAL_FAMILY_MODEL_NAMES:
             matrix_pattern = (
                 f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
                 f"{shot}shot{tag_suffix}{protocol_suffix}_ep*_transport_matrix.png"
@@ -2460,7 +2467,7 @@ def run_experiment(
     needs_uot_evidence = cli_bool_option(
         cmd,
         "--export_uot_evidence_figure",
-        default=model in {OURS_FINAL_MODEL_NAME, OURS_FINAL_PARTIAL_OT_MODEL_NAME},
+        default=model in OURS_FINAL_FAMILY_MODEL_NAMES,
     )
     primary_uot_evidence_complete = (
         not needs_uot_evidence
