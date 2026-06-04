@@ -2845,6 +2845,15 @@ def build_model_from_args(args):
                             "global_residual_weight": float(
                                 getattr(args, "global_residual_weight", 0.15)
                             ),
+                            "global_residual_tau": float(
+                                getattr(args, "global_residual_tau", 1.0)
+                            ),
+                            "global_residual_margin_target": float(
+                                getattr(args, "global_residual_margin_target", 2.0)
+                            ),
+                            "global_residual_aux_weight": float(
+                                getattr(args, "global_residual_aux_weight", 0.0)
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_global_residual_score", False), default=False)

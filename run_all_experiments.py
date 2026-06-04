@@ -353,7 +353,7 @@ def get_args():
             "mass_on=shot-consensus threshold-mass score variants; "
             "evidence=cost-derived evidence marginal ablation (query/support/both/rival); "
             "pulse_region=pulse cost guidance and conservative pulse mass-mix candidates; "
-            "global_residual=global-only plus global residual weight grid."
+            "global_residual=global-only, global residual weight grid, and adaptive global-rescue variants."
         ),
     )
     parser.add_argument(
@@ -1492,6 +1492,32 @@ def build_ours_final_global_residual_variants():
                     "residual",
                     "--global_residual_weight",
                     f"{weight:g}",
+                ],
+            }
+        )
+    for weight in (0.20, 0.30, 0.40):
+        tag_value = str(weight).replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_global_rescue_w{tag_value}",
+                "checkpoint_tag": f"global_rescue_w{tag_value}",
+                "label": (
+                    "Ours-Final local UOT plus adaptive margin-gated global rescue "
+                    f"weight={weight:g}, aux=0.2"
+                ),
+                "extra_args": base
+                + [
+                    "--enable_global_residual_score",
+                    "--global_residual_mode",
+                    "adaptive_residual",
+                    "--global_residual_weight",
+                    f"{weight:g}",
+                    "--global_residual_tau",
+                    "1.0",
+                    "--global_residual_margin_target",
+                    "2.0",
+                    "--global_residual_aux_weight",
+                    "0.2",
                 ],
             }
         )
@@ -2848,6 +2874,18 @@ def parse_ours_final_variant_filter(variants_str):
         "global_residual_w0p3": "ours_final_global_res_w0p3",
         "global_residual_w0p30": "ours_final_global_res_w0p3",
         "global_residual": "ours_final_global_res_w0p1",
+        "global_rescue": "ours_final_global_rescue_w0p2",
+        "adaptive_global": "ours_final_global_rescue_w0p2",
+        "adaptive_residual": "ours_final_global_rescue_w0p2",
+        "global_rescue_w0p2": "ours_final_global_rescue_w0p2",
+        "global_rescue_w0p20": "ours_final_global_rescue_w0p2",
+        "global_rescue_w0p3": "ours_final_global_rescue_w0p3",
+        "global_rescue_w0p30": "ours_final_global_rescue_w0p3",
+        "global_rescue_w0p4": "ours_final_global_rescue_w0p4",
+        "global_rescue_w0p40": "ours_final_global_rescue_w0p4",
+        "ours_final_global_rescue_w0p2": "ours_final_global_rescue_w0p2",
+        "ours_final_global_rescue_w0p3": "ours_final_global_rescue_w0p3",
+        "ours_final_global_rescue_w0p4": "ours_final_global_rescue_w0p4",
         "mass_scaled": "ours_final_mass_scaled_b0p5",
         "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
         "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",

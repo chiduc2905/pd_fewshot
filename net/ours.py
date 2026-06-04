@@ -53,7 +53,7 @@ DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
 DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
 PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_only"})
 PULSE_EVIDENCE_SCORE_MODES = frozenset({"replace", "mass_mix"})
-GLOBAL_RESIDUAL_SCORE_MODES = frozenset({"residual", "global_only"})
+GLOBAL_RESIDUAL_SCORE_MODES = frozenset({"residual", "adaptive_residual", "global_only"})
 MSPTA_GUIDANCE_SOURCES = frozenset({"image", "feature", "mixed"})
 
 
@@ -251,6 +251,13 @@ def _normalize_global_residual_score_mode(value: str | None) -> str:
         "additive": "residual",
         "fuse": "residual",
         "fusion": "residual",
+        "adaptive": "adaptive_residual",
+        "adaptive_fuse": "adaptive_residual",
+        "adaptive_fusion": "adaptive_residual",
+        "counterfactual": "adaptive_residual",
+        "counterfactual_rescue": "adaptive_residual",
+        "global_rescue": "adaptive_residual",
+        "rescue": "adaptive_residual",
         "global": "global_only",
         "only_global": "global_only",
         "prototype": "global_only",
@@ -413,6 +420,9 @@ class OursM2(JECOTM2):
             kwargs.pop("global_residual_mode", "residual")
         )
         global_residual_weight = float(kwargs.pop("global_residual_weight", 0.15))
+        global_residual_tau = float(kwargs.pop("global_residual_tau", 1.0))
+        global_residual_margin_target = float(kwargs.pop("global_residual_margin_target", 2.0))
+        global_residual_aux_weight = float(kwargs.pop("global_residual_aux_weight", 0.0))
         enable_label_ot = _bool_config(
             kwargs.pop("enable_label_ot", kwargs.pop("enable_transductive_label_ot", False))
         )
@@ -591,6 +601,9 @@ class OursM2(JECOTM2):
         self.enable_global_residual_score = bool(enable_global_residual_score)
         self.global_residual_mode = str(global_residual_mode)
         self.global_residual_weight = float(global_residual_weight)
+        self.global_residual_tau = float(global_residual_tau)
+        self.global_residual_margin_target = float(global_residual_margin_target)
+        self.global_residual_aux_weight = float(global_residual_aux_weight)
         self.enable_label_ot = bool(enable_label_ot)
         self.label_ot_epsilon = float(label_ot_epsilon)
         self.label_ot_iterations = int(label_ot_iterations)
@@ -609,9 +622,13 @@ class OursM2(JECOTM2):
             ("discriminative_uot_cost_weight", self.discriminative_uot_cost_weight),
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
             ("global_residual_weight", self.global_residual_weight),
+            ("global_residual_margin_target", self.global_residual_margin_target),
+            ("global_residual_aux_weight", self.global_residual_aux_weight),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if self.global_residual_tau <= 0.0:
+            raise ValueError("global_residual_tau must be positive")
         if not 0.0 <= self.pulse_evidence_score_mix <= 1.0:
             raise ValueError("pulse_evidence_score_mix must be in [0, 1]")
         if self.discriminative_uot_tau <= 0.0:
@@ -2345,6 +2362,12 @@ class OursM2(JECOTM2):
         logits = self.score_scale * torch.einsum("qd,wd->qw", query_global, support_global)
         return logits - logits.mean(dim=1, keepdim=True)
 
+    def _classification_margin(self, logits: torch.Tensor) -> torch.Tensor:
+        if logits.dim() == 0 or logits.shape[-1] <= 1:
+            return logits.new_zeros(logits.shape[:-1])
+        top2 = torch.topk(logits, k=2, dim=-1).values
+        return top2[..., 0] - top2[..., 1]
+
     def _apply_global_residual_score(
         self,
         payload: dict[str, torch.Tensor],
@@ -2373,6 +2396,33 @@ class OursM2(JECOTM2):
             fused_logits = global_logits
             effective_weight = base_logits.new_tensor(1.0)
             mode_id = base_logits.new_tensor(1.0)
+        elif self.global_residual_mode == "adaptive_residual":
+            tau = base_logits.new_tensor(float(self.global_residual_tau)).clamp_min(float(self.eps))
+            margin_target = base_logits.new_tensor(float(self.global_residual_margin_target))
+            local_margin = self._classification_margin(base_logits)
+            global_margin = self._classification_margin(global_logits)
+            local_pred = base_logits.argmax(dim=-1)
+            global_pred = global_logits.argmax(dim=-1)
+            agreement = local_pred.eq(global_pred)
+
+            local_uncertainty_gate = torch.sigmoid((margin_target - local_margin) / tau)
+            global_advantage_gate = torch.sigmoid((global_margin - local_margin) / tau)
+            confident_global_gate = torch.sigmoid((global_margin - margin_target) / tau)
+            disagreement_gate = global_advantage_gate * confident_global_gate
+            gate = torch.where(agreement, local_uncertainty_gate, disagreement_gate)
+            gate = (weight * gate).clamp(min=0.0)
+
+            global_correction = global_logits - base_logits
+            fused_logits = base_logits + gate.unsqueeze(-1) * global_correction
+            effective_weight = gate.detach().mean()
+            mode_id = base_logits.new_tensor(2.0)
+            payload["global_residual_gate"] = gate.detach()
+            payload["global_residual_gate_mean"] = gate.detach().mean()
+            payload["global_residual_gate_peak"] = gate.detach().amax()
+            payload["global_residual_correction_abs_mean"] = global_correction.detach().abs().mean()
+            payload["global_residual_local_margin"] = local_margin.detach().mean()
+            payload["global_residual_global_margin"] = global_margin.detach().mean()
+            payload["global_local_agreement"] = agreement.to(dtype=base_logits.dtype).mean().detach()
         else:
             fused_logits = base_logits + weight * global_logits
             effective_weight = weight
@@ -2383,6 +2433,11 @@ class OursM2(JECOTM2):
         payload["class_scores"] = fused_logits
         payload["global_residual_weight"] = effective_weight.detach()
         payload["global_residual_mode_id"] = mode_id.detach()
+        payload["global_residual_tau"] = base_logits.new_tensor(float(self.global_residual_tau))
+        payload["global_residual_margin_target"] = base_logits.new_tensor(
+            float(self.global_residual_margin_target)
+        )
+        payload["global_residual_aux_weight"] = base_logits.new_tensor(float(self.global_residual_aux_weight))
 
     def _update_differential_mode_template(self, episode_template: torch.Tensor) -> None:
         if not self.training:
@@ -2708,6 +2763,27 @@ class OursM2(JECOTM2):
                 self._context_debug_fmaps = []
         outputs, _label_ot_payload = self._apply_label_ot_to_outputs(outputs)
         if isinstance(outputs, dict):
+            query_targets = kwargs.get("query_targets")
+            if (
+                self.training
+                and getattr(self, "enable_global_residual_score", False)
+                and float(getattr(self, "global_residual_aux_weight", 0.0)) > 0.0
+                and torch.is_tensor(query_targets)
+                and torch.is_tensor(outputs.get("global_scores"))
+            ):
+                global_scores = outputs["global_scores"]
+                targets = query_targets.to(device=global_scores.device, dtype=torch.long).reshape(-1)
+                if targets.numel() == global_scores.shape[0]:
+                    global_branch_ce = F.cross_entropy(global_scores, targets)
+                    aux_loss = outputs.get("aux_loss")
+                    if not torch.is_tensor(aux_loss):
+                        aux_loss = global_branch_ce.new_zeros(())
+                    outputs["aux_loss"] = aux_loss + float(self.global_residual_aux_weight) * global_branch_ce
+                    outputs["global_branch_ce"] = global_branch_ce
+                    outputs["global_branch_aux_loss"] = global_branch_ce
+                    outputs["global_residual_aux_weight"] = global_branch_ce.new_tensor(
+                        float(self.global_residual_aux_weight)
+                    )
             if "mspta_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["mspta_guided_cost_matrix"]

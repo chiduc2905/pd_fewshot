@@ -1827,14 +1827,35 @@ def get_args():
         "--global_residual_mode",
         type=str,
         default="residual",
-        choices=["residual", "global_only"],
-        help="residual adds global prototype logits to local UOT logits; global_only scores by global prototypes only.",
+        choices=["residual", "adaptive_residual", "global_only"],
+        help=(
+            "residual adds global prototype logits to local UOT logits; adaptive_residual gates the "
+            "global rescue by local/global margins; global_only scores by global prototypes only."
+        ),
     )
     parser.add_argument(
         "--global_residual_weight",
         type=float,
         default=0.15,
         help="Weight of the global prototype residual logits when enable_global_residual_score is set.",
+    )
+    parser.add_argument(
+        "--global_residual_tau",
+        type=float,
+        default=1.0,
+        help="Temperature for adaptive global residual margin gates.",
+    )
+    parser.add_argument(
+        "--global_residual_margin_target",
+        type=float,
+        default=2.0,
+        help="Local/global logit margin target used by adaptive global residual gating.",
+    )
+    parser.add_argument(
+        "--global_residual_aux_weight",
+        type=float,
+        default=0.0,
+        help="Training-only auxiliary CE weight for the global prototype branch.",
     )
     parser.add_argument(
         "--enable_discriminative_uot",
@@ -4122,6 +4143,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_global_residual_score",
             "global_residual_mode",
             "global_residual_weight",
+            "global_residual_tau",
+            "global_residual_margin_target",
+            "global_residual_aux_weight",
             "enable_discriminative_uot",
             "discriminative_uot_tau",
             "discriminative_uot_margin",
@@ -5338,6 +5362,16 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "pulse/discriminative_mix",
         "global_residual_weight",
         "global_residual_mode_id",
+        "global_residual_tau",
+        "global_residual_margin_target",
+        "global_residual_aux_weight",
+        "global_residual_gate_mean",
+        "global_residual_gate_peak",
+        "global_residual_correction_abs_mean",
+        "global_residual_local_margin",
+        "global_residual_global_margin",
+        "global_local_agreement",
+        "global_branch_aux_loss",
         "pulse/discriminative_gate_mean",
         "pulse/discriminative_gate_low_share",
         "pulse/rival_advantage_mean",
@@ -5700,6 +5734,16 @@ def format_diagnostic_summary(metrics):
         "local_branch_ce",
         "global_residual_weight",
         "global_residual_mode_id",
+        "global_residual_tau",
+        "global_residual_margin_target",
+        "global_residual_aux_weight",
+        "global_residual_gate_mean",
+        "global_residual_gate_peak",
+        "global_residual_correction_abs_mean",
+        "global_residual_local_margin",
+        "global_residual_global_margin",
+        "global_local_agreement",
+        "global_branch_aux_loss",
         "compact_loss",
         "decorr_loss",
         "entropy_loss",
