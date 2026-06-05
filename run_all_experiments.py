@@ -359,7 +359,7 @@ def get_args():
             "mass_on=shot-consensus threshold-mass score variants; "
             "evidence=cost-derived evidence marginal ablation (query/support/both/rival); "
             "pulse_region=pulse cost guidance and conservative pulse mass-mix candidates; "
-            "global_residual=global-only plus global residual weight grid."
+            "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls."
         ),
     )
     parser.add_argument(
@@ -379,7 +379,7 @@ def get_args():
             "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
             "Aliases: full/original/uot, ccem_uot/evidence, full_ot/ot/balanced_ot, "
             "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
-            "tau_shot_off, rho_<value>. "
+            "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>. "
             "Default all keeps the suite's normal variants."
         ),
     )
@@ -1470,6 +1470,13 @@ def build_ours_final_pulse_region_variants():
 def build_ours_final_global_residual_variants():
     """Global decision-head candidates without the local-only Ours-Final baseline."""
     base = _ours_final_base_args()
+    global_residual_w0p1 = [
+        "--enable_global_residual_score",
+        "--global_residual_mode",
+        "residual",
+        "--global_residual_weight",
+        "0.1",
+    ]
     variants = [
         {
             "tag": "ours_final_global_only",
@@ -1502,6 +1509,34 @@ def build_ours_final_global_residual_variants():
                 ],
             }
         )
+    variants.extend(
+        [
+            {
+                "tag": "ours_final_global_res_w0p1_full_ot",
+                "checkpoint_tag": "global_res_w0p1_full_ot",
+                "label": "Ours-Final global residual weight=0.1 with balanced full OT replacing UOT",
+                "extra_args": _ours_final_base_args(
+                    "1.0",
+                    ablation="full_ot",
+                    transport_mode="balanced",
+                    fixed_mass="0.8",
+                )
+                + global_residual_w0p1,
+            },
+            {
+                "tag": "ours_final_global_res_w0p1_partial_ot",
+                "checkpoint_tag": "global_res_w0p1_partial_ot",
+                "label": "Ours-Final global residual weight=0.1 with fast Partial OT + cost-per-mass score",
+                "extra_args": _ours_final_partial_ot_args() + global_residual_w0p1,
+            },
+            {
+                "tag": "ours_final_global_res_w0p1_mass_off",
+                "checkpoint_tag": "global_res_w0p1_mass_off",
+                "label": "Ours-Final global residual weight=0.1 with threshold-mass reward removed",
+                "extra_args": _ours_final_base_args(ablate_threshold_mass="true") + global_residual_w0p1,
+            },
+        ]
+    )
     return variants
 
 
@@ -2844,12 +2879,27 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_global_only": "ours_final_global_only",
         "global_res_w0p1": "ours_final_global_res_w0p1",
         "global_res_w0p10": "ours_final_global_res_w0p1",
+        "global_res_w0p1_full_ot": "ours_final_global_res_w0p1_full_ot",
+        "global_res_w0p10_full_ot": "ours_final_global_res_w0p1_full_ot",
+        "global_res_full_ot": "ours_final_global_res_w0p1_full_ot",
+        "global_res_w0p1_partial_ot": "ours_final_global_res_w0p1_partial_ot",
+        "global_res_w0p10_partial_ot": "ours_final_global_res_w0p1_partial_ot",
+        "global_res_partial_ot": "ours_final_global_res_w0p1_partial_ot",
+        "global_res_w0p1_mass_off": "ours_final_global_res_w0p1_mass_off",
+        "global_res_w0p10_mass_off": "ours_final_global_res_w0p1_mass_off",
+        "global_res_mass_off": "ours_final_global_res_w0p1_mass_off",
         "global_res_w0p2": "ours_final_global_res_w0p2",
         "global_res_w0p20": "ours_final_global_res_w0p2",
         "global_res_w0p3": "ours_final_global_res_w0p3",
         "global_res_w0p30": "ours_final_global_res_w0p3",
         "global_residual_w0p1": "ours_final_global_res_w0p1",
         "global_residual_w0p10": "ours_final_global_res_w0p1",
+        "global_residual_w0p1_full_ot": "ours_final_global_res_w0p1_full_ot",
+        "global_residual_w0p1_partial_ot": "ours_final_global_res_w0p1_partial_ot",
+        "global_residual_w0p1_mass_off": "ours_final_global_res_w0p1_mass_off",
+        "ours_final_global_res_w0p1_full_ot": "ours_final_global_res_w0p1_full_ot",
+        "ours_final_global_res_w0p1_partial_ot": "ours_final_global_res_w0p1_partial_ot",
+        "ours_final_global_res_w0p1_mass_off": "ours_final_global_res_w0p1_mass_off",
         "global_residual_w0p2": "ours_final_global_res_w0p2",
         "global_residual_w0p20": "ours_final_global_res_w0p2",
         "global_residual_w0p3": "ours_final_global_res_w0p3",
