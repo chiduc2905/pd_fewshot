@@ -2874,7 +2874,7 @@ def build_model_from_args(args):
                                 getattr(args, "global_residual_mode", "residual")
                             ),
                             "global_residual_weight": float(
-                                getattr(args, "global_residual_weight", 0.15)
+                                getattr(args, "global_residual_weight", 0.10)
                             ),
                         }
                         if is_ours_final_model

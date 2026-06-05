@@ -417,7 +417,7 @@ class OursM2(JECOTM2):
         global_residual_mode = _normalize_global_residual_score_mode(
             kwargs.pop("global_residual_mode", "residual")
         )
-        global_residual_weight = float(kwargs.pop("global_residual_weight", 0.15))
+        global_residual_weight = float(kwargs.pop("global_residual_weight", 0.10))
         enable_label_ot = _bool_config(
             kwargs.pop("enable_label_ot", kwargs.pop("enable_transductive_label_ot", False))
         )

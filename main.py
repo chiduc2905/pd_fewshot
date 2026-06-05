@@ -1846,7 +1846,7 @@ def get_args():
     parser.add_argument(
         "--global_residual_weight",
         type=float,
-        default=0.15,
+        default=0.10,
         help="Weight of the global prototype residual logits when enable_global_residual_score is set.",
     )
     parser.add_argument(
