@@ -94,6 +94,20 @@ def dataset_root_for_child_paths(dataset_path):
     return path
 
 
+def parse_motherwave_dataset_folders(value):
+    folders = []
+    for token in str(value or "").split(","):
+        folder = token.strip()
+        if not folder:
+            continue
+        if folder.startswith("_"):
+            folder = f"{BASE_SCALOGRAM_DATASET}{folder}"
+        folders.append(folder)
+    if not folders:
+        raise ValueError("--motherwave_dataset_folders must contain at least one dataset folder or suffix.")
+    return tuple(folders)
+
+
 def build_dataset_specs(args):
     if str(getattr(args, "test_motherwave_datasets", "false")).lower() != "true":
         return [
@@ -105,13 +119,16 @@ def build_dataset_specs(args):
         ]
 
     dataset_root = dataset_root_for_child_paths(args.dataset_path)
+    dataset_folders = parse_motherwave_dataset_folders(
+        getattr(args, "motherwave_dataset_folders", ",".join(MOTHERWAVE_DATASET_FOLDERS))
+    )
     return [
         {
             "path": str(dataset_root / dataset_folder),
             "name": motherwave_dataset_name(args.dataset_name, dataset_folder),
             "noise_test_root": str(dataset_root / f"{dataset_folder}{NOISE_BENCHMARK_SUFFIX}"),
         }
-        for dataset_folder in MOTHERWAVE_DATASET_FOLDERS
+        for dataset_folder in dataset_folders
     ]
 
 
@@ -187,6 +204,16 @@ def get_args():
         help=(
             "Run the same experiment plan on the alternate mother-wave scalogram datasets "
             "scalogram_27_1_cgau4 and scalogram_27_1_fbsp3 under /workspace/pd_fewshot."
+        ),
+    )
+    parser.add_argument(
+        "--motherwave_dataset_folders",
+        type=str,
+        default=",".join(MOTHERWAVE_DATASET_FOLDERS),
+        help=(
+            "Comma-separated mother-wave dataset folders used when --test_motherwave_datasets true. "
+            "Values may be full folder names such as scalogram_27_1_gaus4,scalogram_27_1_morl "
+            "or suffixes such as _gaus4,_morl."
         ),
     )
     parser.add_argument(
