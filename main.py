@@ -60,6 +60,7 @@ from visualization import (
     export_episode_q1_figure,
     export_support_distribution_figure,
     export_uot_evidence_figure,
+    score_uot_evidence_candidate,
 )
 
 
@@ -111,6 +112,15 @@ def _safe_path_token(value):
     return token or "class"
 
 
+def _detach_evidence_outputs(outputs):
+    if not isinstance(outputs, dict):
+        return {"logits": outputs.detach().cpu()} if torch.is_tensor(outputs) else {"logits": outputs}
+    detached = {}
+    for key, value in outputs.items():
+        detached[key] = value.detach().cpu() if torch.is_tensor(value) else value
+    return detached
+
+
 def _remove_stale_uot_evidence_artifacts(path_prefix):
     directory = os.path.dirname(path_prefix)
     prefix = os.path.basename(path_prefix)
@@ -119,7 +129,7 @@ def _remove_stale_uot_evidence_artifacts(path_prefix):
     for name in os.listdir(directory):
         if not name.startswith(prefix):
             continue
-        if not name.lower().endswith((".png", ".csv")):
+        if not name.lower().endswith((".png", ".pdf", ".csv")):
             continue
         try:
             os.remove(os.path.join(directory, name))
@@ -2635,6 +2645,13 @@ def get_args():
     parser.add_argument("--uot_evidence_num_episodes", type=int, default=1)
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--uot_evidence_selection",
+        type=str,
+        default="first",
+        choices=["first", "best"],
+        help="first exports the first eligible query; best scans the requested evidence episodes and exports the best candidate per class.",
+    )
     parser.add_argument(
         "--uot_evidence_file_format",
         type=str,
@@ -6499,10 +6516,13 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     uot_evidence_queries_per_episode = max(1, int(getattr(args, "uot_evidence_queries_per_episode", 1)))
     uot_evidence_correct_only = _bool_flag(getattr(args, "uot_evidence_correct_only", "true"), default=True)
     uot_evidence_visual_style = resolve_uot_evidence_visual_style(args)
+    uot_evidence_selection = str(getattr(args, "uot_evidence_selection", "first") or "first").strip().lower()
+    uot_evidence_best_mode = uot_evidence_selection == "best"
     q1_rows = []
     q1_figure_paths = []
     uot_evidence_rows = []
     uot_evidence_paths = []
+    uot_evidence_best_candidates = {}
     support_distribution_rows = []
     support_summary_sums = defaultdict(float)
     support_summary_count = 0.0
@@ -6550,13 +6570,16 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 
     with torch.no_grad():
         for episode_idx, batch in enumerate(tqdm(loader, desc="Testing")):
-            uot_evidence_complete = (
-                exported_uot_evidence >= uot_evidence_max_exports
-                or (
-                    uot_evidence_one_per_class
-                    and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+            if uot_evidence_best_mode:
+                uot_evidence_complete = uot_evidence_limit > 0 and episode_idx >= uot_evidence_limit
+            else:
+                uot_evidence_complete = (
+                    exported_uot_evidence >= uot_evidence_max_exports
+                    or (
+                        uot_evidence_one_per_class
+                        and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+                    )
                 )
-            )
             if len(batch) == 6:
                 query, q_labels, support, support_labels, q_indices, support_indices = batch
                 q_indices_np = q_indices.view(-1).cpu().numpy()
@@ -6667,13 +6690,16 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         )
                     exported_q1 += 1
 
-            uot_evidence_complete = (
-                exported_uot_evidence >= uot_evidence_max_exports
-                or (
-                    uot_evidence_one_per_class
-                    and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+            if uot_evidence_best_mode:
+                uot_evidence_complete = uot_evidence_limit > 0 and episode_idx >= uot_evidence_limit
+            else:
+                uot_evidence_complete = (
+                    exported_uot_evidence >= uot_evidence_max_exports
+                    or (
+                        uot_evidence_one_per_class
+                        and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
+                    )
                 )
-            )
             if uot_evidence_enabled and not uot_evidence_complete:
                 if uot_evidence_one_per_class and uot_evidence_correct_only:
                     correct_query_indices = preds.eq(targets).nonzero(as_tuple=True)[0].tolist()
@@ -6686,7 +6712,9 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                     candidate_query_indices = preds.eq(targets).nonzero(as_tuple=True)[0].tolist()
                 else:
                     candidate_query_indices = list(range(int(preds.shape[0])))
-                if uot_evidence_one_per_class:
+                if uot_evidence_best_mode:
+                    selected_query_indices = candidate_query_indices
+                elif uot_evidence_one_per_class:
                     selected_query_indices = []
                     selected_classes = set()
                     for query_idx in candidate_query_indices:
@@ -6702,7 +6730,50 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 else:
                     selected_query_indices = candidate_query_indices[:uot_evidence_queries_per_episode]
 
-                if selected_query_indices:
+                if selected_query_indices and uot_evidence_best_mode:
+                    outputs_cpu = _detach_evidence_outputs(scores if isinstance(scores, dict) else {"logits": logits})
+                    query_cpu = query[0].detach().cpu()
+                    support_cpu = support[0].detach().cpu()
+                    logits_cpu = logits.detach().cpu()
+                    preds_cpu = preds.detach().cpu()
+                    targets_cpu = targets.detach().cpu()
+                    for candidate_query_idx in selected_query_indices:
+                        try:
+                            candidate_score = score_uot_evidence_candidate(
+                                outputs=outputs_cpu,
+                                query_images=query_cpu,
+                                support_images=support_cpu,
+                                logits=logits_cpu,
+                                preds=preds_cpu,
+                                targets=targets_cpu,
+                                query_idx=int(candidate_query_idx),
+                                transport_kind=uot_transport_kind,
+                            )
+                        except Exception:
+                            candidate_score = None
+                        if not candidate_score:
+                            continue
+                        class_key = (
+                            int(candidate_score["true_class"])
+                            if uot_evidence_one_per_class
+                            else 0
+                        )
+                        previous = uot_evidence_best_candidates.get(class_key)
+                        if previous is not None and float(previous["score"]["selection_score"]) >= float(candidate_score["selection_score"]):
+                            continue
+                        uot_evidence_best_candidates[class_key] = {
+                            "score": candidate_score,
+                            "outputs": outputs_cpu,
+                            "query_images": query_cpu,
+                            "support_images": support_cpu,
+                            "logits": logits_cpu,
+                            "preds": preds_cpu,
+                            "targets": targets_cpu,
+                            "episode_index": int(episode_idx),
+                            "query_idx": int(candidate_query_idx),
+                        }
+
+                if selected_query_indices and not uot_evidence_best_mode:
                     samples_stem = f"{args.training_samples}samples" if args.training_samples else "allsamples"
                     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
                     protocol_suffix = get_test_protocol_suffix(args)
@@ -6915,6 +6986,68 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 wandb.log({f"q1/example_{idx}": wandb.Image(figure_path)})
         print(f"Saved Q1 focus summary: {q1_csv_path}")
         print(f"Saved {len(q1_figure_paths)} Q1 figure(s)")
+
+    if uot_evidence_best_mode and uot_evidence_best_candidates:
+        samples_stem = f"{args.training_samples}samples" if args.training_samples else "allsamples"
+        best_tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
+        best_protocol_suffix = get_test_protocol_suffix(args)
+        uot_ext = ".pdf" if str(getattr(args, "uot_evidence_file_format", "png")).lower() == "pdf" else ".png"
+        cleaned_best_prefixes = set()
+        for _class_key, candidate in sorted(uot_evidence_best_candidates.items(), key=lambda item: item[0]):
+            candidate_score = candidate["score"]
+            class_idx = int(candidate_score["true_class"])
+            class_name = args.class_names[class_idx] if class_idx < len(args.class_names) else str(class_idx)
+            episode_idx = int(candidate["episode_index"])
+            query_idx = int(candidate["query_idx"])
+            uot_base_prefix = os.path.join(
+                args.path_results,
+                (
+                    f"uot_evidence_{args.dataset_name}_{args.model}_{samples_stem}_"
+                    f"{args.shot_num}shot{best_tag_suffix}{best_protocol_suffix}_ep{episode_idx:04d}"
+                ),
+            )
+            class_suffix = (
+                f"_q{query_idx:03d}_class{class_idx:02d}_"
+                f"{_safe_path_token(class_name)}"
+            )
+            if uot_evidence_one_per_class and uot_base_prefix not in cleaned_best_prefixes:
+                _remove_stale_uot_evidence_artifacts(uot_base_prefix)
+                cleaned_best_prefixes.add(uot_base_prefix)
+            uot_base = os.path.join(
+                args.path_results,
+                f"{os.path.basename(uot_base_prefix)}{class_suffix}{uot_ext}",
+            )
+            try:
+                rows = export_uot_evidence_figure(
+                    outputs=candidate["outputs"],
+                    query_images=candidate["query_images"],
+                    support_images=candidate["support_images"],
+                    logits=candidate["logits"],
+                    preds=candidate["preds"],
+                    targets=candidate["targets"],
+                    class_names=args.class_names,
+                    save_path=uot_base,
+                    episode_index=episode_idx,
+                    query_indices=[query_idx],
+                    transport_kind=uot_transport_kind,
+                    variant_label=uot_variant_label,
+                    visual_style=uot_evidence_visual_style,
+                )
+            except Exception as exc:
+                print(f"Skipping best transport evidence figure for episode {episode_idx}: {exc}")
+                rows = []
+            for row in rows:
+                row["selection_score"] = float(candidate_score["selection_score"])
+                row["selection_decision_margin"] = float(candidate_score["decision_margin"])
+                row["selection_query_bright_mass_ratio"] = float(candidate_score["query_bright_mass_ratio"])
+                row["selection_support_bright_mass_ratio"] = float(candidate_score["support_bright_mass_ratio"])
+                row["selection_top_match_score_fraction"] = float(candidate_score["top_match_score_fraction"])
+            if rows:
+                uot_evidence_rows.extend(rows)
+                uot_evidence_paths.append(uot_base)
+                exported_uot_evidence += 1
+                if uot_evidence_one_per_class:
+                    uot_evidence_seen_classes.add(class_idx)
 
     if uot_evidence_rows:
         uot_csv_path = os.path.join(

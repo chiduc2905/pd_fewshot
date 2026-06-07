@@ -16,6 +16,7 @@ from .noise_diagnostics import (
     export_episode_q1_figure,
     export_support_distribution_figure,
     export_uot_evidence_figure,
+    score_uot_evidence_candidate,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     'export_episode_q1_figure',
     'export_support_distribution_figure',
     'export_uot_evidence_figure',
+    'score_uot_evidence_candidate',
 ]

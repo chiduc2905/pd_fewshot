@@ -486,6 +486,13 @@ def get_args():
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
     parser.add_argument(
+        "--uot_evidence_selection",
+        type=str,
+        default="first",
+        choices=["first", "best"],
+        help="Forwarded to main.py. best scans the requested evidence episodes and exports the best candidate per class.",
+    )
+    parser.add_argument(
         "--uot_evidence_file_format",
         type=str,
         default="png",
@@ -559,6 +566,8 @@ def get_args():
             str(args.uot_evidence_queries_per_episode),
             "--uot_evidence_correct_only",
             str(args.uot_evidence_correct_only),
+            "--uot_evidence_selection",
+            str(args.uot_evidence_selection),
             "--uot_evidence_file_format",
             str(args.uot_evidence_file_format),
         ]

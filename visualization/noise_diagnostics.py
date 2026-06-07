@@ -1284,6 +1284,95 @@ def _pulse_to_pulse_ratio(
     return float(selected.item() / max(float(scores.sum().item()), eps))
 
 
+def score_uot_evidence_candidate(
+    *,
+    outputs: dict[str, Any] | torch.Tensor,
+    query_images: torch.Tensor,
+    support_images: torch.Tensor,
+    logits: torch.Tensor,
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    query_idx: int,
+    transport_kind: str = "uot",
+) -> dict[str, Any] | None:
+    """Score one query candidate for paper evidence export quality."""
+    if query_images.dim() != 4 or support_images.dim() != 5:
+        return None
+    way_num, shot_num = support_images.shape[:2]
+    plan = _transport_plan_by_shot(outputs, way_num=way_num, shot_num=shot_num)
+    if plan is None:
+        return None
+    cost_matrix = _matrix_by_shot(outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
+    logits = logits.detach().float().cpu()
+    preds = preds.detach().cpu()
+    targets = targets.detach().cpu()
+    query_idx = int(query_idx)
+    if query_idx < 0 or query_idx >= int(logits.shape[0]):
+        return None
+
+    true_class = int(targets[query_idx].item())
+    pred_class = int(preds[query_idx].item())
+    selected_class = true_class if 0 <= true_class < way_num else pred_class
+    score_np = logits[query_idx].numpy()
+    if len(score_np) > 1 and 0 <= true_class < len(score_np):
+        wrong_scores = score_np.copy()
+        wrong_scores[true_class] = -np.inf
+        best_wrong_score = float(np.max(wrong_scores))
+    else:
+        best_wrong_score = 0.0
+    true_score = float(score_np[true_class]) if 0 <= true_class < len(score_np) else 0.0
+    decision_margin = true_score - best_wrong_score
+
+    query_np = _ensure_numpy_image(query_images[query_idx])
+    prefer_positive_evidence = str(transport_kind).strip().lower() not in {"balanced", "balanced_ot", "full_ot", "ot"}
+    payload = _transport_pair_payload(
+        outputs=outputs,
+        plan=plan,
+        cost_matrix=cost_matrix,
+        query_idx=query_idx,
+        class_idx=selected_class,
+        query_image=query_np,
+        support_images=support_images,
+        way_num=way_num,
+        shot_num=shot_num,
+        prefer_positive_evidence=prefer_positive_evidence,
+    )
+    pair_scores = payload["pair_scores"]
+    matches = _top_transport_matches(
+        payload["pair_plan"],
+        match_scores=pair_scores,
+        max_matches=260 if str(transport_kind).strip().lower() in {"balanced", "balanced_ot", "full_ot", "ot"} else 140,
+        matches_per_query=6 if str(transport_kind).strip().lower() in {"balanced", "balanced_ot", "full_ot", "ot"} else 3,
+    )
+    top_match_score_fraction = float(sum(match[3] for match in matches))
+    bright_mean = 0.5 * (float(payload["query_bright_mass_ratio"]) + float(payload["support_bright_mass_ratio"]))
+    pulse_ratio = float(payload["positive_pulse_to_pulse_ratio"] or payload["pulse_to_pulse_mass_ratio"] or 0.0)
+    unmatched_fraction = float(payload["unmatched_fraction"])
+    correct = int(true_class == pred_class)
+    selection_score = (
+        6.0 * correct
+        + 1.25 * float(decision_margin)
+        + 2.0 * pulse_ratio
+        + 1.5 * bright_mean
+        + 0.75 * top_match_score_fraction
+        - 0.75 * unmatched_fraction
+    )
+    return {
+        "selection_score": float(selection_score),
+        "query_idx": query_idx,
+        "true_class": true_class,
+        "pred_class": pred_class,
+        "correct": correct,
+        "decision_margin": float(decision_margin),
+        "pulse_to_pulse_mass_ratio": float(payload["pulse_to_pulse_mass_ratio"]),
+        "positive_pulse_to_pulse_ratio": payload["positive_pulse_to_pulse_ratio"],
+        "query_bright_mass_ratio": float(payload["query_bright_mass_ratio"]),
+        "support_bright_mass_ratio": float(payload["support_bright_mass_ratio"]),
+        "top_match_score_fraction": top_match_score_fraction,
+        "unmatched_fraction": unmatched_fraction,
+    }
+
+
 def _uot_all_class_match_path(save_path: str) -> str:
     stem, ext = os.path.splitext(save_path)
     return f"{stem}_all_classes{ext or '.png'}"
@@ -1405,8 +1494,23 @@ def _export_mass_overlay_figure(
             (axes[row_idx, 0], query_image, query_heatmap),
             (axes[row_idx, 1], support_image, support_heatmap),
         ):
+            heat = _normalized_transport_image(heatmap, gamma=0.42)
+            heat_alpha = np.clip(0.08 + 0.72 * heat, 0.0, 0.78)
             ax.imshow(image, cmap="gray", vmin=0.0, vmax=1.0)
-            ax.imshow(heatmap, cmap="inferno", alpha=0.42, vmin=0.0, vmax=1.0)
+            ax.imshow(heat, cmap="turbo", alpha=heat_alpha, vmin=0.0, vmax=1.0)
+            positive = heat[heat > 1e-6]
+            if positive.size:
+                high = float(np.quantile(positive, 0.78))
+                peak = float(np.quantile(positive, 0.92))
+                levels = sorted({level for level in (high, peak) if 0.0 < level < 1.0})
+                if levels:
+                    ax.contour(
+                        heat,
+                        levels=levels,
+                        colors=["#ffffff"] * len(levels),
+                        linewidths=[0.55] * len(levels),
+                        alpha=0.72,
+                    )
             ax.set_xticks([])
             ax.set_yticks([])
             for spine in ax.spines.values():
