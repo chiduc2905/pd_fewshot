@@ -486,6 +486,13 @@ def get_args():
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
     parser.add_argument(
+        "--uot_evidence_file_format",
+        type=str,
+        default="png",
+        choices=["png", "pdf"],
+        help="Forwarded to main.py. Use pdf for publication-only UOT evidence artifacts.",
+    )
+    parser.add_argument(
         "--uot_evidence_visual_style",
         type=str,
         default="auto",
@@ -552,6 +559,8 @@ def get_args():
             str(args.uot_evidence_queries_per_episode),
             "--uot_evidence_correct_only",
             str(args.uot_evidence_correct_only),
+            "--uot_evidence_file_format",
+            str(args.uot_evidence_file_format),
         ]
     visual_style = str(getattr(args, "uot_evidence_visual_style", "auto")).lower()
     if visual_style != "auto":
@@ -2184,6 +2193,15 @@ def remove_cli_option(cmd, flag):
     return updated
 
 
+def cli_option_value(cmd, flag, default=None):
+    if flag not in cmd:
+        return default
+    idx = len(cmd) - 1 - list(reversed(cmd)).index(flag)
+    if idx + 1 >= len(cmd) or str(cmd[idx + 1]).startswith("--"):
+        return default
+    return cmd[idx + 1]
+
+
 def all_paths_exist(paths):
     return bool(paths) and all(os.path.exists(path) for path in paths)
 
@@ -2209,9 +2227,11 @@ def uot_evidence_artifacts_exist(
     test_protocol="clean",
     noise_test_root=None,
     noise_test_splits="auto",
+    file_format="png",
 ):
     samples_str = f"{samples}samples" if samples is not None else "allsamples"
     tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
+    ext = "pdf" if str(file_format).strip().lower() == "pdf" else "png"
     split_names = [None]
     if str(test_protocol).lower() == "noise":
         split_names = discover_noise_test_splits(noise_test_root, noise_test_splits)
@@ -2219,7 +2239,7 @@ def uot_evidence_artifacts_exist(
         protocol_suffix = result_protocol_suffix(test_protocol, split_name)
         pattern = (
             f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
-            f"{shot}shot{tag_suffix}{protocol_suffix}_ep*.png"
+            f"{shot}shot{tag_suffix}{protocol_suffix}_ep*.{ext}"
         )
         matches = list(Path("results").glob(pattern))
         main_matches = [
@@ -2232,9 +2252,15 @@ def uot_evidence_artifacts_exist(
         if model in OURS_FINAL_FAMILY_MODEL_NAMES:
             matrix_pattern = (
                 f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
-                f"{shot}shot{tag_suffix}{protocol_suffix}_ep*_transport_matrix.png"
+                f"{shot}shot{tag_suffix}{protocol_suffix}_ep*_transport_matrix.{ext}"
             )
             if not any(Path("results").glob(matrix_pattern)):
+                return False
+            overlay_pattern = (
+                f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
+                f"{shot}shot{tag_suffix}{protocol_suffix}_ep*_mass_overlay.{ext}"
+            )
+            if not any(Path("results").glob(overlay_pattern)):
                 return False
     return True
 
@@ -2515,6 +2541,7 @@ def run_experiment(
             test_protocol=test_protocol,
             noise_test_root=noise_test_root,
             noise_test_splits=noise_test_splits,
+            file_format=cli_option_value(cmd, "--uot_evidence_file_format", "png"),
         )
     )
     if skip_existing and primary_complete:

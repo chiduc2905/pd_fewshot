@@ -1294,6 +1294,11 @@ def _uot_transport_matrix_path(save_path: str) -> str:
     return f"{stem}_transport_matrix{ext or '.png'}"
 
 
+def _uot_mass_overlay_path(save_path: str) -> str:
+    stem, ext = os.path.splitext(save_path)
+    return f"{stem}_mass_overlay{ext or '.png'}"
+
+
 def _normalized_transport_image(values: torch.Tensor | np.ndarray, gamma: float = 0.55) -> np.ndarray:
     if torch.is_tensor(values):
         array = values.detach().float().cpu().numpy()
@@ -1376,6 +1381,40 @@ def _export_transport_matrix_figure(pair_plans: Sequence[torch.Tensor], save_pat
     for row_idx, pair_plan in enumerate(pair_plans):
         _imshow_transport_values(axes[row_idx, 0], pair_plan.detach().float().cpu().clamp_min(0.0), aspect="auto")
     fig.tight_layout(pad=0.02, h_pad=0.04)
+    fig.savefig(save_path, dpi=340, bbox_inches="tight", pad_inches=0.015)
+    plt.close(fig)
+    return save_path
+
+
+def _export_mass_overlay_figure(
+    overlay_pairs: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    save_path: str,
+) -> str:
+    if not overlay_pairs:
+        return ""
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig, axes = plt.subplots(
+        len(overlay_pairs),
+        2,
+        figsize=(4.9, max(2.25, 2.25 * len(overlay_pairs))),
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+    for row_idx, (query_image, support_image, query_heatmap, support_heatmap) in enumerate(overlay_pairs):
+        for ax, image, heatmap in (
+            (axes[row_idx, 0], query_image, query_heatmap),
+            (axes[row_idx, 1], support_image, support_heatmap),
+        ):
+            ax.imshow(image, cmap="gray", vmin=0.0, vmax=1.0)
+            ax.imshow(heatmap, cmap="inferno", alpha=0.42, vmin=0.0, vmax=1.0)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_linewidth(0.7)
+                spine.set_edgecolor("#111827")
+                spine.set_alpha(0.65)
+    fig.tight_layout(pad=0.02, w_pad=0.05, h_pad=0.05)
     fig.savefig(save_path, dpi=340, bbox_inches="tight", pad_inches=0.015)
     plt.close(fig)
     return save_path
@@ -1535,7 +1574,9 @@ def _export_uot_paper_evidence_figure(
     rows: list[dict[str, Any]] = []
     prefer_positive_evidence = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"}
     transport_matrix_path = _uot_transport_matrix_path(save_path)
+    mass_overlay_path = _uot_mass_overlay_path(save_path)
     matrix_pair_plans: list[torch.Tensor] = []
+    overlay_pairs: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
     for row_idx, query_idx_raw in enumerate(query_indices):
         query_idx = int(query_idx_raw)
@@ -1589,6 +1630,14 @@ def _export_uot_paper_evidence_figure(
             cmap="jet",
         )
         matrix_pair_plans.append(metric_payload["pair_plan"].detach().float().cpu())
+        overlay_pairs.append(
+            (
+                query_np,
+                metric_payload["support_image"],
+                metric_payload["query_heat"],
+                metric_payload["support_heat"],
+            )
+        )
 
         rows.append(
             {
@@ -1628,6 +1677,7 @@ def _export_uot_paper_evidence_figure(
                 "noise_sink_mass": metric_payload["sink_mass"],
                 "save_path": save_path,
                 "transport_matrix_path": transport_matrix_path,
+                "mass_overlay_path": mass_overlay_path,
                 "all_class_match_path": "",
             }
         )
@@ -1636,6 +1686,7 @@ def _export_uot_paper_evidence_figure(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig.savefig(save_path, dpi=320, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
+    _export_mass_overlay_figure(overlay_pairs, mass_overlay_path)
     _export_transport_matrix_figure(matrix_pair_plans, transport_matrix_path)
     return rows
 

@@ -2636,6 +2636,13 @@ def get_args():
     parser.add_argument("--uot_evidence_queries_per_episode", type=int, default=1)
     parser.add_argument("--uot_evidence_correct_only", type=str, default="true", choices=["true", "false"])
     parser.add_argument(
+        "--uot_evidence_file_format",
+        type=str,
+        default="png",
+        choices=["png", "pdf"],
+        help="File format for exported UOT evidence figures.",
+    )
+    parser.add_argument(
         "--uot_evidence_visual_style",
         type=str,
         default="auto",
@@ -6699,6 +6706,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                     samples_stem = f"{args.training_samples}samples" if args.training_samples else "allsamples"
                     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
                     protocol_suffix = get_test_protocol_suffix(args)
+                    uot_ext = ".pdf" if str(getattr(args, "uot_evidence_file_format", "png")).lower() == "pdf" else ".png"
                     uot_base_prefix = os.path.join(
                         args.path_results,
                         (
@@ -6726,7 +6734,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         uot_base = os.path.join(
                             args.path_results,
                             (
-                                f"{os.path.basename(uot_base_prefix)}{class_suffix}.png"
+                                f"{os.path.basename(uot_base_prefix)}{class_suffix}{uot_ext}"
                             ),
                         )
                         try:

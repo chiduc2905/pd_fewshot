@@ -117,7 +117,9 @@ def test_export_uot_evidence_figure_paper_style_is_compact(tmp_path):
     assert save_path.stat().st_size > 0
     assert len(rows) == 1
     assert 0 < rows[0]["top_match_count"] <= 6
+    assert (tmp_path / "uot_paper_mass_overlay.png").exists()
     assert (tmp_path / "uot_paper_transport_matrix.png").exists()
+    assert rows[0]["mass_overlay_path"].endswith("uot_paper_mass_overlay.png")
     assert rows[0]["transport_matrix_path"].endswith("uot_paper_transport_matrix.png")
     assert rows[0]["all_class_match_path"] == ""
 
@@ -152,8 +154,10 @@ def test_export_uot_evidence_figure_paper_style_full_ot_uses_mass_not_threshold(
     )
 
     assert save_path.exists()
+    assert (tmp_path / "full_ot_paper_mass_overlay.png").exists()
     assert (tmp_path / "full_ot_paper_transport_matrix.png").exists()
     assert rows[0]["evidence_map_source"] == "transport_mass"
+    assert rows[0]["mass_overlay_path"].endswith("full_ot_paper_mass_overlay.png")
     assert rows[0]["transport_matrix_path"].endswith("full_ot_paper_transport_matrix.png")
     assert rows[0]["top_match_count"] > 0
 
