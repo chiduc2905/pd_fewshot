@@ -6949,7 +6949,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         )
         for idx, figure_path in enumerate(uot_evidence_paths[: min(3, len(uot_evidence_paths))]):
             if os.path.exists(figure_path):
-                wandb.log({f"uot_evidence/example_{idx}": wandb.Image(figure_path)})
+                figure_ext = os.path.splitext(str(figure_path))[1].lower()
+                if figure_ext in {".png", ".jpg", ".jpeg"}:
+                    wandb.log({f"uot_evidence/example_{idx}": wandb.Image(figure_path)})
+                else:
+                    wandb.save(figure_path)
         print(f"Saved transport evidence summary: {uot_csv_path}")
         print(f"Saved {len(uot_evidence_paths)} transport evidence figure(s)")
 
