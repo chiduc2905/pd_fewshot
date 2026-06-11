@@ -4399,12 +4399,13 @@ def main():
     failed_experiments = []
 
     for dataset_index, dataset_spec in enumerate(dataset_specs):
-        for seed_index, train_seed in enumerate(training_seeds):
-            for experiment_index, experiment in enumerate(experiments, 1):
+        for experiment_index, experiment in enumerate(experiments, 1):
+            for seed_index, train_seed in enumerate(training_seeds):
                 idx = (
-                    dataset_index * len(training_seeds) * len(experiments)
-                    + seed_index * len(experiments)
-                    + experiment_index
+                    dataset_index * len(experiments) * len(training_seeds)
+                    + (experiment_index - 1) * len(training_seeds)
+                    + seed_index
+                    + 1
                 )
                 model = experiment["model"]
                 samples = experiment["samples"]
