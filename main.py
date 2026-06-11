@@ -2437,8 +2437,10 @@ def get_args():
     parser.add_argument("--verified_uot_kernel_size", type=int, default=3)
     parser.add_argument(
         "--enable_reciprocal_verified_uot",
-        action="store_true",
-        default=False,
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
         help=(
             "Ours-Final only: replace the visualized/scored UOT plan with a "
             "reciprocal, neighborhood-verified sub-plan."
@@ -2459,8 +2461,10 @@ def get_args():
     )
     parser.add_argument(
         "--enable_global_residual_score",
-        action="store_true",
-        default=False,
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
         help="Ours-Final only: add a small global prototype cosine residual to the local UOT logits.",
     )
     parser.add_argument(
