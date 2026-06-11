@@ -421,6 +421,9 @@ class OursM2(JECOTM2):
         rvuot_kernel_size = int(kwargs.pop("rvuot_kernel_size", 3))
         rvuot_cost_quantile = float(kwargs.pop("rvuot_cost_quantile", 0.35))
         rvuot_min_gate = float(kwargs.pop("rvuot_min_gate", 0.05))
+        rvuot_enable_rival_gate = _bool_config(kwargs.pop("rvuot_enable_rival_gate", True))
+        rvuot_rival_tau = float(kwargs.pop("rvuot_rival_tau", 0.10))
+        rvuot_rival_margin = float(kwargs.pop("rvuot_rival_margin", 0.0))
         rvuot_detach_gate = _bool_config(kwargs.pop("rvuot_detach_gate", True))
         enable_global_residual_score = _bool_config(kwargs.pop("enable_global_residual_score", False))
         global_residual_mode = _normalize_global_residual_score_mode(
@@ -619,6 +622,9 @@ class OursM2(JECOTM2):
         self.rvuot_kernel_size = int(rvuot_kernel_size)
         self.rvuot_cost_quantile = float(rvuot_cost_quantile)
         self.rvuot_min_gate = float(rvuot_min_gate)
+        self.rvuot_enable_rival_gate = bool(rvuot_enable_rival_gate)
+        self.rvuot_rival_tau = float(rvuot_rival_tau)
+        self.rvuot_rival_margin = float(rvuot_rival_margin)
         self.rvuot_detach_gate = bool(rvuot_detach_gate)
         self.enable_global_residual_score = bool(enable_global_residual_score)
         self.global_residual_mode = str(global_residual_mode)
@@ -642,6 +648,7 @@ class OursM2(JECOTM2):
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
             ("verified_uot_ratio_threshold", self.verified_uot_ratio_threshold),
             ("rvuot_ratio_threshold", self.rvuot_ratio_threshold),
+            ("rvuot_rival_margin", self.rvuot_rival_margin),
             ("global_residual_weight", self.global_residual_weight),
         ):
             if value < 0.0:
@@ -660,6 +667,9 @@ class OursM2(JECOTM2):
                 kernel_size=self.rvuot_kernel_size,
                 cost_quantile=self.rvuot_cost_quantile,
                 min_gate=self.rvuot_min_gate,
+                enable_rival_gate=self.rvuot_enable_rival_gate,
+                rival_tau=self.rvuot_rival_tau,
+                rival_margin=self.rvuot_rival_margin,
                 detach_gate=self.rvuot_detach_gate,
                 eps=self.eps,
             )

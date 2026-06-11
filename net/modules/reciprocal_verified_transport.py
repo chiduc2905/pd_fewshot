@@ -2,7 +2,9 @@
 
 The verifier is parameter-free and episode-local.  It keeps transported mass
 only when a pair is low-cost from both query-to-support and support-to-query
-views, and when neighboring token pairs support the same correspondence.
+views, when neighboring token pairs support the same correspondence, and when
+the query token provides more evidence for the candidate class than for rival
+classes in the same few-shot episode.
 """
 
 from __future__ import annotations
@@ -53,6 +55,9 @@ class ReciprocalVerifiedTransport(nn.Module):
         kernel_size: int = 3,
         cost_quantile: float = 0.35,
         min_gate: float = 0.05,
+        enable_rival_gate: bool = True,
+        rival_tau: float = 0.10,
+        rival_margin: float = 0.0,
         detach_gate: bool = True,
         eps: float = 1e-8,
     ) -> None:
@@ -63,6 +68,9 @@ class ReciprocalVerifiedTransport(nn.Module):
         self.kernel_size = int(kernel_size)
         self.cost_quantile = float(cost_quantile)
         self.min_gate = float(min_gate)
+        self.enable_rival_gate = bool(enable_rival_gate)
+        self.rival_tau = float(rival_tau)
+        self.rival_margin = float(rival_margin)
         self.detach_gate = bool(detach_gate)
         self.eps = float(eps)
 
@@ -78,6 +86,10 @@ class ReciprocalVerifiedTransport(nn.Module):
             raise ValueError("rvuot_cost_quantile must be in (0, 1)")
         if not 0.0 <= self.min_gate <= 1.0:
             raise ValueError("rvuot_min_gate must be in [0, 1]")
+        if self.rival_tau <= 0.0:
+            raise ValueError("rvuot_rival_tau must be positive")
+        if self.rival_margin < 0.0:
+            raise ValueError("rvuot_rival_margin must be non-negative")
         if self.eps <= 0.0:
             raise ValueError("rvuot eps must be positive")
 
@@ -125,6 +137,48 @@ class ReciprocalVerifiedTransport(nn.Module):
         gate = absolute_gate.pow(2) * ratio_gate
         return gate, support_ratio
 
+    def _rival_gate(self, cost: torch.Tensor, plan: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.enable_rival_gate or cost.shape[1] <= 1:
+            gate = torch.ones_like(cost)
+            return gate, gate, gate
+
+        reference_cost = cost.detach() if self.detach_gate else cost
+        reference_plan = plan.detach() if self.detach_gate else plan
+        num_query, way_num, shot_num, query_len, support_len = reference_cost.shape
+
+        class_best_cost = reference_cost.amin(dim=2).amin(dim=-1)
+        rival_best_cost = []
+        for class_idx in range(way_num):
+            rivals = torch.cat(
+                [class_best_cost[:, :class_idx], class_best_cost[:, class_idx + 1 :]],
+                dim=1,
+            )
+            rival_best_cost.append(rivals.amin(dim=1))
+        rival_best_cost = torch.stack(rival_best_cost, dim=1)
+
+        scale = reference_cost.std(dim=(-1, -2), keepdim=True, unbiased=False).clamp_min(self.eps)
+        cost_margin = rival_best_cost[:, :, None, :, None] - reference_cost
+        cost_gate = torch.sigmoid(
+            (cost_margin - float(self.rival_margin)) / (self.rival_tau * scale).clamp_min(self.eps)
+        )
+
+        class_row_mass = reference_plan.clamp_min(0.0).sum(dim=-1).sum(dim=2)
+        rival_row_mass = []
+        for class_idx in range(way_num):
+            rivals = torch.cat(
+                [class_row_mass[:, :class_idx], class_row_mass[:, class_idx + 1 :]],
+                dim=1,
+            )
+            rival_row_mass.append(rivals.amax(dim=1))
+        rival_row_mass = torch.stack(rival_row_mass, dim=1)
+        mass_scale = class_row_mass.amax(dim=1, keepdim=True).clamp_min(self.eps)
+        mass_margin = (class_row_mass - rival_row_mass) / mass_scale
+        mass_gate = torch.sigmoid((mass_margin - float(self.rival_margin)) / self.rival_tau)
+        mass_gate = mass_gate[:, :, None, :, None].expand(num_query, way_num, shot_num, query_len, support_len)
+
+        gate = torch.sqrt((cost_gate * mass_gate).clamp_min(0.0))
+        return gate, cost_gate, mass_gate
+
     def forward(
         self,
         *,
@@ -159,6 +213,8 @@ class ReciprocalVerifiedTransport(nn.Module):
         soft_gate = affinity * coherence_gate
         soft_gate = soft_gate / soft_gate.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
         soft_gate = self.min_gate + (1.0 - self.min_gate) * soft_gate
+        rival_gate, rival_cost_gate, rival_mass_gate = self._rival_gate(cost, plan)
+        soft_gate = soft_gate * rival_gate.to(device=soft_gate.device, dtype=soft_gate.dtype)
         verifier = (1.0 - self.beta) + self.beta * soft_gate
         verified_plan = plan * verifier.to(device=plan.device, dtype=plan.dtype)
 
@@ -174,11 +230,17 @@ class ReciprocalVerifiedTransport(nn.Module):
             "rvuot/kernel_size": plan.new_tensor(float(self.kernel_size)),
             "rvuot/cost_quantile": plan.new_tensor(self.cost_quantile),
             "rvuot/min_gate": plan.new_tensor(self.min_gate),
+            "rvuot/rival_gate_enabled": plan.new_tensor(float(self.enable_rival_gate)),
+            "rvuot/rival_tau": plan.new_tensor(self.rival_tau),
+            "rvuot/rival_margin": plan.new_tensor(self.rival_margin),
             "rvuot/gate_mean": verifier.detach().mean(),
             "rvuot/gate_min": verifier.detach().amin(),
             "rvuot/gate_max": verifier.detach().amax(),
             "rvuot/low_cost_gate_mean": low_cost_gate.detach().mean(),
             "rvuot/coherence_gate_mean": coherence_gate.detach().mean(),
+            "rvuot/rival_gate_mean": rival_gate.detach().mean(),
+            "rvuot/rival_cost_gate_mean": rival_cost_gate.detach().mean(),
+            "rvuot/rival_mass_gate_mean": rival_mass_gate.detach().mean(),
             "rvuot/support_ratio_mean": support_ratio.detach().mean(),
             "rvuot/retained_mass_ratio": retained_ratio.detach().mean(),
             "rvuot/removed_mass_mean": removed_mass.detach().mean(),

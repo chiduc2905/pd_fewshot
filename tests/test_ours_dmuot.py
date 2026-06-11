@@ -247,6 +247,7 @@ def test_reciprocal_verified_uot_runs_with_global_residual_and_replaces_plan():
     assert outputs["transport_plan"].shape == outputs["rvuot_unverified_transport_plan"].shape
     assert outputs["transport_plan"].sum() <= outputs["rvuot_unverified_transport_plan"].sum() + 1e-6
     assert outputs["rvuot/enabled"].item() == pytest.approx(1.0)
+    assert outputs["rvuot/rival_gate_enabled"].item() == pytest.approx(1.0)
     assert 0.0 <= outputs["rvuot/retained_mass_ratio"].item() <= 1.0
     assert "local_scores" in outputs
     assert "global_scores" in outputs
@@ -605,6 +606,9 @@ def test_reciprocal_verified_uot_factory_flags_are_ours_final_only():
         rvuot_kernel_size=3,
         rvuot_cost_quantile=0.30,
         rvuot_min_gate=0.04,
+        rvuot_enable_rival_gate="true",
+        rvuot_rival_tau=0.11,
+        rvuot_rival_margin=0.02,
         rvuot_detach_gate="true",
     )
     ours_final = build_model_from_args(
@@ -620,6 +624,9 @@ def test_reciprocal_verified_uot_factory_flags_are_ours_final_only():
     assert ours_final.rvuot_tau == pytest.approx(0.12)
     assert ours_final.rvuot_ratio_threshold == pytest.approx(0.22)
     assert ours_final.rvuot_cost_quantile == pytest.approx(0.30)
+    assert ours_final.rvuot_enable_rival_gate
+    assert ours_final.rvuot_rival_tau == pytest.approx(0.11)
+    assert ours_final.rvuot_rival_margin == pytest.approx(0.02)
 
     with pytest.raises(ValueError, match="--enable_reciprocal_verified_uot is supported only with --model ours_final"):
         build_model_from_args(

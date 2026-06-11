@@ -548,7 +548,6 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_ccem_tau_s: float = 0.25,
         ecot_transport_mode: str | None = None,
         ecot_enable_noise_sink: bool = False,
-        ecot_noise_sink_cost_mode: str = "fixed",
         ecot_noise_sink_cost_init: float = 1.0,
         ecot_noise_sink_score_penalty: float = 0.0,
         ecot_episode_feature_normalize: bool = False,
@@ -752,16 +751,7 @@ class HROTFSL(BaseConv64FewShotModel):
         if float(ecot_ccem_tau_q) <= 0.0 or float(ecot_ccem_tau_s) <= 0.0:
             raise ValueError("ecot_ccem_tau_q and ecot_ccem_tau_s must be positive")
         ecot_transport_mode = _normalize_ecot_transport_mode(ecot_transport_mode)
-        ecot_noise_sink_cost_mode = str(ecot_noise_sink_cost_mode).strip().lower().replace("-", "_")
-        if ecot_noise_sink_cost_mode not in {"fixed", "threshold"}:
-            raise ValueError("ecot_noise_sink_cost_mode must be 'fixed' or 'threshold'")
-        if ecot_noise_sink_cost_mode == "threshold" and variant != "J_ECOT_M2":
-            raise ValueError("ecot_noise_sink_cost_mode='threshold' is supported only for J_ECOT_M2")
-        if (
-            bool(ecot_enable_noise_sink)
-            and ecot_noise_sink_cost_mode == "fixed"
-            and float(ecot_noise_sink_cost_init) <= 0.0
-        ):
+        if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
             raise ValueError("ecot_noise_sink_cost_init must be positive")
         if float(ecot_noise_sink_score_penalty) < 0.0:
             raise ValueError("ecot_noise_sink_score_penalty must be non-negative")
@@ -1076,7 +1066,6 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_ccem_tau_q = float(ecot_ccem_tau_q)
         self.ecot_ccem_tau_s = float(ecot_ccem_tau_s)
         self.ecot_transport_mode = ecot_transport_mode
-        self.ecot_noise_sink_cost_mode = ecot_noise_sink_cost_mode
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
         self.ecot_episode_feature_normalize = bool(ecot_episode_feature_normalize)
@@ -1367,11 +1356,7 @@ class HROTFSL(BaseConv64FewShotModel):
             self.raw_structure_cost_weight = None
             self.q_shot_pool_scorer = None
             self.q_threshold_scorer = None
-        if (
-            self.uses_ecot_noise_sink
-            and self.ecot_noise_sink_cost_mode == "fixed"
-            and self.raw_noise_sink_cost is None
-        ):
+        if self.uses_ecot_noise_sink and self.raw_noise_sink_cost is None:
             self.raw_noise_sink_cost = nn.Parameter(
                 torch.tensor(_inverse_softplus(self.ecot_noise_sink_cost_init), dtype=torch.float32)
             )
@@ -1543,11 +1528,6 @@ class HROTFSL(BaseConv64FewShotModel):
 
     @property
     def noise_sink_cost(self) -> torch.Tensor:
-        if (
-            getattr(self, "uses_ecot_noise_sink", False)
-            and getattr(self, "ecot_noise_sink_cost_mode", "fixed") == "threshold"
-        ):
-            return self.transport_cost_threshold.detach().clamp_min(self.eps)
         if self.raw_noise_sink_cost is None:
             return self.curvature.new_tensor(1.0)
         return F.softplus(self.raw_noise_sink_cost).clamp_min(self.eps)

@@ -10,11 +10,13 @@ change the coupling that `mass overlay` and `matching` figures draw.
 ## Proposed Change
 
 RV-UOT keeps the original Ours-Final UOT solver, then projects its plan onto a
-reciprocal, locally coherent sub-plan:
+reciprocal, locally coherent, episode-contrastive sub-plan:
 
 ```text
 P = UOT(C, a, b)
-V_ij = reciprocal_low_cost(C_ij) * neighborhood_coherence(C_ij)
+V_ij = reciprocal_low_cost(C_ij)
+     * neighborhood_coherence(C_ij)
+     * rival_contrast(C_ij, P)
 P_verified = P * [(1 - beta) + beta * V]
 score = score_scale * (T * mass(P_verified) - cost(P_verified))
 ```
@@ -28,28 +30,35 @@ Plain UOT answers whether a pair can move mass cheaply.  A single accidental
 low-cost token pair can therefore attract visible mass even when it is not part
 of the shared discharge pattern.
 
-RV-UOT adds two necessary conditions for evidence:
+RV-UOT adds three necessary conditions for evidence:
 
 1. Reciprocal distinctiveness: a match must be low-cost from both row-wise
    query-to-support and column-wise support-to-query views.
 2. Local structural support: neighboring query tokens and neighboring support
    tokens must also support the same correspondence.
+3. Episode-contrastive specificity: a query token must support the candidate
+   class more than rival classes in the same episode.  Common-mode texture or
+   noise that matches several classes is down-weighted even if it is low-cost.
 
 This turns the evidence object from an isolated low-cost edge into a locally
-verified transport subgraph.
+verified and class-specific transport subgraph.
 
 ## Novelty Claim
 
 The change is not another saliency prior and not a learned attention mask.  It is
-a post-Sinkhorn verification operator over the transport graph itself.  It
-aligns the scoring object with the visualization object: the model scores and
-plots the same verified plan.
+a post-Sinkhorn verification operator over the episode transport graph itself.
+The new contrast term is specific to few-shot classification: support labels
+define the rival classes inside the episode, so the verifier can reject
+class-common transport mass without external foreground labels or dataset-level
+noise assumptions.  It aligns the scoring object with the visualization object:
+the model scores and plots the same verified plan.
 
 ## Anti-Bias Argument
 
 RV-UOT does not use absolute time indices, fixed time windows, brightness
 thresholds, connected components, or PD-specific coordinates.  All gates are
-episode-relative functions of the cost matrix and local token-grid adjacency.
+episode-relative functions of the cost matrix, local token-grid adjacency, and
+one-vs-rival evidence inside the current support set.
 
 If PD scalograms in one dataset concentrate at a certain time, RV-UOT can still
 use that area when it is reciprocally and locally supported, but the method does
@@ -79,5 +88,8 @@ rvuot/retained_mass_ratio
 rvuot/removed_mass_mean
 rvuot/gate_mean
 rvuot/coherence_gate_mean
+rvuot/rival_gate_mean
+rvuot/rival_cost_gate_mean
+rvuot/rival_mass_gate_mean
 rvuot/shot_logit_delta_abs
 ```

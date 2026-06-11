@@ -481,7 +481,6 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         frozenset(
             {
                 "hrot_ecot_enable_noise_sink",
-                "hrot_ecot_noise_sink_cost_mode",
                 "hrot_ecot_noise_sink_cost_init",
                 "hrot_ecot_noise_sink_score_penalty",
             }
@@ -523,6 +522,9 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "rvuot_kernel_size",
                 "rvuot_cost_quantile",
                 "rvuot_min_gate",
+                "rvuot_enable_rival_gate",
+                "rvuot_rival_tau",
+                "rvuot_rival_margin",
                 "rvuot_detach_gate",
             }
         ),
@@ -2453,6 +2455,9 @@ def get_args():
     parser.add_argument("--rvuot_kernel_size", type=int, default=3)
     parser.add_argument("--rvuot_cost_quantile", type=float, default=0.35)
     parser.add_argument("--rvuot_min_gate", type=float, default=0.05)
+    parser.add_argument("--rvuot_enable_rival_gate", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--rvuot_rival_tau", type=float, default=0.10)
+    parser.add_argument("--rvuot_rival_margin", type=float, default=0.0)
     parser.add_argument(
         "--rvuot_detach_gate",
         type=str,
@@ -2767,16 +2772,6 @@ def get_args():
         type=str,
         default="false",
         choices=["true", "false"],
-    )
-    parser.add_argument(
-        "--hrot_ecot_noise_sink_cost_mode",
-        type=str,
-        default="fixed",
-        choices=["fixed", "threshold"],
-        help=(
-            "fixed uses --hrot_ecot_noise_sink_cost_init; threshold ties the null/sink "
-            "cost to the J_ECOT_M2 evidence threshold."
-        ),
     )
     parser.add_argument("--hrot_ecot_noise_sink_cost_init", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_noise_sink_score_penalty", type=float, default=0.0)
@@ -4704,7 +4699,6 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_ccem_tau_q",
             "hrot_ecot_ccem_tau_s",
             "hrot_ecot_enable_noise_sink",
-            "hrot_ecot_noise_sink_cost_mode",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
             "hrot_ecot_episode_feature_normalize",
@@ -4811,6 +4805,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "rvuot_kernel_size",
             "rvuot_cost_quantile",
             "rvuot_min_gate",
+            "rvuot_enable_rival_gate",
+            "rvuot_rival_tau",
+            "rvuot_rival_margin",
             "rvuot_detach_gate",
             "enable_global_residual_score",
             "global_residual_mode",
@@ -6048,11 +6045,17 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "rvuot/kernel_size",
         "rvuot/cost_quantile",
         "rvuot/min_gate",
+        "rvuot/rival_gate_enabled",
+        "rvuot/rival_tau",
+        "rvuot/rival_margin",
         "rvuot/gate_mean",
         "rvuot/gate_min",
         "rvuot/gate_max",
         "rvuot/low_cost_gate_mean",
         "rvuot/coherence_gate_mean",
+        "rvuot/rival_gate_mean",
+        "rvuot/rival_cost_gate_mean",
+        "rvuot/rival_mass_gate_mean",
         "rvuot/support_ratio_mean",
         "rvuot/retained_mass_ratio",
         "rvuot/removed_mass_mean",
@@ -6431,6 +6434,9 @@ def format_diagnostic_summary(metrics):
         "rvuot/enabled",
         "rvuot/gate_mean",
         "rvuot/coherence_gate_mean",
+        "rvuot/rival_gate_mean",
+        "rvuot/rival_cost_gate_mean",
+        "rvuot/rival_mass_gate_mean",
         "rvuot/support_ratio_mean",
         "rvuot/retained_mass_ratio",
         "rvuot/removed_mass_mean",

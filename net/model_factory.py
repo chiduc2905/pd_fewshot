@@ -2880,6 +2880,12 @@ def build_model_from_args(args):
                             "rvuot_kernel_size": int(getattr(args, "rvuot_kernel_size", 3)),
                             "rvuot_cost_quantile": float(getattr(args, "rvuot_cost_quantile", 0.35)),
                             "rvuot_min_gate": float(getattr(args, "rvuot_min_gate", 0.05)),
+                            "rvuot_enable_rival_gate": _bool_flag(
+                                getattr(args, "rvuot_enable_rival_gate", "true"),
+                                default=True,
+                            ),
+                            "rvuot_rival_tau": float(getattr(args, "rvuot_rival_tau", 0.10)),
+                            "rvuot_rival_margin": float(getattr(args, "rvuot_rival_margin", 0.0)),
                             "rvuot_detach_gate": _bool_flag(
                                 getattr(args, "rvuot_detach_gate", True),
                                 default=True,
@@ -3385,7 +3391,6 @@ def build_model_from_args(args):
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
                 default=False,
             ),
-            ecot_noise_sink_cost_mode=str(getattr(args, "hrot_ecot_noise_sink_cost_mode", "fixed")),
             ecot_noise_sink_cost_init=float(getattr(args, "hrot_ecot_noise_sink_cost_init", 1.0)),
             ecot_noise_sink_score_penalty=float(getattr(args, "hrot_ecot_noise_sink_score_penalty", 0.0)),
             ecot_episode_feature_normalize=_bool_flag(

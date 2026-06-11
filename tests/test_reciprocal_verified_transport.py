@@ -72,3 +72,37 @@ def test_reciprocal_verified_transport_is_not_tied_to_absolute_time_position():
     verified_b, _ = verifier(cost=cost_b, plan=plan_b, spatial_hw=(5, 5))
 
     assert torch.allclose(verified_a.sum(), verified_b.sum(), atol=1e-6, rtol=1e-6)
+
+
+def test_reciprocal_verified_transport_suppresses_common_mode_noise_match():
+    verifier = ReciprocalVerifiedTransport(
+        beta=1.0,
+        tau=0.10,
+        ratio_threshold=0.0,
+        kernel_size=1,
+        cost_quantile=0.60,
+        min_gate=0.0,
+        enable_rival_gate=True,
+        rival_tau=0.10,
+    )
+    cost = torch.ones(1, 2, 1, 4, 4)
+    plan = torch.zeros_like(cost)
+
+    # Query token 0 is common-mode noise: it has an equally good match in both classes.
+    cost[:, 0, 0, 0, 0] = 0.01
+    cost[:, 1, 0, 0, 0] = 0.01
+    plan[:, 0, 0, 0, 0] = 0.20
+    plan[:, 1, 0, 0, 0] = 0.20
+
+    # Query token 1 is class-specific evidence for class 0.
+    cost[:, 0, 0, 1, 1] = 0.01
+    cost[:, 1, 0, 1, 1] = 0.80
+    plan[:, 0, 0, 1, 1] = 0.20
+
+    verified, diagnostics = verifier(cost=cost, plan=plan, spatial_hw=(2, 2))
+
+    common_noise = verified[:, 0, 0, 0].sum()
+    class_specific = verified[:, 0, 0, 1].sum()
+    assert class_specific > common_noise * 1.5
+    assert diagnostics["rvuot/rival_gate_enabled"].item() == 1.0
+    assert diagnostics["rvuot/rival_gate_mean"].item() < 1.0
