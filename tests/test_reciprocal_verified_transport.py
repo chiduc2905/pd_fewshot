@@ -83,6 +83,7 @@ def test_reciprocal_verified_transport_suppresses_common_mode_noise_match():
         cost_quantile=0.60,
         min_gate=0.0,
         enable_rival_gate=True,
+        rival_score_mix=1.0,
         rival_tau=0.10,
     )
     cost = torch.ones(1, 2, 1, 4, 4)
@@ -106,3 +107,40 @@ def test_reciprocal_verified_transport_suppresses_common_mode_noise_match():
     assert class_specific > common_noise * 1.5
     assert diagnostics["rvuot/rival_gate_enabled"].item() == 1.0
     assert diagnostics["rvuot/rival_gate_mean"].item() < 1.0
+
+
+def test_reciprocal_verified_transport_keeps_score_path_stable_for_evidence_only_rival_gate():
+    common_kwargs = dict(
+        beta=1.0,
+        tau=0.10,
+        ratio_threshold=0.0,
+        kernel_size=1,
+        cost_quantile=0.60,
+        min_gate=0.0,
+        rival_tau=0.10,
+    )
+    score_verifier = ReciprocalVerifiedTransport(enable_rival_gate=False, **common_kwargs)
+    evidence_verifier = ReciprocalVerifiedTransport(enable_rival_gate=True, **common_kwargs)
+    cost = torch.ones(1, 2, 1, 4, 4)
+    plan = torch.zeros_like(cost)
+
+    cost[:, 0, 0, 0, 0] = 0.01
+    cost[:, 1, 0, 0, 0] = 0.01
+    plan[:, 0, 0, 0, 0] = 0.20
+    plan[:, 1, 0, 0, 0] = 0.20
+
+    cost[:, 0, 0, 1, 1] = 0.01
+    cost[:, 1, 0, 1, 1] = 0.80
+    plan[:, 0, 0, 1, 1] = 0.20
+
+    score_plan, _ = score_verifier(cost=cost, plan=plan, spatial_hw=(2, 2))
+    evidence_score_plan, diagnostics = evidence_verifier(cost=cost, plan=plan, spatial_hw=(2, 2))
+
+    assert torch.allclose(evidence_score_plan, score_plan, atol=1e-6, rtol=1e-6)
+    assert diagnostics["rvuot/rival_score_mix"].item() == 0.0
+
+    evidence_plan = diagnostics["rvuot_evidence_transport_plan"]
+    common_noise = evidence_plan[:, 0, 0, 0].sum()
+    class_specific = evidence_plan[:, 0, 0, 1].sum()
+    assert class_specific > common_noise * 1.5
+    assert diagnostics["rvuot/evidence_retained_mass_ratio"].item() <= diagnostics["rvuot/retained_mass_ratio"].item()

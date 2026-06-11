@@ -2884,6 +2884,7 @@ def build_model_from_args(args):
                                 getattr(args, "rvuot_enable_rival_gate", "true"),
                                 default=True,
                             ),
+                            "rvuot_rival_score_mix": float(getattr(args, "rvuot_rival_score_mix", 0.0)),
                             "rvuot_rival_tau": float(getattr(args, "rvuot_rival_tau", 0.10)),
                             "rvuot_rival_margin": float(getattr(args, "rvuot_rival_margin", 0.0)),
                             "rvuot_detach_gate": _bool_flag(

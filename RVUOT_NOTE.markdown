@@ -9,20 +9,38 @@ change the coupling that `mass overlay` and `matching` figures draw.
 
 ## Proposed Change
 
-RV-UOT keeps the original Ours-Final UOT solver, then projects its plan onto a
-reciprocal, locally coherent, episode-contrastive sub-plan:
+RV-UOT keeps the original Ours-Final UOT solver, then builds two episode-local
+sub-plans from the same cost matrix and transport plan:
+
+1. A stable scoring plan, verified by reciprocal low-cost and local coherence.
+2. A stricter evidence certificate, additionally filtered by one-vs-rival
+   episode contrast.
 
 ```text
 P = UOT(C, a, b)
-V_ij = reciprocal_low_cost(C_ij)
+S_ij = reciprocal_low_cost(C_ij)
      * neighborhood_coherence(C_ij)
-     * rival_contrast(C_ij, P)
-P_verified = P * [(1 - beta) + beta * V]
-score = score_scale * (T * mass(P_verified) - cost(P_verified))
+R_ij = rival_contrast(C_ij, P)
+
+P_score = P * [(1 - beta) + beta * S]
+P_evidence = P * S * R
+score = score_scale * (T * mass(P_score) - cost(P_score))
 ```
 
-The final `transport_plan` exposed to visualization is `P_verified`; the
-original plan is stored as `rvuot_unverified_transport_plan`.
+By default, `rvuot_rival_score_mix=0.0`, so the rival contrast does not perturb
+the prediction score.  It only defines `rvuot_evidence_transport_plan`, which is
+the plan used by the paper-style mass overlay and transport matrix.  If desired,
+`rvuot_rival_score_mix>0` can be used as an ablation to mix contrastive evidence
+back into the scoring plan.
+
+The final `transport_plan` remains the stable scoring plan; the original plan is
+stored as `rvuot_unverified_transport_plan`, and the stricter visualization plan
+is stored as `rvuot_evidence_transport_plan`.
+
+The interpolation floor `(1 - beta)` is intentionally kept out of
+`P_evidence`.  The floor is useful for stable logits, but it is not valid visual
+evidence because a large noisy transport mass would remain visible even after
+being rejected by the verifier.
 
 ## Theory
 
@@ -40,18 +58,25 @@ RV-UOT adds three necessary conditions for evidence:
    class more than rival classes in the same episode.  Common-mode texture or
    noise that matches several classes is down-weighted even if it is low-cost.
 
-This turns the evidence object from an isolated low-cost edge into a locally
-verified and class-specific transport subgraph.
+This turns the visual evidence object from an isolated low-cost edge into a
+locally verified and class-specific transport subgraph, while keeping the
+classifier on the less brittle structural RV-UOT measure unless explicitly
+ablated.
 
 ## Novelty Claim
 
 The change is not another saliency prior and not a learned attention mask.  It is
 a post-Sinkhorn verification operator over the episode transport graph itself.
-The new contrast term is specific to few-shot classification: support labels
-define the rival classes inside the episode, so the verifier can reject
-class-common transport mass without external foreground labels or dataset-level
-noise assumptions.  It aligns the scoring object with the visualization object:
-the model scores and plots the same verified plan.
+The contrast term is specific to few-shot classification: support labels define
+the rival classes inside the episode, so the verifier can reject class-common
+transport mass without external foreground labels or dataset-level noise
+assumptions.
+
+The novelty is the separation between a decision measure and an evidence
+certificate derived from the same transport graph.  The decision measure stays
+stable for few-shot accuracy; the certificate is stricter and asks whether a
+transported region is not only cheap and locally coherent, but also specific to
+the predicted/true class against episode rivals.
 
 ## Anti-Bias Argument
 
@@ -86,9 +111,13 @@ Useful diagnostics:
 ```text
 rvuot/retained_mass_ratio
 rvuot/removed_mass_mean
+rvuot/evidence_retained_mass_ratio
+rvuot/evidence_removed_mass_mean
 rvuot/gate_mean
+rvuot/evidence_gate_mean
 rvuot/coherence_gate_mean
 rvuot/rival_gate_mean
+rvuot/rival_score_mix
 rvuot/rival_cost_gate_mean
 rvuot/rival_mass_gate_mean
 rvuot/shot_logit_delta_abs

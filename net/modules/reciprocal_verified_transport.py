@@ -1,10 +1,10 @@
 """Reciprocal structural verification for UOT transport plans.
 
-The verifier is parameter-free and episode-local.  It keeps transported mass
-only when a pair is low-cost from both query-to-support and support-to-query
-views, when neighboring token pairs support the same correspondence, and when
-the query token provides more evidence for the candidate class than for rival
-classes in the same few-shot episode.
+The verifier is parameter-free and episode-local.  It builds a stable scoring
+sub-plan from reciprocal low-cost pairs with local neighborhood support.  It
+can also expose a stricter contrastive evidence sub-plan that keeps mass only
+when a query token provides more evidence for the candidate class than for
+rival classes in the same few-shot episode.
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ class ReciprocalVerifiedTransport(nn.Module):
         cost_quantile: float = 0.35,
         min_gate: float = 0.05,
         enable_rival_gate: bool = True,
+        rival_score_mix: float = 0.0,
         rival_tau: float = 0.10,
         rival_margin: float = 0.0,
         detach_gate: bool = True,
@@ -69,6 +70,7 @@ class ReciprocalVerifiedTransport(nn.Module):
         self.cost_quantile = float(cost_quantile)
         self.min_gate = float(min_gate)
         self.enable_rival_gate = bool(enable_rival_gate)
+        self.rival_score_mix = float(rival_score_mix)
         self.rival_tau = float(rival_tau)
         self.rival_margin = float(rival_margin)
         self.detach_gate = bool(detach_gate)
@@ -86,6 +88,8 @@ class ReciprocalVerifiedTransport(nn.Module):
             raise ValueError("rvuot_cost_quantile must be in (0, 1)")
         if not 0.0 <= self.min_gate <= 1.0:
             raise ValueError("rvuot_min_gate must be in [0, 1]")
+        if not 0.0 <= self.rival_score_mix <= 1.0:
+            raise ValueError("rvuot_rival_score_mix must be in [0, 1]")
         if self.rival_tau <= 0.0:
             raise ValueError("rvuot_rival_tau must be positive")
         if self.rival_margin < 0.0:
@@ -210,18 +214,25 @@ class ReciprocalVerifiedTransport(nn.Module):
             query_hw=query_hw,
             support_hw=support_hw,
         )
-        soft_gate = affinity * coherence_gate
-        soft_gate = soft_gate / soft_gate.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
-        soft_gate = self.min_gate + (1.0 - self.min_gate) * soft_gate
+        structural_gate = affinity * coherence_gate
+        structural_gate = structural_gate / structural_gate.amax(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
+        structural_gate = self.min_gate + (1.0 - self.min_gate) * structural_gate
         rival_gate, rival_cost_gate, rival_mass_gate = self._rival_gate(cost, plan)
-        soft_gate = soft_gate * rival_gate.to(device=soft_gate.device, dtype=soft_gate.dtype)
-        verifier = (1.0 - self.beta) + self.beta * soft_gate
+
+        contrastive_gate = structural_gate * rival_gate.to(device=structural_gate.device, dtype=structural_gate.dtype)
+        score_gate = structural_gate + float(self.rival_score_mix) * (contrastive_gate - structural_gate)
+        verifier = (1.0 - self.beta) + self.beta * score_gate
         verified_plan = plan * verifier.to(device=plan.device, dtype=plan.dtype)
+        evidence_verifier = contrastive_gate
+        evidence_plan = plan * evidence_verifier.to(device=plan.device, dtype=plan.dtype)
 
         original_mass = plan.sum(dim=(-1, -2))
         verified_mass = verified_plan.sum(dim=(-1, -2))
         retained_ratio = verified_mass / original_mass.clamp_min(self.eps)
         removed_mass = (plan - verified_plan).clamp_min(0.0).sum(dim=(-1, -2))
+        evidence_mass = evidence_plan.sum(dim=(-1, -2))
+        evidence_retained_ratio = evidence_mass / original_mass.clamp_min(self.eps)
+        evidence_removed_mass = (plan - evidence_plan).clamp_min(0.0).sum(dim=(-1, -2))
         diagnostics = {
             "rvuot/enabled": plan.new_tensor(1.0),
             "rvuot/beta": plan.new_tensor(self.beta),
@@ -231,6 +242,7 @@ class ReciprocalVerifiedTransport(nn.Module):
             "rvuot/cost_quantile": plan.new_tensor(self.cost_quantile),
             "rvuot/min_gate": plan.new_tensor(self.min_gate),
             "rvuot/rival_gate_enabled": plan.new_tensor(float(self.enable_rival_gate)),
+            "rvuot/rival_score_mix": plan.new_tensor(self.rival_score_mix),
             "rvuot/rival_tau": plan.new_tensor(self.rival_tau),
             "rvuot/rival_margin": plan.new_tensor(self.rival_margin),
             "rvuot/gate_mean": verifier.detach().mean(),
@@ -244,9 +256,15 @@ class ReciprocalVerifiedTransport(nn.Module):
             "rvuot/support_ratio_mean": support_ratio.detach().mean(),
             "rvuot/retained_mass_ratio": retained_ratio.detach().mean(),
             "rvuot/removed_mass_mean": removed_mass.detach().mean(),
+            "rvuot/evidence_gate_mean": evidence_verifier.detach().mean(),
+            "rvuot/evidence_retained_mass_ratio": evidence_retained_ratio.detach().mean(),
+            "rvuot/evidence_removed_mass_mean": evidence_removed_mass.detach().mean(),
             "rvuot/original_mass_mean": original_mass.detach().mean(),
             "rvuot/verified_mass_mean": verified_mass.detach().mean(),
+            "rvuot/evidence_mass_mean": evidence_mass.detach().mean(),
             "rvuot_verifier_gate": verifier.detach(),
+            "rvuot_evidence_verifier_gate": evidence_verifier.detach(),
+            "rvuot_evidence_transport_plan": evidence_plan.detach(),
             "rvuot_reciprocal_affinity": affinity.detach(),
         }
         return verified_plan, diagnostics

@@ -523,6 +523,7 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "rvuot_cost_quantile",
                 "rvuot_min_gate",
                 "rvuot_enable_rival_gate",
+                "rvuot_rival_score_mix",
                 "rvuot_rival_tau",
                 "rvuot_rival_margin",
                 "rvuot_detach_gate",
@@ -2456,6 +2457,15 @@ def get_args():
     parser.add_argument("--rvuot_cost_quantile", type=float, default=0.35)
     parser.add_argument("--rvuot_min_gate", type=float, default=0.05)
     parser.add_argument("--rvuot_enable_rival_gate", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--rvuot_rival_score_mix",
+        type=float,
+        default=0.0,
+        help=(
+            "Mix contrastive rival verification into RV-UOT scoring. "
+            "Default 0 keeps the original RV-UOT score path and uses rival verification for evidence only."
+        ),
+    )
     parser.add_argument("--rvuot_rival_tau", type=float, default=0.10)
     parser.add_argument("--rvuot_rival_margin", type=float, default=0.0)
     parser.add_argument(
@@ -4806,6 +4816,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "rvuot_cost_quantile",
             "rvuot_min_gate",
             "rvuot_enable_rival_gate",
+            "rvuot_rival_score_mix",
             "rvuot_rival_tau",
             "rvuot_rival_margin",
             "rvuot_detach_gate",
@@ -6046,6 +6057,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "rvuot/cost_quantile",
         "rvuot/min_gate",
         "rvuot/rival_gate_enabled",
+        "rvuot/rival_score_mix",
         "rvuot/rival_tau",
         "rvuot/rival_margin",
         "rvuot/gate_mean",
@@ -6059,8 +6071,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "rvuot/support_ratio_mean",
         "rvuot/retained_mass_ratio",
         "rvuot/removed_mass_mean",
+        "rvuot/evidence_gate_mean",
+        "rvuot/evidence_retained_mass_ratio",
+        "rvuot/evidence_removed_mass_mean",
         "rvuot/original_mass_mean",
         "rvuot/verified_mass_mean",
+        "rvuot/evidence_mass_mean",
         "rvuot/shot_logit_delta",
         "rvuot/shot_logit_delta_abs",
         "global_residual_weight",
@@ -6435,11 +6451,13 @@ def format_diagnostic_summary(metrics):
         "rvuot/gate_mean",
         "rvuot/coherence_gate_mean",
         "rvuot/rival_gate_mean",
+        "rvuot/rival_score_mix",
         "rvuot/rival_cost_gate_mean",
         "rvuot/rival_mass_gate_mean",
         "rvuot/support_ratio_mean",
         "rvuot/retained_mass_ratio",
         "rvuot/removed_mass_mean",
+        "rvuot/evidence_retained_mass_ratio",
         "rvuot/shot_logit_delta",
         "rvuot/shot_logit_delta_abs",
         "global_residual_weight",

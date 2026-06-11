@@ -1157,16 +1157,17 @@ def _transport_plan_by_shot(
 ) -> torch.Tensor | None:
     if not isinstance(outputs, dict):
         return None
-    plan = _safe_detach_tensor(outputs.get("transport_plan"))
-    if plan is None:
-        return None
-    plan = plan.float().cpu()
-    if plan.dim() == 5 and plan.shape[1] == way_num and plan.shape[2] == shot_num:
-        return plan
-    if plan.dim() == 4 and plan.shape[1] == way_num * shot_num:
-        return plan.view(plan.shape[0], way_num, shot_num, plan.shape[-2], plan.shape[-1])
-    if plan.dim() == 4 and plan.shape[1] == way_num:
-        return plan.unsqueeze(2)
+    for key in ("rvuot_evidence_transport_plan", "transport_plan"):
+        plan = _safe_detach_tensor(outputs.get(key))
+        if plan is None:
+            continue
+        plan = plan.float().cpu()
+        if plan.dim() == 5 and plan.shape[1] == way_num and plan.shape[2] == shot_num:
+            return plan
+        if plan.dim() == 4 and plan.shape[1] == way_num * shot_num:
+            return plan.view(plan.shape[0], way_num, shot_num, plan.shape[-2], plan.shape[-1])
+        if plan.dim() == 4 and plan.shape[1] == way_num:
+            return plan.unsqueeze(2)
     return None
 
 

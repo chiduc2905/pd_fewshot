@@ -422,6 +422,7 @@ class OursM2(JECOTM2):
         rvuot_cost_quantile = float(kwargs.pop("rvuot_cost_quantile", 0.35))
         rvuot_min_gate = float(kwargs.pop("rvuot_min_gate", 0.05))
         rvuot_enable_rival_gate = _bool_config(kwargs.pop("rvuot_enable_rival_gate", True))
+        rvuot_rival_score_mix = float(kwargs.pop("rvuot_rival_score_mix", 0.0))
         rvuot_rival_tau = float(kwargs.pop("rvuot_rival_tau", 0.10))
         rvuot_rival_margin = float(kwargs.pop("rvuot_rival_margin", 0.0))
         rvuot_detach_gate = _bool_config(kwargs.pop("rvuot_detach_gate", True))
@@ -623,6 +624,7 @@ class OursM2(JECOTM2):
         self.rvuot_cost_quantile = float(rvuot_cost_quantile)
         self.rvuot_min_gate = float(rvuot_min_gate)
         self.rvuot_enable_rival_gate = bool(rvuot_enable_rival_gate)
+        self.rvuot_rival_score_mix = float(rvuot_rival_score_mix)
         self.rvuot_rival_tau = float(rvuot_rival_tau)
         self.rvuot_rival_margin = float(rvuot_rival_margin)
         self.rvuot_detach_gate = bool(rvuot_detach_gate)
@@ -653,6 +655,8 @@ class OursM2(JECOTM2):
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if not 0.0 <= self.rvuot_rival_score_mix <= 1.0:
+            raise ValueError("rvuot_rival_score_mix must be in [0, 1]")
         if not 0.0 <= self.verified_uot_beta <= 1.0:
             raise ValueError("verified_uot_beta must be in [0, 1]")
         if self.verified_uot_tau <= 0.0:
@@ -668,6 +672,7 @@ class OursM2(JECOTM2):
                 cost_quantile=self.rvuot_cost_quantile,
                 min_gate=self.rvuot_min_gate,
                 enable_rival_gate=self.rvuot_enable_rival_gate,
+                rival_score_mix=self.rvuot_rival_score_mix,
                 rival_tau=self.rvuot_rival_tau,
                 rival_margin=self.rvuot_rival_margin,
                 detach_gate=self.rvuot_detach_gate,
@@ -3252,6 +3257,8 @@ class OursM2(JECOTM2):
             "adaptive_region_transported_mass",
             "adaptive_region_query_weight",
             "rvuot_verifier_gate",
+            "rvuot_evidence_verifier_gate",
+            "rvuot_evidence_transport_plan",
             "rvuot_reciprocal_affinity",
             "rvuot_unverified_transport_plan",
             "rvuot_unverified_shot_logits",
