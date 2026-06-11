@@ -93,6 +93,55 @@ def resolve_uot_evidence_visual_style(args):
     return value
 
 
+def resolve_uot_evidence_artifacts(args):
+    value = str(getattr(args, "uot_evidence_artifacts", "all") or "all").strip().lower().replace("-", "_")
+    aliases = {
+        "aux": "aux_only",
+        "auxiliary": "aux_only",
+        "paper_aux": "aux_only",
+        "no_main": "aux_only",
+        "overlay_matrix": "aux_only",
+        "main": "main_only",
+    }
+    value = aliases.get(value, value)
+    if value not in {"all", "aux_only", "main_only"}:
+        raise ValueError("uot_evidence_artifacts must be one of: all, aux_only, main_only")
+    return value
+
+
+def _uot_auxiliary_figure_paths(path):
+    stem, ext = os.path.splitext(str(path))
+    ext = ext or ".png"
+    return [f"{stem}_mass_overlay{ext}", f"{stem}_transport_matrix{ext}"]
+
+
+def _select_uot_evidence_log_paths(path, artifact_mode):
+    artifact_mode = str(artifact_mode or "all").strip().lower()
+    paths = []
+    if artifact_mode in {"all", "main_only"}:
+        paths.append(str(path))
+    if artifact_mode in {"all", "aux_only"}:
+        paths.extend(_uot_auxiliary_figure_paths(path))
+    return paths
+
+
+def _cleanup_uot_evidence_artifacts(path, artifact_mode):
+    artifact_mode = str(artifact_mode or "all").strip().lower()
+    if artifact_mode == "all":
+        return
+    cleanup_paths = []
+    if artifact_mode == "aux_only":
+        cleanup_paths.append(str(path))
+    elif artifact_mode == "main_only":
+        cleanup_paths.extend(_uot_auxiliary_figure_paths(path))
+    for cleanup_path in cleanup_paths:
+        try:
+            if os.path.exists(cleanup_path):
+                os.remove(cleanup_path)
+        except OSError:
+            pass
+
+
 def save_auxiliary_result_artifacts(args):
     return str(getattr(args, "result_artifacts", "figures_only")).lower() == "all"
 
@@ -151,10 +200,556 @@ def _wandb_arg_key_irrelevant_for_ours(key: str) -> bool:
     return False
 
 
+_WANDB_COMMON_ARG_KEYS = frozenset(
+    {
+        "dataset_path",
+        "path_weights",
+        "path_results",
+        "weights",
+        "resume",
+        "dataset_name",
+        "model",
+        "way_num",
+        "shot_num",
+        "query_num",
+        "query_num_train",
+        "query_num_val",
+        "query_num_test",
+        "selected_classes",
+        "image_size",
+        "fewshot_backbone",
+        "training_samples",
+        "episode_num_train",
+        "episode_num_val",
+        "episode_num_test",
+        "test_protocol",
+        "noise_test_root",
+        "noise_test_splits",
+        "model_selection_split",
+        "merge_val_into_train",
+        "train_episode_seed_offset",
+        "selection_episode_seed_offset",
+        "selection_episode_seed_mode",
+        "final_test_episode_seed_offset",
+        "final_test_seed",
+        "num_epochs",
+        "batch_size",
+        "num_workers",
+        "pin_memory",
+        "persistent_workers",
+        "prefetch_factor",
+        "cudnn_deterministic",
+        "cudnn_benchmark",
+        "gpu_id",
+        "lr",
+        "scheduler",
+        "step_size",
+        "gamma",
+        "warmup_epochs",
+        "warmup_start_factor",
+        "min_lr",
+        "label_smoothing",
+        "classification_loss",
+        "train_augment",
+        "time_shift_max",
+        "time_shift_prob",
+        "amp_scale_min",
+        "amp_scale_max",
+        "amp_scale_prob",
+        "time_mask_width",
+        "time_mask_prob",
+        "freq_mask_width",
+        "freq_mask_prob",
+        "grad_clip",
+        "weight_decay",
+        "seed",
+        "mode",
+        "result_artifacts",
+        "save_misclf_report",
+        "misclf_topk",
+        "export_q1_report",
+        "q1_num_episodes",
+        "q1_queries_per_episode",
+        "q1_misclassified_only",
+        "export_uot_evidence_figure",
+        "uot_evidence_num_episodes",
+        "uot_evidence_queries_per_episode",
+        "uot_evidence_correct_only",
+        "uot_evidence_selection",
+        "uot_evidence_file_format",
+        "uot_evidence_artifacts",
+        "uot_evidence_visual_style",
+        "export_dataset_profile",
+        "save_last_checkpoint",
+        "checkpoint_tag",
+        "skip_final_test",
+        "project",
+        "experiment_tag",
+        "device",
+        "effective_test_protocol",
+    }
+)
+
+
+_OURS_FINAL_WANDB_CORE_KEYS = frozenset(
+    {
+        "token_dim",
+        "hrot_token_dim",
+        "hrot_use_raw_backbone_tokens",
+        "hrot_projector_mlp",
+        "hrot_projector_mlp_hidden_dim",
+        "hrot_projector_residual",
+        "hrot_projector_wide",
+        "hrot_projector_wide_dim",
+        "hrot_eam_hidden_dim",
+        "hrot_curvature_init",
+        "hrot_projection_scale",
+        "hrot_token_temperature",
+        "hrot_score_scale",
+        "hrot_tau_q",
+        "hrot_tau_c",
+        "hrot_sinkhorn_epsilon",
+        "hrot_sinkhorn_iterations",
+        "hrot_sinkhorn_tolerance",
+        "hrot_fixed_mass",
+        "hrot_min_mass",
+        "hrot_mass_bonus_init",
+        "hrot_transport_cost_threshold_init",
+        "hrot_lambda_rho",
+        "hrot_rho_target",
+        "hrot_lambda_rho_rank",
+        "hrot_rho_rank_margin",
+        "hrot_rho_rank_temperature",
+        "hrot_lambda_curvature",
+        "hrot_min_curvature",
+        "hrot_structure_cost_init",
+        "hrot_ground_cost",
+        "hrot_cost_margin_aux_weight",
+        "hrot_cost_margin_aux_margin",
+        "hrot_eam_mode",
+        "hrot_compact_eam_prior_mix",
+        "hrot_normalize_euclidean_tokens",
+        "hrot_normalize_rho",
+        "hrot_eval_use_float64",
+        "hrot_hyperbolic_backend",
+        "hrot_ot_backend",
+        "hrot_eps",
+        "hrot_ecot_rho_bank",
+        "hrot_ecot_base_rho",
+        "hrot_ecot_budget_tau",
+        "hrot_ecot_max_lambda",
+        "hrot_ecot_lambda_init",
+        "hrot_ecot_controller_hidden",
+        "hrot_ecot_uniform_budget_policy",
+        "hrot_ecot_enable_tau_shot",
+        "hrot_ecot_tau_shot_min",
+        "hrot_ecot_tau_shot_max",
+        "hrot_ecot_enable_threshold_offset",
+        "hrot_ecot_m2_per_shot_threshold",
+        "hrot_ecot_m2_pst_hidden",
+        "hrot_ecot_m2_ablate_threshold_mass",
+        "hrot_ecot_m2_cost_per_mass_score",
+        "hrot_ecot_m2_cost_per_mass_alpha",
+        "hrot_ecot_m2_cost_per_mass_detach_mass",
+        "hrot_ecot_m2_mass_score_mode",
+        "hrot_ecot_m2_consensus_mass_alpha",
+        "hrot_ecot_m2_mass_reward_beta",
+        "hrot_ecot_m2_mass_reward_shot_scaling",
+        "hrot_ecot_m2_use_swts",
+        "hrot_ecot_m2_swts_temp",
+        "hrot_ecot_m2_use_aqm",
+        "hrot_ecot_m2_tau_aqm",
+        "hrot_ecot_identity_reg",
+        "hrot_ecot_policy_entropy_reg",
+        "hrot_ecot_consensus_tau_mode",
+        "hrot_ecot_consensus_tau",
+        "hrot_ecot_transport_mode",
+        "hrot_ecot_episode_feature_normalize",
+        "hrot_ecot_episode_feature_norm_eps",
+        "hrot_ecot_enable_egsm",
+        "ours_ablation",
+        "use_differential_mode",
+        "dm_alpha",
+        "dm_debug",
+        "dm_debug_dir",
+        "dm_debug_max_episodes",
+        "ours_final_dmuot_ablation",
+        "ours_final_evidence_ablation",
+    }
+)
+
+
+_OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
+    (
+        "hrot_pre_transport_shot_pool",
+        frozenset({"hrot_pre_transport_shot_pool", "hrot_pre_transport_shot_pool_mode"}),
+    ),
+    ("hrot_tsw_enable", frozenset({"hrot_tsw_enable", "hrot_tsw_share_gate"})),
+    (
+        "hrot_use_mncr",
+        frozenset({"hrot_use_mncr", "hrot_mncr_temperature", "hrot_mncr_lam"}),
+    ),
+    (
+        "hrot_ecot_enable_nncs_marginal",
+        frozenset(
+            {
+                "hrot_ecot_enable_nncs_marginal",
+                "hrot_ecot_nncs_beta",
+                "hrot_ecot_nncs_eta",
+                "hrot_ecot_nncs_detach",
+                "hrot_ecot_nncs_distance",
+                "hrot_ecot_nncs_min_sigma",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_enable_crs_marginal",
+        frozenset(
+            {
+                "hrot_ecot_enable_crs_marginal",
+                "hrot_ecot_crs_use_cross_ref",
+                "hrot_ecot_crs_use_ssm",
+                "hrot_ecot_crs_eta_init",
+                "hrot_ecot_crs_lambda_cr_init",
+                "hrot_ecot_crs_tau_ssm_init",
+                "hrot_ecot_crs_entropy_reg",
+                "hrot_ecot_crs_side",
+                "hrot_ecot_crs_ssm_type",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_enable_mea_marginal",
+        frozenset(
+            {
+                "hrot_ecot_enable_mea_marginal",
+                "hrot_ecot_mea_eta_init",
+                "hrot_ecot_mea_temperature_init",
+                "hrot_ecot_mea_entropy_reg",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_enable_ccdm_marginal",
+        frozenset(
+            {
+                "hrot_ecot_enable_ccdm_marginal",
+                "hrot_ecot_ccdm_tau_q_init",
+                "hrot_ecot_ccdm_tau_b_init",
+                "hrot_ecot_ccdm_entropy_reg",
+                "hrot_ecot_ccdm_entropy_shot_weight",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_enable_egsm",
+        frozenset(
+            {
+                "hrot_ecot_enable_egsm",
+                "hrot_ecot_egsm_hidden_dim",
+                "hrot_ecot_egsm_candidate_tau_q",
+                "hrot_ecot_egsm_candidate_tau_b",
+                "hrot_ecot_egsm_kappa_min",
+                "hrot_ecot_egsm_kappa_max",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_egsm_adaptive_rho",
+        frozenset(
+            {
+                "hrot_ecot_egsm_adaptive_rho",
+                "hrot_ecot_egsm_rho_delta_max",
+                "hrot_ecot_egsm_rho_grad_clip",
+                "hrot_ecot_egsm_rho_reg_lambda",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_enable_ccem_marginal",
+        frozenset(
+            {
+                "hrot_ecot_enable_ccem_marginal",
+                "hrot_ecot_ccem_uniform_mix",
+                "hrot_ecot_ccem_tau_q",
+                "hrot_ecot_ccem_tau_s",
+            }
+        ),
+    ),
+    (
+        "hrot_ecot_enable_noise_sink",
+        frozenset(
+            {
+                "hrot_ecot_enable_noise_sink",
+                "hrot_ecot_noise_sink_cost_init",
+                "hrot_ecot_noise_sink_score_penalty",
+            }
+        ),
+    ),
+    (
+        "hrot_use_cata",
+        frozenset(
+            {
+                "hrot_use_cata",
+                "hrot_cata_num_anchors",
+                "hrot_cata_num_heads",
+                "hrot_cata_attn_dropout",
+            }
+        ),
+    ),
+    ("hrot_amp_marginals", frozenset({"hrot_amp_marginals", "hrot_amp_marginals_tau"})),
+    ("hrot_token_center", frozenset({"hrot_token_center", "hrot_token_center_query"})),
+    (
+        "enable_verified_uot_score",
+        frozenset(
+            {
+                "enable_verified_uot_score",
+                "verified_uot_beta",
+                "verified_uot_tau",
+                "verified_uot_ratio_threshold",
+                "verified_uot_kernel_size",
+            }
+        ),
+    ),
+    (
+        "enable_reciprocal_verified_uot",
+        frozenset(
+            {
+                "enable_reciprocal_verified_uot",
+                "rvuot_beta",
+                "rvuot_tau",
+                "rvuot_ratio_threshold",
+                "rvuot_kernel_size",
+                "rvuot_cost_quantile",
+                "rvuot_min_gate",
+                "rvuot_detach_gate",
+            }
+        ),
+    ),
+    (
+        "enable_global_residual_score",
+        frozenset(
+            {
+                "enable_global_residual_score",
+                "global_residual_mode",
+                "global_residual_weight",
+            }
+        ),
+    ),
+    (
+        "enable_multiscale_ot",
+        frozenset({"enable_multiscale_ot", "multiscale_pool_sizes", "multiscale_per_scale_T"}),
+    ),
+    (
+        "enable_mspta",
+        frozenset(
+            {
+                "enable_mspta",
+                "mspta_scales",
+                "mspta_mass_mode",
+                "mspta_normalize",
+                "mspta_proj_dim",
+                "mspta_compact_floor",
+                "mspta_vertical_suppression",
+                "mspta_saliency_cost_discount",
+                "mspta_guidance_source",
+                "mspta_learnable_weights",
+            }
+        ),
+    ),
+    (
+        "enable_context_enrichment",
+        frozenset(
+            {
+                "enable_context_enrichment",
+                "context_kernel_sizes",
+                "context_fusion",
+                "context_gate_max",
+                "context_change_max",
+            }
+        ),
+    ),
+    (
+        "context_debug",
+        frozenset({"context_debug", "context_debug_dir", "context_debug_max_episodes"}),
+    ),
+    (
+        "enable_structural_augmentation",
+        frozenset({"enable_structural_augmentation", "struct_dim"}),
+    ),
+    (
+        "enable_region_structural_uot",
+        frozenset(
+            {
+                "enable_region_structural_uot",
+                "region_uot_grid_size",
+                "region_uot_strength",
+                "region_uot_fgw_alpha",
+                "region_uot_sinkhorn_epsilon",
+                "region_uot_fgw_iters",
+                "region_uot_sinkhorn_iters",
+                "region_uot_topk",
+                "region_uot_fine_gate_quantile",
+                "region_uot_min_confidence",
+                "region_uot_importance_temperature",
+            }
+        ),
+    ),
+    (
+        "enable_adaptive_region_uot",
+        frozenset(
+            {
+                "enable_adaptive_region_uot",
+                "adaptive_region_num_slots",
+                "adaptive_region_context_kernels",
+                "adaptive_region_cost_discount",
+                "adaptive_region_mass_mix",
+                "adaptive_region_sinkhorn_epsilon",
+                "adaptive_region_sinkhorn_iters",
+                "adaptive_region_fine_gate_quantile",
+                "adaptive_region_temperature_min",
+                "adaptive_region_temperature_max",
+                "adaptive_region_init_gate",
+            }
+        ),
+    ),
+    (
+        "enable_pulse_region_uot",
+        frozenset(
+            {
+                "enable_pulse_region_uot",
+                "pulse_region_kernel_size",
+                "pulse_region_cost_weight",
+                "pulse_saliency_mass_mix",
+                "pulse_saliency_cost_discount",
+                "pulse_saliency_image_weight",
+                "pulse_saliency_feature_weight",
+                "pulse_saliency_contrast_weight",
+                "pulse_region_train_strength",
+                "pulse_region_eval_strength",
+                "pulse_region_multishot_train_strength",
+                "pulse_region_multishot_eval_strength",
+                "pulse_region_train_schedule",
+                "pulse_support_consensus_weight",
+                "pulse_support_consensus_beta",
+                "pulse_support_consensus_eta",
+                "pulse_evidence_score",
+                "pulse_evidence_score_mode",
+                "pulse_evidence_score_mix",
+                "pulse_evidence_mass_weight",
+                "pulse_evidence_cost_weight",
+                "pulse_background_penalty",
+                "pulse_discriminative_evidence",
+                "pulse_discriminative_tau",
+                "pulse_discriminative_margin",
+                "pulse_discriminative_mix",
+            }
+        ),
+    ),
+    (
+        "enable_discriminative_uot",
+        frozenset(
+            {
+                "enable_discriminative_uot",
+                "discriminative_uot_tau",
+                "discriminative_uot_margin",
+                "discriminative_uot_mix",
+                "discriminative_uot_background_penalty",
+                "discriminative_uot_mass_weight",
+                "discriminative_uot_cost_weight",
+            }
+        ),
+    ),
+    (
+        "enable_label_ot",
+        frozenset(
+            {
+                "enable_label_ot",
+                "label_ot_epsilon",
+                "label_ot_iterations",
+                "label_ot_mix",
+                "label_ot_min_queries_per_class",
+                "label_ot_min_column_imbalance",
+                "label_ot_max_bias",
+            }
+        ),
+    ),
+    (
+        "enable_pot_guide",
+        frozenset(
+            {
+                "enable_pot_guide",
+                "pot_guide_s",
+                "pot_guide_adaptive_s",
+                "pot_guide_s_min",
+                "pot_guide_s_max",
+                "pot_guide_epsilon",
+                "pot_guide_max_iter",
+            }
+        ),
+    ),
+)
+
+
+_OURS_FINAL_WANDB_DMUOT_KEYS = frozenset(
+    {"token_g_kind", "lambda_cost", "marginal_kind", "tau_marg", "dmuot_shot_strength"}
+)
+_OURS_FINAL_WANDB_EVIDENCE_KEYS = frozenset(
+    {
+        "enable_evidence_marginals",
+        "evidence_tau",
+        "evidence_tau_marginal",
+        "evidence_mode",
+        "evidence_rival_margin",
+        "evidence_detach",
+    }
+)
+_OURS_FINAL_WANDB_EVIDENCE_OVERRIDE_KEYS = _OURS_FINAL_WANDB_EVIDENCE_KEYS - frozenset(
+    {"enable_evidence_marginals"}
+)
+
+
+def _wandb_flag_enabled(cfg, key):
+    return _bool_flag(cfg.get(key), default=False)
+
+
+def _wandb_optional_group_enabled_for_ours_final(cfg, gate_key):
+    if gate_key == "enable_verified_uot_score":
+        model_name = str(cfg.get("model", "") or "").strip().lower()
+        if model_name == "ours_final_verified_uot":
+            return True
+    if gate_key == "hrot_ecot_enable_egsm" and _wandb_flag_enabled(cfg, "hrot_ecot_egsm_adaptive_rho"):
+        return True
+    return _wandb_flag_enabled(cfg, gate_key)
+
+
+def _wandb_arg_key_relevant_for_ours_final(key, cfg):
+    if key in _WANDB_COMMON_ARG_KEYS or key in _OURS_FINAL_WANDB_CORE_KEYS:
+        return True
+    if key in _OURS_FINAL_WANDB_DMUOT_KEYS:
+        return str(cfg.get("ours_final_dmuot_ablation", "off")).lower() != "off"
+    if key in _OURS_FINAL_WANDB_EVIDENCE_KEYS:
+        return (
+            str(cfg.get("ours_final_evidence_ablation", "off")).lower() != "off"
+            or _wandb_flag_enabled(cfg, "enable_evidence_marginals")
+            or any(cfg.get(override_key) is not None for override_key in _OURS_FINAL_WANDB_EVIDENCE_OVERRIDE_KEYS)
+        )
+    for gate_key, group_keys in _OURS_FINAL_WANDB_OPTIONAL_GROUPS:
+        if key in group_keys and _wandb_optional_group_enabled_for_ours_final(cfg, gate_key):
+            return True
+    return False
+
+
+def _filter_wandb_config_for_ours_final(cfg):
+    return {k: v for k, v in cfg.items() if _wandb_arg_key_relevant_for_ours_final(k, cfg)}
+
+
 def build_wandb_init_config(args, model_meta, selection_split, merge_val_into_train):
-    """Build the dict passed to ``wandb.init(config=...)`` (trim unrelated SPIF/AEB keys for Ours models)."""
+    """Build the dict passed to ``wandb.init(config=...)`` with model-specific clutter removed."""
     cfg = vars(args).copy()
-    if args.model in OURS_ENTRYPOINT_MODEL_NAMES or args.model in OURS_CPM_MODEL_NAMES:
+    if _is_ours_final_model(args):
+        cfg = _filter_wandb_config_for_ours_final(cfg)
+    elif args.model in OURS_ENTRYPOINT_MODEL_NAMES or args.model in OURS_CPM_MODEL_NAMES:
         cfg = {k: v for k, v in cfg.items() if not _wandb_arg_key_irrelevant_for_ours(k)}
     cfg["architecture"] = model_meta["architecture"]
     cfg["distance_metric"] = model_meta["metric"]
@@ -1841,6 +2436,28 @@ def get_args():
     parser.add_argument("--verified_uot_ratio_threshold", type=float, default=0.35)
     parser.add_argument("--verified_uot_kernel_size", type=int, default=3)
     parser.add_argument(
+        "--enable_reciprocal_verified_uot",
+        action="store_true",
+        default=False,
+        help=(
+            "Ours-Final only: replace the visualized/scored UOT plan with a "
+            "reciprocal, neighborhood-verified sub-plan."
+        ),
+    )
+    parser.add_argument("--rvuot_beta", type=float, default=0.85)
+    parser.add_argument("--rvuot_tau", type=float, default=0.10)
+    parser.add_argument("--rvuot_ratio_threshold", type=float, default=0.25)
+    parser.add_argument("--rvuot_kernel_size", type=int, default=3)
+    parser.add_argument("--rvuot_cost_quantile", type=float, default=0.35)
+    parser.add_argument("--rvuot_min_gate", type=float, default=0.05)
+    parser.add_argument(
+        "--rvuot_detach_gate",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Detach the reciprocal verification gate from gradients.",
+    )
+    parser.add_argument(
         "--enable_global_residual_score",
         action="store_true",
         default=False,
@@ -2658,6 +3275,16 @@ def get_args():
         default="png",
         choices=["png", "pdf"],
         help="File format for exported UOT evidence figures.",
+    )
+    parser.add_argument(
+        "--uot_evidence_artifacts",
+        type=str,
+        default="all",
+        choices=["all", "aux_only", "main_only"],
+        help=(
+            "Which UOT evidence figures to keep/log. aux_only keeps only mass overlay "
+            "and transport heatmap, dropping the main correspondence figure."
+        ),
     )
     parser.add_argument(
         "--uot_evidence_visual_style",
@@ -4161,6 +4788,14 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "verified_uot_tau",
             "verified_uot_ratio_threshold",
             "verified_uot_kernel_size",
+            "enable_reciprocal_verified_uot",
+            "rvuot_beta",
+            "rvuot_tau",
+            "rvuot_ratio_threshold",
+            "rvuot_kernel_size",
+            "rvuot_cost_quantile",
+            "rvuot_min_gate",
+            "rvuot_detach_gate",
             "enable_global_residual_score",
             "global_residual_mode",
             "global_residual_weight",
@@ -5390,6 +6025,25 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "verified_uot/positive_suppression_mean",
         "verified_uot/shot_logit_delta",
         "verified_uot/shot_logit_delta_abs",
+        "rvuot/enabled",
+        "rvuot/beta",
+        "rvuot/tau",
+        "rvuot/ratio_threshold",
+        "rvuot/kernel_size",
+        "rvuot/cost_quantile",
+        "rvuot/min_gate",
+        "rvuot/gate_mean",
+        "rvuot/gate_min",
+        "rvuot/gate_max",
+        "rvuot/low_cost_gate_mean",
+        "rvuot/coherence_gate_mean",
+        "rvuot/support_ratio_mean",
+        "rvuot/retained_mass_ratio",
+        "rvuot/removed_mass_mean",
+        "rvuot/original_mass_mean",
+        "rvuot/verified_mass_mean",
+        "rvuot/shot_logit_delta",
+        "rvuot/shot_logit_delta_abs",
         "global_residual_weight",
         "global_residual_mode_id",
         "pulse/discriminative_gate_mean",
@@ -5758,6 +6412,14 @@ def format_diagnostic_summary(metrics):
         "verified_uot/positive_suppression_mean",
         "verified_uot/shot_logit_delta",
         "verified_uot/shot_logit_delta_abs",
+        "rvuot/enabled",
+        "rvuot/gate_mean",
+        "rvuot/coherence_gate_mean",
+        "rvuot/support_ratio_mean",
+        "rvuot/retained_mass_ratio",
+        "rvuot/removed_mass_mean",
+        "rvuot/shot_logit_delta",
+        "rvuot/shot_logit_delta_abs",
         "global_residual_weight",
         "global_residual_mode_id",
         "compact_loss",
@@ -6516,6 +7178,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     uot_evidence_queries_per_episode = max(1, int(getattr(args, "uot_evidence_queries_per_episode", 1)))
     uot_evidence_correct_only = _bool_flag(getattr(args, "uot_evidence_correct_only", "true"), default=True)
     uot_evidence_visual_style = resolve_uot_evidence_visual_style(args)
+    uot_evidence_artifacts = resolve_uot_evidence_artifacts(args)
     uot_evidence_selection = str(getattr(args, "uot_evidence_selection", "first") or "first").strip().lower()
     uot_evidence_best_mode = uot_evidence_selection == "best"
     q1_rows = []
@@ -6828,8 +7491,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                             print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")
                             rows = []
                         if rows:
+                            _cleanup_uot_evidence_artifacts(uot_base, uot_evidence_artifacts)
                             uot_evidence_rows.extend(rows)
-                            uot_evidence_paths.append(uot_base)
+                            uot_evidence_paths.extend(
+                                _select_uot_evidence_log_paths(uot_base, uot_evidence_artifacts)
+                            )
                             exported_uot_evidence += 1
                             if uot_evidence_one_per_class:
                                 for row in rows:
@@ -7043,8 +7709,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 row["selection_support_bright_mass_ratio"] = float(candidate_score["support_bright_mass_ratio"])
                 row["selection_top_match_score_fraction"] = float(candidate_score["top_match_score_fraction"])
             if rows:
+                _cleanup_uot_evidence_artifacts(uot_base, uot_evidence_artifacts)
                 uot_evidence_rows.extend(rows)
-                uot_evidence_paths.append(uot_base)
+                uot_evidence_paths.extend(
+                    _select_uot_evidence_log_paths(uot_base, uot_evidence_artifacts)
+                )
                 exported_uot_evidence += 1
                 if uot_evidence_one_per_class:
                     uot_evidence_seen_classes.add(class_idx)

@@ -28,6 +28,7 @@ from net.modules.cost_evidence_marginals import CostEvidenceMarginals, _normaliz
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.mspta import MSPTATokenizer
 from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
+from net.modules.reciprocal_verified_transport import ReciprocalVerifiedTransport
 from net.modules.region_structural_uot import RegionStructuralUOTGuidance
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
@@ -413,6 +414,14 @@ class OursM2(JECOTM2):
         verified_uot_tau = float(kwargs.pop("verified_uot_tau", 0.10))
         verified_uot_ratio_threshold = float(kwargs.pop("verified_uot_ratio_threshold", 0.35))
         verified_uot_kernel_size = int(kwargs.pop("verified_uot_kernel_size", 3))
+        enable_reciprocal_verified_uot = _bool_config(kwargs.pop("enable_reciprocal_verified_uot", False))
+        rvuot_beta = float(kwargs.pop("rvuot_beta", 0.85))
+        rvuot_tau = float(kwargs.pop("rvuot_tau", 0.10))
+        rvuot_ratio_threshold = float(kwargs.pop("rvuot_ratio_threshold", 0.25))
+        rvuot_kernel_size = int(kwargs.pop("rvuot_kernel_size", 3))
+        rvuot_cost_quantile = float(kwargs.pop("rvuot_cost_quantile", 0.35))
+        rvuot_min_gate = float(kwargs.pop("rvuot_min_gate", 0.05))
+        rvuot_detach_gate = _bool_config(kwargs.pop("rvuot_detach_gate", True))
         enable_global_residual_score = _bool_config(kwargs.pop("enable_global_residual_score", False))
         global_residual_mode = _normalize_global_residual_score_mode(
             kwargs.pop("global_residual_mode", "residual")
@@ -528,6 +537,11 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_pulse_region_uot is not supported with enable_multiscale_ot")
             if _bool_config(kwargs.get("pre_transport_shot_pool", False)):
                 raise ValueError("enable_pulse_region_uot is not supported with pre_transport_shot_pool")
+        if enable_reciprocal_verified_uot:
+            if enable_verified_uot_score:
+                raise ValueError("enable_reciprocal_verified_uot cannot be combined with enable_verified_uot_score")
+            if self.ours_ablation == "gap":
+                raise ValueError("enable_reciprocal_verified_uot is not supported with ours_ablation='gap'")
         if _bool_config(enable_evidence_marginals):
             if self.marginal_kind == "discriminative":
                 raise ValueError(
@@ -598,6 +612,14 @@ class OursM2(JECOTM2):
         self.verified_uot_tau = float(verified_uot_tau)
         self.verified_uot_ratio_threshold = float(verified_uot_ratio_threshold)
         self.verified_uot_kernel_size = int(verified_uot_kernel_size)
+        self.enable_reciprocal_verified_uot = bool(enable_reciprocal_verified_uot)
+        self.rvuot_beta = float(rvuot_beta)
+        self.rvuot_tau = float(rvuot_tau)
+        self.rvuot_ratio_threshold = float(rvuot_ratio_threshold)
+        self.rvuot_kernel_size = int(rvuot_kernel_size)
+        self.rvuot_cost_quantile = float(rvuot_cost_quantile)
+        self.rvuot_min_gate = float(rvuot_min_gate)
+        self.rvuot_detach_gate = bool(rvuot_detach_gate)
         self.enable_global_residual_score = bool(enable_global_residual_score)
         self.global_residual_mode = str(global_residual_mode)
         self.global_residual_weight = float(global_residual_weight)
@@ -619,6 +641,7 @@ class OursM2(JECOTM2):
             ("discriminative_uot_cost_weight", self.discriminative_uot_cost_weight),
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
             ("verified_uot_ratio_threshold", self.verified_uot_ratio_threshold),
+            ("rvuot_ratio_threshold", self.rvuot_ratio_threshold),
             ("global_residual_weight", self.global_residual_weight),
         ):
             if value < 0.0:
@@ -629,6 +652,17 @@ class OursM2(JECOTM2):
             raise ValueError("verified_uot_tau must be positive")
         if self.verified_uot_kernel_size < 1 or self.verified_uot_kernel_size % 2 != 1:
             raise ValueError("verified_uot_kernel_size must be an odd positive integer")
+        if self.enable_reciprocal_verified_uot:
+            self.reciprocal_verified_transport = ReciprocalVerifiedTransport(
+                beta=self.rvuot_beta,
+                tau=self.rvuot_tau,
+                ratio_threshold=self.rvuot_ratio_threshold,
+                kernel_size=self.rvuot_kernel_size,
+                cost_quantile=self.rvuot_cost_quantile,
+                min_gate=self.rvuot_min_gate,
+                detach_gate=self.rvuot_detach_gate,
+                eps=self.eps,
+            )
         if not 0.0 <= self.pulse_evidence_score_mix <= 1.0:
             raise ValueError("pulse_evidence_score_mix must be in [0, 1]")
         if self.discriminative_uot_tau <= 0.0:
@@ -2092,6 +2126,136 @@ class OursM2(JECOTM2):
         payload.update(verified_payload)
         return payload
 
+    def _threshold_like_shot_scores(
+        self,
+        threshold: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        active = threshold.to(device=reference.device, dtype=reference.dtype)
+        if active.dim() == 0:
+            return active.expand_as(reference)
+        while active.dim() < reference.dim():
+            active = active.unsqueeze(0)
+        return active.expand_as(reference)
+
+    def _apply_reciprocal_verified_uot(
+        self,
+        payload: dict[str, torch.Tensor],
+        *,
+        flat_cost: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+        spatial_hw: tuple[int, int] | None,
+    ) -> dict[str, torch.Tensor]:
+        if not getattr(self, "enable_reciprocal_verified_uot", False):
+            return payload
+        transport_plan = payload.get("transport_plan")
+        if not torch.is_tensor(transport_plan):
+            return payload
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match way*shot={way_num * shot_num}")
+        if tuple(transport_plan.shape) != (num_query, int(way_num), int(shot_num), query_len, support_len):
+            raise ValueError(
+                "transport_plan must have shape (Nq, Way, Shot, Lq, Ls), "
+                f"got {tuple(transport_plan.shape)}"
+            )
+
+        cost_view = flat_cost.reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+        verified_plan, rvuot_payload = self.reciprocal_verified_transport(
+            cost=cost_view,
+            plan=transport_plan.to(device=flat_cost.device, dtype=flat_cost.dtype),
+            spatial_hw=spatial_hw,
+        )
+        verified_cost = (verified_plan * cost_view).sum(dim=(-1, -2))
+        verified_mass = verified_plan.sum(dim=(-1, -2))
+        threshold = payload.get("ecot_threshold")
+        if not torch.is_tensor(threshold):
+            threshold = self.transport_cost_threshold
+        threshold_shot = self._threshold_like_shot_scores(threshold, verified_mass)
+
+        if self.ecot_m2_cost_per_mass_score:
+            mass_denom = verified_mass.detach() if self.ecot_m2_cost_per_mass_detach_mass else verified_mass
+            verified_shot_logits = (
+                -float(self.ecot_m2_cost_per_mass_alpha)
+                * self.score_scale
+                * verified_cost
+                / mass_denom.clamp_min(float(self.eps))
+            )
+        else:
+            mass_for_score = verified_mass
+            if self.ecot_m2_mass_score_mode == "shot_consensus":
+                alpha_mass = verified_mass.new_tensor(float(self.ecot_m2_consensus_mass_alpha))
+                mass_consensus = verified_mass.mean(dim=2, keepdim=True)
+                mass_for_score = (1.0 - alpha_mass) * verified_mass + alpha_mass * mass_consensus
+                payload["rvuot_shot_mass_for_score"] = mass_for_score.detach()
+            threshold_term = (
+                torch.zeros_like(threshold_shot)
+                if self.ecot_m2_ablate_threshold_mass
+                else threshold_shot
+            )
+            verified_shot_logits = self.score_scale * (threshold_term * mass_for_score - verified_cost)
+
+        old_shot_logits = payload.get("shot_logits")
+        if torch.is_tensor(old_shot_logits):
+            payload["rvuot_unverified_shot_logits"] = old_shot_logits.detach()
+            rvuot_payload["rvuot/shot_logit_delta"] = (
+                verified_shot_logits.detach() - old_shot_logits.detach()
+            ).mean()
+            rvuot_payload["rvuot/shot_logit_delta_abs"] = (
+                verified_shot_logits.detach() - old_shot_logits.detach()
+            ).abs().mean()
+        payload["rvuot_unverified_transport_plan"] = transport_plan.detach()
+        if torch.is_tensor(payload.get("shot_transport_cost")):
+            payload["rvuot_unverified_shot_transport_cost"] = payload["shot_transport_cost"].detach()
+        if torch.is_tensor(payload.get("shot_transported_mass")):
+            payload["rvuot_unverified_shot_transported_mass"] = payload["shot_transported_mass"].detach()
+
+        tau_shot = payload.get("ecot_tau_shot")
+        if torch.is_tensor(tau_shot):
+            scaled = verified_shot_logits / tau_shot.clamp_min(float(self.eps))
+            if verified_shot_logits.shape[-1] == 1:
+                shot_pool_weights = torch.ones_like(verified_shot_logits)
+                logits = verified_shot_logits.squeeze(-1)
+            else:
+                shot_pool_weights = torch.softmax(scaled, dim=-1)
+                logits = tau_shot * (
+                    torch.logsumexp(scaled, dim=-1) - math.log(float(verified_shot_logits.shape[-1]))
+                )
+            transport_cost = (shot_pool_weights * verified_cost).sum(dim=-1)
+            transport_mass = (shot_pool_weights * verified_mass).sum(dim=-1)
+        else:
+            logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
+                verified_shot_logits,
+                verified_cost,
+                verified_mass,
+            )
+
+        payload["transport_plan"] = verified_plan
+        payload["shot_transport_cost"] = verified_cost
+        payload["shot_transported_mass"] = verified_mass
+        payload["shot_logits"] = verified_shot_logits
+        payload["logits"] = logits
+        payload["class_scores"] = logits
+        payload["transport_cost"] = transport_cost
+        payload["transported_mass"] = transport_mass
+        payload["shot_pool_weights"] = shot_pool_weights
+        payload["rvuot_logits"] = logits.detach()
+        if torch.is_tensor(payload.get("ecot_base_score")):
+            payload["rvuot_unverified_ecot_base_score"] = payload["ecot_base_score"].detach()
+            payload["ecot_base_score"] = verified_shot_logits
+        if torch.is_tensor(payload.get("ecot_score")):
+            payload["rvuot_unverified_ecot_score"] = payload["ecot_score"].detach()
+            payload["ecot_score"] = verified_shot_logits
+        budget_scores = payload.get("ecot_budget_scores")
+        if torch.is_tensor(budget_scores) and budget_scores.shape[-1] == 1:
+            payload["rvuot_unverified_ecot_budget_scores"] = budget_scores.detach()
+            payload["ecot_budget_scores"] = verified_shot_logits.unsqueeze(-1)
+        payload.update(rvuot_payload)
+        return payload
+
     def _mspta_weights_for_ecot(
         self,
         flat_cost: torch.Tensor,
@@ -2475,6 +2639,13 @@ class OursM2(JECOTM2):
             score_evidence_mix=self.pulse_evidence_score_mix,
         )
         payload = self._apply_verified_uot_score(
+            payload,
+            flat_cost=cost_for_transport,
+            way_num=way_num,
+            shot_num=shot_num,
+            spatial_hw=spatial_hw,
+        )
+        payload = self._apply_reciprocal_verified_uot(
             payload,
             flat_cost=cost_for_transport,
             way_num=way_num,
@@ -3070,6 +3241,15 @@ class OursM2(JECOTM2):
             "adaptive_region_transport_cost",
             "adaptive_region_transported_mass",
             "adaptive_region_query_weight",
+            "rvuot_verifier_gate",
+            "rvuot_reciprocal_affinity",
+            "rvuot_unverified_transport_plan",
+            "rvuot_unverified_shot_logits",
+            "rvuot_unverified_shot_transport_cost",
+            "rvuot_unverified_shot_transported_mass",
+            "rvuot_shot_mass_for_score",
+            "local_scores",
+            "global_scores",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -3094,6 +3274,8 @@ class OursM2(JECOTM2):
             "pot_guide/pot_sparsity",
             "pot_guide/marginal_q_max",
             "pot_guide/marginal_q_min",
+            "global_residual_weight",
+            "global_residual_mode_id",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
@@ -3130,6 +3312,7 @@ class OursM2(JECOTM2):
             "region_uot/",
             "adaptive_region/",
             "mspta/",
+            "rvuot/",
         ):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]

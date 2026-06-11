@@ -61,6 +61,12 @@ class HROTFSLResult(dict):
         logits = self.get("logits")
         return None if logits is None else logits.shape
 
+    def __getattr__(self, name: str):
+        logits = self.get("logits")
+        if logits is not None and hasattr(logits, name):
+            return getattr(logits, name)
+        raise AttributeError(name)
+
 
 def _inverse_softplus(value: float) -> float:
     if value <= 0.0:

@@ -222,6 +222,42 @@ def test_adaptive_region_uot_enabled_runs_and_exposes_diagnostics():
     assert outputs["adaptive_region/mass_gate"].item() == pytest.approx(0.03, abs=1e-5)
 
 
+def test_reciprocal_verified_uot_runs_with_global_residual_and_replaces_plan():
+    torch.manual_seed(504)
+    model = _tiny_ours_final(
+        enable_reciprocal_verified_uot=True,
+        rvuot_beta=0.85,
+        rvuot_tau=0.10,
+        rvuot_ratio_threshold=0.20,
+        rvuot_kernel_size=3,
+        enable_global_residual_score=True,
+        global_residual_weight=0.10,
+    )
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.enable_reciprocal_verified_uot
+    assert hasattr(model, "reciprocal_verified_transport")
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    assert outputs["transport_plan"].shape == outputs["rvuot_unverified_transport_plan"].shape
+    assert outputs["transport_plan"].sum() <= outputs["rvuot_unverified_transport_plan"].sum() + 1e-6
+    assert outputs["rvuot/enabled"].item() == pytest.approx(1.0)
+    assert 0.0 <= outputs["rvuot/retained_mass_ratio"].item() <= 1.0
+    assert "local_scores" in outputs
+    assert "global_scores" in outputs
+    assert outputs["global_residual_weight"].item() == pytest.approx(0.10)
+
+
+def test_reciprocal_verified_uot_rejects_legacy_verified_score_combo():
+    with pytest.raises(ValueError, match="enable_reciprocal_verified_uot cannot be combined"):
+        _tiny_ours_final(enable_reciprocal_verified_uot=True, enable_verified_uot_score=True)
+
+
 def test_pot_guide_enabled_exposes_diagnostics_and_nonuniform_marginals():
     torch.manual_seed(513)
     model = _tiny_ours_final(enable_pot_guide=True, pot_guide_max_iter=4)
@@ -544,6 +580,48 @@ def test_adaptive_region_uot_factory_flags_are_ours_final_only():
     assert torch.sigmoid(ours_final.adaptive_region_uot.raw_cost_gate).item() == pytest.approx(0.03, abs=1e-5)
 
     with pytest.raises(ValueError, match="--enable_adaptive_region_uot is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_reciprocal_verified_uot_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_reciprocal_verified_uot=True,
+        rvuot_beta=0.8,
+        rvuot_tau=0.12,
+        rvuot_ratio_threshold=0.22,
+        rvuot_kernel_size=3,
+        rvuot_cost_quantile=0.30,
+        rvuot_min_gate=0.04,
+        rvuot_detach_gate="true",
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert ours_final.enable_reciprocal_verified_uot
+    assert hasattr(ours_final, "reciprocal_verified_transport")
+    assert ours_final.rvuot_beta == pytest.approx(0.8)
+    assert ours_final.rvuot_tau == pytest.approx(0.12)
+    assert ours_final.rvuot_ratio_threshold == pytest.approx(0.22)
+    assert ours_final.rvuot_cost_quantile == pytest.approx(0.30)
+
+    with pytest.raises(ValueError, match="--enable_reciprocal_verified_uot is supported only with --model ours_final"):
         build_model_from_args(
             SimpleNamespace(
                 model="ours",

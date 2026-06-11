@@ -527,6 +527,16 @@ def get_args():
         help="Forwarded to main.py. Use pdf for publication-only UOT evidence artifacts.",
     )
     parser.add_argument(
+        "--uot_evidence_artifacts",
+        type=str,
+        default="all",
+        choices=["all", "aux_only", "main_only"],
+        help=(
+            "Forwarded to main.py. aux_only keeps/logs only mass overlay and "
+            "transport heatmap, dropping the main correspondence figure."
+        ),
+    )
+    parser.add_argument(
         "--uot_evidence_visual_style",
         type=str,
         default="auto",
@@ -597,6 +607,8 @@ def get_args():
             str(args.uot_evidence_selection),
             "--uot_evidence_file_format",
             str(args.uot_evidence_file_format),
+            "--uot_evidence_artifacts",
+            str(args.uot_evidence_artifacts),
         ]
     visual_style = str(getattr(args, "uot_evidence_visual_style", "auto")).lower()
     if visual_style != "auto":
@@ -2264,10 +2276,12 @@ def uot_evidence_artifacts_exist(
     noise_test_root=None,
     noise_test_splits="auto",
     file_format="png",
+    artifact_mode="all",
 ):
     samples_str = f"{samples}samples" if samples is not None else "allsamples"
     tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
     ext = "pdf" if str(file_format).strip().lower() == "pdf" else "png"
+    artifact_mode = str(artifact_mode or "all").strip().lower()
     split_names = [None]
     if str(test_protocol).lower() == "noise":
         split_names = discover_noise_test_splits(noise_test_root, noise_test_splits)
@@ -2283,9 +2297,9 @@ def uot_evidence_artifacts_exist(
             for path in matches
             if not path.stem.endswith("_transport_matrix") and not path.stem.endswith("_all_classes")
         ]
-        if not main_matches:
+        if artifact_mode in {"all", "main_only"} and not main_matches:
             return False
-        if model in OURS_FINAL_FAMILY_MODEL_NAMES:
+        if model in OURS_FINAL_FAMILY_MODEL_NAMES and artifact_mode in {"all", "aux_only"}:
             matrix_pattern = (
                 f"uot_evidence_{dataset_name}_{model}_{samples_str}_"
                 f"{shot}shot{tag_suffix}{protocol_suffix}_ep*_transport_matrix.{ext}"
@@ -2578,6 +2592,7 @@ def run_experiment(
             noise_test_root=noise_test_root,
             noise_test_splits=noise_test_splits,
             file_format=cli_option_value(cmd, "--uot_evidence_file_format", "png"),
+            artifact_mode=cli_option_value(cmd, "--uot_evidence_artifacts", "all"),
         )
     )
     if skip_existing and primary_complete:

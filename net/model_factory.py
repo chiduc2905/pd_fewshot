@@ -368,6 +368,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() not in OURS_FINAL_MODEL_NAMES
     ):
         raise ValueError("--enable_verified_uot_score is supported only with Ours-Final models")
+    if _bool_flag(getattr(args, "enable_reciprocal_verified_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_reciprocal_verified_uot is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_global_residual_score", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2865,6 +2869,24 @@ def build_model_from_args(args):
                             is_ours_final_verified_uot_model
                             or _bool_flag(getattr(args, "enable_verified_uot_score", False), default=False)
                         )
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_reciprocal_verified_uot": True,
+                            "rvuot_beta": float(getattr(args, "rvuot_beta", 0.85)),
+                            "rvuot_tau": float(getattr(args, "rvuot_tau", 0.10)),
+                            "rvuot_ratio_threshold": float(getattr(args, "rvuot_ratio_threshold", 0.25)),
+                            "rvuot_kernel_size": int(getattr(args, "rvuot_kernel_size", 3)),
+                            "rvuot_cost_quantile": float(getattr(args, "rvuot_cost_quantile", 0.35)),
+                            "rvuot_min_gate": float(getattr(args, "rvuot_min_gate", 0.05)),
+                            "rvuot_detach_gate": _bool_flag(
+                                getattr(args, "rvuot_detach_gate", True),
+                                default=True,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_reciprocal_verified_uot", False), default=False)
                         else {}
                     ),
                     **(
