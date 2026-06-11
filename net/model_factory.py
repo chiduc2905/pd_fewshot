@@ -3385,6 +3385,7 @@ def build_model_from_args(args):
                 getattr(args, "hrot_ecot_enable_noise_sink", "false"),
                 default=False,
             ),
+            ecot_noise_sink_cost_mode=str(getattr(args, "hrot_ecot_noise_sink_cost_mode", "fixed")),
             ecot_noise_sink_cost_init=float(getattr(args, "hrot_ecot_noise_sink_cost_init", 1.0)),
             ecot_noise_sink_score_penalty=float(getattr(args, "hrot_ecot_noise_sink_score_penalty", 0.0)),
             ecot_episode_feature_normalize=_bool_flag(

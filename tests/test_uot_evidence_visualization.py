@@ -1,6 +1,20 @@
 import torch
 
-from visualization.noise_diagnostics import export_uot_evidence_figure
+from visualization.noise_diagnostics import _contrast_transport_image, export_uot_evidence_figure
+
+
+def test_transport_contrast_suppresses_uniform_entropy_floor():
+    uniform = torch.full((8, 8), 0.1)
+    contrasted_uniform = _contrast_transport_image(uniform)
+
+    sparse = torch.zeros(8, 8)
+    sparse[2, 3] = 0.1
+    sparse[5, 6] = 0.05
+    contrasted_sparse = _contrast_transport_image(sparse)
+
+    assert float(contrasted_uniform.max()) == 0.0
+    assert contrasted_sparse[2, 3] > contrasted_sparse.mean()
+    assert contrasted_sparse[5, 6] > 0.0
 
 
 def test_export_uot_evidence_figure_draws_top_transport_correspondences(tmp_path):

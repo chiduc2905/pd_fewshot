@@ -1409,6 +1409,40 @@ def _normalized_transport_image(values: torch.Tensor | np.ndarray, gamma: float 
     return np.power(scaled, float(gamma)).astype(np.float32)
 
 
+def _contrast_transport_image(
+    values: torch.Tensor | np.ndarray,
+    *,
+    gamma: float = 0.72,
+    floor_quantile: float = 0.60,
+    vmax_quantile: float = 0.995,
+) -> np.ndarray:
+    """Show evidence above the diffuse UOT background, not the entropy floor."""
+    if torch.is_tensor(values):
+        array = values.detach().float().cpu().numpy()
+    else:
+        array = np.asarray(values, dtype=np.float32)
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+    array = np.clip(array, 0.0, None).astype(np.float32)
+    if array.size == 0 or float(array.max()) <= 0.0:
+        return np.zeros_like(array, dtype=np.float32)
+
+    positive = array[array > 0.0]
+    if positive.size == array.size and float(positive.max() - positive.min()) <= 1e-12:
+        return np.zeros_like(array, dtype=np.float32)
+
+    floor = float(np.quantile(array, float(floor_quantile)))
+    residual = np.clip(array - floor, 0.0, None)
+    positive_residual = residual[residual > 0.0]
+    if positive_residual.size == 0:
+        return np.zeros_like(array, dtype=np.float32)
+
+    vmax = float(np.quantile(positive_residual, float(vmax_quantile)))
+    if vmax <= 0.0 or not np.isfinite(vmax):
+        vmax = float(positive_residual.max())
+    scaled = np.clip(residual / max(vmax, 1e-12), 0.0, 1.0)
+    return np.power(scaled, float(gamma)).astype(np.float32)
+
+
 def _imshow_transport_values(
     ax: plt.Axes,
     values: torch.Tensor | np.ndarray,
@@ -1417,7 +1451,7 @@ def _imshow_transport_values(
     cmap: str = "jet",
 ) -> None:
     ax.imshow(
-        _normalized_transport_image(values),
+        _contrast_transport_image(values),
         cmap=cmap,
         vmin=0.0,
         vmax=1.0,
@@ -1494,8 +1528,8 @@ def _export_mass_overlay_figure(
             (axes[row_idx, 0], query_image, query_heatmap),
             (axes[row_idx, 1], support_image, support_heatmap),
         ):
-            heat = _normalized_transport_image(heatmap, gamma=0.42)
-            heat_alpha = np.clip(0.08 + 0.72 * heat, 0.0, 0.78)
+            heat = _contrast_transport_image(heatmap, gamma=0.62, floor_quantile=0.55)
+            heat_alpha = np.where(heat > 1e-6, np.clip(0.18 + 0.62 * heat, 0.0, 0.80), 0.0)
             ax.imshow(image, cmap="gray", vmin=0.0, vmax=1.0)
             ax.imshow(heat, cmap="turbo", alpha=heat_alpha, vmin=0.0, vmax=1.0)
             positive = heat[heat > 1e-6]

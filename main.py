@@ -481,6 +481,7 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         frozenset(
             {
                 "hrot_ecot_enable_noise_sink",
+                "hrot_ecot_noise_sink_cost_mode",
                 "hrot_ecot_noise_sink_cost_init",
                 "hrot_ecot_noise_sink_score_penalty",
             }
@@ -2767,6 +2768,16 @@ def get_args():
         default="false",
         choices=["true", "false"],
     )
+    parser.add_argument(
+        "--hrot_ecot_noise_sink_cost_mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "threshold"],
+        help=(
+            "fixed uses --hrot_ecot_noise_sink_cost_init; threshold ties the null/sink "
+            "cost to the J_ECOT_M2 evidence threshold."
+        ),
+    )
     parser.add_argument("--hrot_ecot_noise_sink_cost_init", type=float, default=1.0)
     parser.add_argument("--hrot_ecot_noise_sink_score_penalty", type=float, default=0.0)
     parser.add_argument(
@@ -4693,6 +4704,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_ccem_tau_q",
             "hrot_ecot_ccem_tau_s",
             "hrot_ecot_enable_noise_sink",
+            "hrot_ecot_noise_sink_cost_mode",
             "hrot_ecot_noise_sink_cost_init",
             "hrot_ecot_noise_sink_score_penalty",
             "hrot_ecot_episode_feature_normalize",
