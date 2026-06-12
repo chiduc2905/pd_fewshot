@@ -25,13 +25,16 @@ from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.adaptive_region_uot import AdaptiveRegionUOTGuidance
 from net.modules.cost_evidence_marginals import CostEvidenceMarginals, _normalize_evidence_mode
+from net.modules.hubness_calibrated_uot import HubnessCalibratedUOT
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.mspta import MSPTATokenizer
 from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_saliency
+from net.modules.ours_final_failure_probe import OursFinalFailureProbe
 from net.modules.reciprocal_verified_transport import ReciprocalVerifiedTransport
 from net.modules.region_structural_uot import RegionStructuralUOTGuidance
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
+from net.modules.utility_contrastive_marginals import UtilityContrastiveMarginals
 from net.jecot_m2 import JECOTM2
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -51,6 +54,7 @@ from net.modules.unbalanced_ot import (
 OURS_ABLATIONS = frozenset({"full", "full_ot", "no_egsm", "gap"})
 TOKEN_G_KINDS = frozenset({"none", "episode_mean_dist", "token_norm_pre_l2", "learned_attention"})
 DMUOT_MARGINAL_KINDS = frozenset({"uniform", "discriminative"})
+OURS_FINAL_MARGINAL_MODES = frozenset({"uniform", "score_aligned"})
 DMUOT_SHOT_STRENGTH_KINDS = frozenset({"none", "inverse_sqrt", "inverse"})
 PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_only"})
 PULSE_EVIDENCE_SCORE_MODES = frozenset({"replace", "mass_mix"})
@@ -186,6 +190,24 @@ def _normalize_dmuot_marginal_kind(value: str | None) -> str:
     return name
 
 
+def _normalize_ours_final_marginal_mode(value: str | None) -> str:
+    name = "uniform" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "off": "uniform",
+        "none": "uniform",
+        "original": "uniform",
+        "sam": "score_aligned",
+        "score": "score_aligned",
+    }
+    name = aliases.get(name, name)
+    if name not in OURS_FINAL_MARGINAL_MODES:
+        raise ValueError(
+            "Unsupported ours_final_marginal_mode: "
+            f"{value}. Expected one of {sorted(OURS_FINAL_MARGINAL_MODES)}"
+        )
+    return name
+
+
 def _normalize_dmuot_shot_strength(value: str | None) -> str:
     name = "none" if value is None else str(value).strip().lower().replace("-", "_")
     aliases = {
@@ -317,6 +339,13 @@ class OursM2(JECOTM2):
         marginal_kind: str = "uniform",
         tau_marg: float = 1.0,
         dmuot_shot_strength: str = "none",
+        ours_final_marginal_mode: str = "uniform",
+        score_marginal_tau: float = 0.25,
+        score_marginal_mix: float = 0.65,
+        score_marginal_adaptive_mix: bool = True,
+        score_marginal_confidence_power: float = 1.0,
+        enable_ours_final_failure_probe: bool = False,
+        ours_probe_common_margin: float = 0.10,
         enable_evidence_marginals: bool = False,
         evidence_tau: float = 0.1,
         evidence_tau_marginal: float = 1.0,
@@ -448,11 +477,14 @@ class OursM2(JECOTM2):
             kwargs.pop("enable_rival_aware_evidence_uot", False)
         )
         rae_uot_tau = float(kwargs.pop("rae_uot_tau", 0.25))
-        rae_uot_margin = float(kwargs.pop("rae_uot_margin", 0.0))
-        rae_uot_marginal_tau = float(kwargs.pop("rae_uot_marginal_tau", 0.50))
         rae_uot_marginal_mix = float(kwargs.pop("rae_uot_marginal_mix", 0.65))
-        rae_uot_cost_weight = float(kwargs.pop("rae_uot_cost_weight", 0.25))
-        rae_uot_detach = _bool_config(kwargs.pop("rae_uot_detach", True))
+        enable_hubness_calibrated_uot = _bool_config(
+            kwargs.pop("enable_hubness_calibrated_uot", False)
+        )
+        hcuot_topk = int(kwargs.pop("hcuot_topk", 3))
+        hcuot_temperature = float(kwargs.pop("hcuot_temperature", 0.25))
+        hcuot_cost_weight = float(kwargs.pop("hcuot_cost_weight", 0.35))
+        hcuot_marginal_mix = float(kwargs.pop("hcuot_marginal_mix", 0.50))
         enable_label_ot = _bool_config(
             kwargs.pop("enable_label_ot", kwargs.pop("enable_transductive_label_ot", False))
         )
@@ -478,6 +510,17 @@ class OursM2(JECOTM2):
         self.marginal_kind = _normalize_dmuot_marginal_kind(marginal_kind)
         self.tau_marg = float(tau_marg)
         self.dmuot_shot_strength = _normalize_dmuot_shot_strength(dmuot_shot_strength)
+        self.ours_final_marginal_mode = _normalize_ours_final_marginal_mode(
+            ours_final_marginal_mode
+        )
+        self.score_marginal_tau = float(score_marginal_tau)
+        self.score_marginal_mix = float(score_marginal_mix)
+        self.score_marginal_adaptive_mix = _bool_config(score_marginal_adaptive_mix)
+        self.score_marginal_confidence_power = float(score_marginal_confidence_power)
+        self.enable_ours_final_failure_probe = _bool_config(
+            enable_ours_final_failure_probe
+        )
+        self.ours_probe_common_margin = float(ours_probe_common_margin)
         if self.lambda_cost < 0.0:
             raise ValueError("lambda_cost must be non-negative")
         if self.lambda_cost > 0.0 and self.token_g_kind == "none":
@@ -496,12 +539,21 @@ class OursM2(JECOTM2):
         self._last_dm_diagnostics: dict[str, torch.Tensor] | None = None
         self._token_g_prenorm_cache: list[torch.Tensor] | None = None
         if enable_rival_aware_evidence_uot:
-            # RAE-UOT replaces the default EGSM marginal and uses mean evidence
-            # transport cost, matching its selective-mass interpretation.
+            # Minimal RAE-UOT replaces EGSM only at the marginal level. The
+            # original Ours-Final transport cost and T*M-C score stay intact.
             kwargs["ecot_enable_egsm"] = False
             kwargs["ecot_m2_ablate_threshold_mass"] = False
-            kwargs["ecot_m2_cost_per_mass_score"] = True
-            kwargs["ecot_m2_cost_per_mass_detach_mass"] = True
+            kwargs["ecot_m2_cost_per_mass_score"] = False
+        if self.ours_final_marginal_mode == "score_aligned":
+            kwargs["ecot_enable_egsm"] = False
+            kwargs["ecot_m2_ablate_threshold_mass"] = False
+            kwargs["ecot_m2_cost_per_mass_score"] = False
+        if enable_hubness_calibrated_uot:
+            # HC-UOT is an analytic episode-local calibration of the original
+            # threshold-mass UOT path, with no learned attention branch.
+            kwargs["ecot_enable_egsm"] = False
+            kwargs["ecot_m2_ablate_threshold_mass"] = False
+            kwargs["ecot_m2_cost_per_mass_score"] = False
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
         if enable_mspta:
             if self.ours_ablation == "gap":
@@ -575,12 +627,42 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_reciprocal_verified_uot cannot be combined with enable_verified_uot_score")
             if self.ours_ablation == "gap":
                 raise ValueError("enable_reciprocal_verified_uot is not supported with ours_ablation='gap'")
+        if self.ours_final_marginal_mode == "score_aligned":
+            if self.ours_ablation != "full":
+                raise ValueError(
+                    "ours_final_marginal_mode='score_aligned' requires ours_ablation='full'"
+                )
+            conflicts = {
+                "enable_rival_aware_evidence_uot": enable_rival_aware_evidence_uot,
+                "enable_hubness_calibrated_uot": enable_hubness_calibrated_uot,
+                "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
+                "enable_residual_aligned_uot": enable_residual_aligned_uot,
+                "enable_verified_uot_score": enable_verified_uot_score,
+                "enable_reciprocal_verified_uot": enable_reciprocal_verified_uot,
+                "enable_discriminative_uot": enable_discriminative_uot,
+                "enable_region_structural_uot": enable_region_structural_uot,
+                "enable_adaptive_region_uot": enable_adaptive_region_uot,
+                "enable_pulse_region_uot": enable_pulse_region_uot,
+                "enable_multiscale_ot": enable_multiscale_ot,
+                "enable_mspta": enable_mspta,
+                "enable_evidence_marginals": _bool_config(enable_evidence_marginals),
+                "enable_pot_guide": enable_pot_guide,
+                "token_g_kind": self.token_g_kind != "none",
+            }
+            active_conflicts = [name for name, active in conflicts.items() if active]
+            if active_conflicts:
+                raise ValueError(
+                    "ours_final_marginal_mode='score_aligned' replaces only the original "
+                    "uniform marginals and cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
         if enable_rival_aware_evidence_uot:
             if self.ours_ablation == "gap":
                 raise ValueError(
                     "enable_rival_aware_evidence_uot is not supported with ours_ablation='gap'"
                 )
             conflicts = {
+                "enable_hubness_calibrated_uot": enable_hubness_calibrated_uot,
                 "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
                 "enable_residual_aligned_uot": enable_residual_aligned_uot,
                 "enable_verified_uot_score": enable_verified_uot_score,
@@ -601,6 +683,33 @@ class OursM2(JECOTM2):
                     "cannot be combined with: "
                     + ", ".join(active_conflicts)
                 )
+        if enable_hubness_calibrated_uot:
+            if self.ours_ablation == "gap":
+                raise ValueError(
+                    "enable_hubness_calibrated_uot is not supported with ours_ablation='gap'"
+                )
+            conflicts = {
+                "enable_rival_aware_evidence_uot": enable_rival_aware_evidence_uot,
+                "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
+                "enable_residual_aligned_uot": enable_residual_aligned_uot,
+                "enable_verified_uot_score": enable_verified_uot_score,
+                "enable_reciprocal_verified_uot": enable_reciprocal_verified_uot,
+                "enable_discriminative_uot": enable_discriminative_uot,
+                "enable_region_structural_uot": enable_region_structural_uot,
+                "enable_adaptive_region_uot": enable_adaptive_region_uot,
+                "enable_pulse_region_uot": enable_pulse_region_uot,
+                "enable_multiscale_ot": enable_multiscale_ot,
+                "enable_mspta": enable_mspta,
+                "enable_evidence_marginals": _bool_config(enable_evidence_marginals),
+                "token_g_kind": self.token_g_kind != "none",
+            }
+            active_conflicts = [name for name, active in conflicts.items() if active]
+            if active_conflicts:
+                raise ValueError(
+                    "enable_hubness_calibrated_uot defines the complete local transport path and "
+                    "cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
         if _bool_config(enable_evidence_marginals):
             if self.marginal_kind == "discriminative":
                 raise ValueError(
@@ -615,6 +724,19 @@ class OursM2(JECOTM2):
             transport_mode=kwargs["ecot_transport_mode"],
             **kwargs,
         )
+        if self.ours_final_marginal_mode == "score_aligned":
+            self.utility_contrastive_marginals = UtilityContrastiveMarginals(
+                tau=self.score_marginal_tau,
+                marginal_mix=self.score_marginal_mix,
+                adaptive_mix=self.score_marginal_adaptive_mix,
+                confidence_power=self.score_marginal_confidence_power,
+                eps=self.eps,
+            )
+        if self.enable_ours_final_failure_probe:
+            self.ours_final_failure_probe = OursFinalFailureProbe(
+                common_margin=self.ours_probe_common_margin,
+                eps=self.eps,
+            )
         self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
         self.enable_region_structural_uot = bool(enable_region_structural_uot)
         self.enable_adaptive_region_uot = bool(enable_adaptive_region_uot)
@@ -701,11 +823,12 @@ class OursM2(JECOTM2):
         self.rauot_detach = bool(rauot_detach)
         self.enable_rival_aware_evidence_uot = bool(enable_rival_aware_evidence_uot)
         self.rae_uot_tau = float(rae_uot_tau)
-        self.rae_uot_margin = float(rae_uot_margin)
-        self.rae_uot_marginal_tau = float(rae_uot_marginal_tau)
         self.rae_uot_marginal_mix = float(rae_uot_marginal_mix)
-        self.rae_uot_cost_weight = float(rae_uot_cost_weight)
-        self.rae_uot_detach = bool(rae_uot_detach)
+        self.enable_hubness_calibrated_uot = bool(enable_hubness_calibrated_uot)
+        self.hcuot_topk = int(hcuot_topk)
+        self.hcuot_temperature = float(hcuot_temperature)
+        self.hcuot_cost_weight = float(hcuot_cost_weight)
+        self.hcuot_marginal_mix = float(hcuot_marginal_mix)
         self.enable_label_ot = bool(enable_label_ot)
         self.label_ot_epsilon = float(label_ot_epsilon)
         self.label_ot_iterations = int(label_ot_iterations)
@@ -731,8 +854,7 @@ class OursM2(JECOTM2):
             ("global_residual_weight", self.global_residual_weight),
             ("rauot_margin", self.rauot_margin),
             ("rauot_cost_weight", self.rauot_cost_weight),
-            ("rae_uot_margin", self.rae_uot_margin),
-            ("rae_uot_cost_weight", self.rae_uot_cost_weight),
+            ("hcuot_cost_weight", self.hcuot_cost_weight),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
@@ -742,12 +864,32 @@ class OursM2(JECOTM2):
             raise ValueError("rauot_tau must be positive")
         if not 0.0 <= self.rauot_mass_mix <= 1.0:
             raise ValueError("rauot_mass_mix must be in [0, 1]")
+        if self.score_marginal_tau <= 0.0:
+            raise ValueError("score_marginal_tau must be positive")
+        if not 0.0 <= self.score_marginal_mix <= 1.0:
+            raise ValueError("score_marginal_mix must be in [0, 1]")
+        if self.score_marginal_confidence_power <= 0.0:
+            raise ValueError("score_marginal_confidence_power must be positive")
+        if self.ours_probe_common_margin < 0.0:
+            raise ValueError("ours_probe_common_margin must be non-negative")
         if self.rae_uot_tau <= 0.0:
             raise ValueError("rae_uot_tau must be positive")
-        if self.rae_uot_marginal_tau <= 0.0:
-            raise ValueError("rae_uot_marginal_tau must be positive")
         if not 0.0 <= self.rae_uot_marginal_mix <= 1.0:
             raise ValueError("rae_uot_marginal_mix must be in [0, 1]")
+        if self.hcuot_topk < 1:
+            raise ValueError("hcuot_topk must be positive")
+        if self.hcuot_temperature <= 0.0:
+            raise ValueError("hcuot_temperature must be positive")
+        if not 0.0 <= self.hcuot_marginal_mix <= 1.0:
+            raise ValueError("hcuot_marginal_mix must be in [0, 1]")
+        if self.enable_hubness_calibrated_uot:
+            self.hubness_calibrated_uot = HubnessCalibratedUOT(
+                topk=self.hcuot_topk,
+                temperature=self.hcuot_temperature,
+                cost_weight=self.hcuot_cost_weight,
+                marginal_mix=self.hcuot_marginal_mix,
+                eps=self.eps,
+            )
         if not 0.0 <= self.rvuot_rival_score_mix <= 1.0:
             raise ValueError("rvuot_rival_score_mix must be in [0, 1]")
         if not 0.0 <= self.verified_uot_beta <= 1.0:
@@ -1317,34 +1459,6 @@ class OursM2(JECOTM2):
         }
         return guided_cost, normalized_query_weight, payload
 
-    def _merge_rival_aware_weight(
-        self,
-        current: torch.Tensor | None,
-        target: torch.Tensor,
-        *,
-        kind: str,
-        way_num: int,
-        shot_num: int,
-    ) -> torch.Tensor:
-        target = target / target.sum(dim=-1, keepdim=True).clamp_min(float(self.eps))
-        if current is None:
-            return target
-
-        num_query, num_pairs, token_count = target.shape
-        active = current.to(device=target.device, dtype=target.dtype).clamp_min(0.0)
-        if kind == "query" and tuple(active.shape) == (num_query, token_count):
-            active = active[:, None, :].expand(-1, num_pairs, -1)
-        elif kind == "support" and tuple(active.shape) == (int(way_num), int(shot_num), token_count):
-            active = active.reshape(1, num_pairs, token_count).expand(num_query, -1, -1)
-        elif tuple(active.shape) != tuple(target.shape):
-            raise ValueError(
-                f"{kind}_weight must be pair-specific or match its base token layout; "
-                f"got current={tuple(current.shape)} target={tuple(target.shape)}"
-            )
-        active = active / active.sum(dim=-1, keepdim=True).clamp_min(float(self.eps))
-        merged = active * target
-        return merged / merged.sum(dim=-1, keepdim=True).clamp_min(float(self.eps))
-
     def _apply_rival_aware_evidence_uot(
         self,
         flat_cost: torch.Tensor,
@@ -1366,6 +1480,10 @@ class OursM2(JECOTM2):
             return flat_cost, query_weight, support_weight, None, {}
         if query_tokens is None or support_tokens is None:
             raise ValueError("enable_rival_aware_evidence_uot requires query_tokens and support_tokens")
+        if query_weight is not None or support_weight is not None:
+            raise ValueError(
+                "rival-aware evidence UOT replaces other explicit query/support marginals"
+            )
         if flat_cost.dim() != 4:
             raise ValueError(
                 f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}"
@@ -1388,94 +1506,70 @@ class OursM2(JECOTM2):
                 f"got {tuple(support_tokens.shape)}"
             )
 
-        query_ref = query_tokens.detach() if self.rae_uot_detach else query_tokens
-        support_ref = support_tokens.detach() if self.rae_uot_detach else support_tokens
-        query_unit = F.normalize(query_ref, p=2, dim=-1, eps=self.eps)
-        support_unit = F.normalize(support_ref, p=2, dim=-1, eps=self.eps)
-        query_global = F.normalize(query_ref.mean(dim=1), p=2, dim=-1, eps=self.eps)
-        support_global = F.normalize(support_ref.mean(dim=2), p=2, dim=-1, eps=self.eps)
+        query_unit = F.normalize(query_tokens.detach(), p=2, dim=-1, eps=self.eps)
+        support_unit = F.normalize(support_tokens.detach(), p=2, dim=-1, eps=self.eps)
+        query_global = F.normalize(
+            query_tokens.detach().mean(dim=1),
+            p=2,
+            dim=-1,
+            eps=self.eps,
+        )
+        support_global = F.normalize(
+            support_tokens.detach().mean(dim=2),
+            p=2,
+            dim=-1,
+            eps=self.eps,
+        )
 
         query_cross_reference = F.relu(
             torch.einsum("qld,wsd->qwsl", query_unit, support_global)
-        ).add(float(self.eps))
+        )
         support_cross_reference = F.relu(
             torch.einsum("wsld,qd->qwsl", support_unit, query_global)
-        ).add(float(self.eps))
-
+        )
         rival_gate, rival_advantage = self._episode_contrastive_pair_gate(
             flat_cost,
             way_num=way_num,
             shot_num=shot_num,
             tau=float(self.rae_uot_tau),
-            margin=float(self.rae_uot_margin),
-            detach=bool(self.rae_uot_detach),
+            margin=0.0,
+            detach=True,
         )
-        # Equal-cost matches are common evidence, not class evidence. Mapping
-        # gate=0.5 to zero makes the local path reward only positive advantage.
         rival_specificity = (2.0 * rival_gate - 1.0).clamp_min(0.0)
-        query_specificity = rival_specificity.amax(dim=-1)
-        support_specificity = rival_specificity.amax(dim=-2)
+        query_raw = query_cross_reference * rival_specificity.amax(dim=-1)
+        support_raw = support_cross_reference * rival_specificity.amax(dim=-2)
 
-        query_raw = query_cross_reference * (query_specificity + float(self.eps))
-        support_raw = support_cross_reference * (support_specificity + float(self.eps))
-        marginal_tau = float(self.rae_uot_marginal_tau)
-        query_prob = torch.softmax(query_raw.log() / marginal_tau, dim=-1)
-        support_prob = torch.softmax(support_raw.log() / marginal_tau, dim=-1)
+        def normalize_with_uniform_fallback(raw: torch.Tensor) -> torch.Tensor:
+            total = raw.sum(dim=-1, keepdim=True)
+            normalized = raw / total.clamp_min(float(self.eps))
+            uniform = torch.full_like(raw, 1.0 / float(max(raw.shape[-1], 1)))
+            return torch.where(total > float(self.eps), normalized, uniform)
 
+        query_prob = normalize_with_uniform_fallback(query_raw)
+        support_prob = normalize_with_uniform_fallback(support_raw)
         mix = flat_cost.new_tensor(float(self.rae_uot_marginal_mix))
-        query_uniform = torch.full_like(query_prob, 1.0 / float(max(query_len, 1)))
-        support_uniform = torch.full_like(support_prob, 1.0 / float(max(support_len, 1)))
-        query_prob = (1.0 - mix) * query_uniform + mix * query_prob
-        support_prob = (1.0 - mix) * support_uniform + mix * support_prob
-        query_prob = query_prob.reshape(num_query, num_pairs, query_len)
-        support_prob = support_prob.reshape(num_query, num_pairs, support_len)
-
-        query_weight_out = self._merge_rival_aware_weight(
-            query_weight,
-            query_prob,
-            kind="query",
-            way_num=way_num,
-            shot_num=shot_num,
+        query_prob = (
+            (1.0 - mix) * torch.full_like(query_prob, 1.0 / float(max(query_len, 1)))
+            + mix * query_prob
         )
-        support_weight_out = self._merge_rival_aware_weight(
-            support_weight,
-            support_prob,
-            kind="support",
-            way_num=way_num,
-            shot_num=shot_num,
+        support_prob = (
+            (1.0 - mix) * torch.full_like(support_prob, 1.0 / float(max(support_len, 1)))
+            + mix * support_prob
         )
+        query_weight_out = query_prob.reshape(num_query, num_pairs, query_len)
+        support_weight_out = support_prob.reshape(num_query, num_pairs, support_len)
 
         query_peak = query_prob / query_prob.amax(dim=-1, keepdim=True).clamp_min(float(self.eps))
         support_peak = support_prob / support_prob.amax(dim=-1, keepdim=True).clamp_min(float(self.eps))
-        pair_evidence = torch.sqrt(
-            (
-                query_peak[..., :, None]
-                * support_peak[..., None, :]
-            ).clamp_min(0.0)
-        )
-        pair_evidence = pair_evidence.reshape(
-            num_query,
-            int(way_num),
-            int(shot_num),
-            query_len,
-            support_len,
-        )
-        pair_evidence = (pair_evidence * rival_specificity).clamp(0.0, 1.0)
-
-        cost_view = flat_cost.reshape(
-            num_query,
-            int(way_num),
-            int(shot_num),
-            query_len,
-            support_len,
-        )
-        cost_scale = cost_view.detach().std(
-            dim=(-1, -2),
-            keepdim=True,
-            unbiased=False,
-        ).clamp_min(float(self.eps))
-        cost_delta = float(self.rae_uot_cost_weight) * cost_scale * (1.0 - pair_evidence)
-        guided_cost = (cost_view + cost_delta).reshape_as(flat_cost)
+        pair_evidence = (
+            rival_specificity
+            * torch.sqrt(
+                (
+                    query_peak[..., :, None]
+                    * support_peak[..., None, :]
+                ).clamp_min(0.0)
+            )
+        ).clamp(0.0, 1.0)
 
         query_entropy = -(
             query_weight_out * query_weight_out.clamp_min(float(self.eps)).log()
@@ -1484,7 +1578,6 @@ class OursM2(JECOTM2):
             support_weight_out * support_weight_out.clamp_min(float(self.eps)).log()
         ).sum(dim=-1)
         payload = {
-            "rae_uot_guided_cost_matrix": guided_cost.reshape_as(cost_view).detach(),
             "rae_uot_pair_evidence": pair_evidence.detach(),
             "rae_uot_rival_gate": rival_gate.detach(),
             "rae_uot_rival_specificity": rival_specificity.detach(),
@@ -1492,25 +1585,111 @@ class OursM2(JECOTM2):
             "rae_uot_support_weight": support_weight_out.detach(),
             "rae_uot/enabled": flat_cost.new_tensor(1.0),
             "rae_uot/tau": flat_cost.new_tensor(float(self.rae_uot_tau)),
-            "rae_uot/margin": flat_cost.new_tensor(float(self.rae_uot_margin)),
-            "rae_uot/marginal_tau": flat_cost.new_tensor(float(self.rae_uot_marginal_tau)),
             "rae_uot/marginal_mix": mix.detach(),
-            "rae_uot/cost_weight": flat_cost.new_tensor(float(self.rae_uot_cost_weight)),
             "rae_uot/rival_gate_mean": rival_gate.mean().detach(),
             "rae_uot/specificity_mean": rival_specificity.mean().detach(),
             "rae_uot/evidence_mean": pair_evidence.mean().detach(),
             "rae_uot/evidence_std": pair_evidence.std(unbiased=False).detach(),
-            "rae_uot/cost_delta_ratio": (
-                cost_delta.detach().abs().mean()
-                / cost_view.detach().abs().mean().clamp_min(float(self.eps))
-            ),
+            "rae_uot/uniform_fallback_query_share": (
+                query_raw.sum(dim=-1) <= float(self.eps)
+            ).to(flat_cost.dtype).mean().detach(),
+            "rae_uot/uniform_fallback_support_share": (
+                support_raw.sum(dim=-1) <= float(self.eps)
+            ).to(flat_cost.dtype).mean().detach(),
             "rae_uot/query_weight_entropy": query_entropy.mean().detach(),
             "rae_uot/support_weight_entropy": support_entropy.mean().detach(),
             "rae_uot/query_weight_peak": query_weight_out.amax(dim=-1).mean().detach(),
             "rae_uot/support_weight_peak": support_weight_out.amax(dim=-1).mean().detach(),
             "rae_uot/rival_advantage_mean": rival_advantage.mean().detach(),
         }
-        return guided_cost, query_weight_out, support_weight_out, pair_evidence, payload
+        return flat_cost, query_weight_out, support_weight_out, pair_evidence, payload
+
+    def _apply_score_aligned_marginals(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        query_weight: torch.Tensor | None,
+        support_weight: torch.Tensor | None,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        dict[str, torch.Tensor],
+    ]:
+        if self.ours_final_marginal_mode != "score_aligned":
+            return query_weight, support_weight, {}
+        if query_weight is not None or support_weight is not None:
+            raise ValueError(
+                "score-aligned Ours-Final marginals replace other explicit marginals"
+            )
+        return self.utility_contrastive_marginals(
+            flat_cost,
+            threshold=self.transport_cost_threshold.detach(),
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+
+    def _apply_hubness_calibrated_uot(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        query_weight: torch.Tensor | None,
+        support_weight: torch.Tensor | None,
+        query_tokens: torch.Tensor | None,
+        support_tokens: torch.Tensor | None,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        dict[str, torch.Tensor],
+    ]:
+        if not getattr(self, "enable_hubness_calibrated_uot", False):
+            return flat_cost, query_weight, support_weight, None, {}
+        if query_tokens is None or support_tokens is None:
+            raise ValueError("enable_hubness_calibrated_uot requires query_tokens and support_tokens")
+        if query_weight is not None or support_weight is not None:
+            raise ValueError(
+                "hubness-calibrated UOT replaces other explicit query/support marginals"
+            )
+
+        (
+            guided_cost,
+            calibrated_query_weight,
+            calibrated_support_weight,
+            pair_specificity,
+            diagnostics,
+        ) = self.hubness_calibrated_uot(
+            flat_cost,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+        num_query, _, query_len, support_len = flat_cost.shape
+        payload = {
+            "hcuot_guided_cost_matrix": guided_cost.reshape(
+                num_query,
+                int(way_num),
+                int(shot_num),
+                query_len,
+                support_len,
+            ).detach(),
+            "hcuot_pair_specificity": pair_specificity.detach(),
+            "hcuot_query_weight": calibrated_query_weight.detach(),
+            "hcuot_support_weight": calibrated_support_weight.detach(),
+            **diagnostics,
+        }
+        return (
+            guided_cost,
+            calibrated_query_weight,
+            calibrated_support_weight,
+            pair_specificity,
+            payload,
+        )
 
     def _residual_aligned_evidence(
         self,
@@ -3305,6 +3484,34 @@ class OursM2(JECOTM2):
             if ev_support_marginal is not None:
                 support_weight = ev_support_marginal
 
+        score_marginal_payload: dict[str, torch.Tensor] = {}
+        query_weight, support_weight, score_marginal_payload = (
+            self._apply_score_aligned_marginals(
+                cost_for_transport,
+                query_weight=query_weight,
+                support_weight=support_weight,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+        )
+
+        hcuot_payload: dict[str, torch.Tensor] = {}
+        (
+            cost_for_transport,
+            query_weight,
+            support_weight,
+            _hcuot_pair_specificity,
+            hcuot_payload,
+        ) = self._apply_hubness_calibrated_uot(
+            cost_for_transport,
+            query_weight=query_weight,
+            support_weight=support_weight,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+
         rae_uot_payload: dict[str, torch.Tensor] = {}
         (
             cost_for_transport,
@@ -3321,13 +3528,6 @@ class OursM2(JECOTM2):
             way_num=way_num,
             shot_num=shot_num,
         )
-        if rae_pair_evidence is not None:
-            score_pair_evidence = rae_pair_evidence
-            score_evidence_mass_weight = 1.0
-            score_evidence_cost_weight = 1.0
-            score_background_penalty = 0.0
-            score_evidence_mode = "replace"
-            score_evidence_mix = 1.0
 
         episode_contrast_payload: dict[str, torch.Tensor] = {}
         cost_for_transport, query_weight, episode_contrast_payload = self._apply_episode_contrastive_uot(
@@ -3403,6 +3603,59 @@ class OursM2(JECOTM2):
                     threshold=payload.get("ecot_threshold"),
                 )
             )
+        if (
+            self.enable_ours_final_failure_probe
+            and torch.is_tensor(payload.get("transport_plan"))
+        ):
+            payload.update(
+                self.ours_final_failure_probe(
+                    cost_for_transport,
+                    payload["transport_plan"],
+                    threshold=payload.get(
+                        "ecot_threshold",
+                        self.transport_cost_threshold,
+                    ),
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    logits=payload.get("logits"),
+                )
+            )
+        if score_marginal_payload and torch.is_tensor(payload.get("transport_plan")):
+            plan = payload["transport_plan"]
+            row_mass = plan.sum(dim=-1)
+            col_mass = plan.sum(dim=-2)
+            base_rho = self._ecot_base_rho_tensor(plan).to(
+                device=plan.device,
+                dtype=plan.dtype,
+            )
+            query_target = (
+                score_marginal_payload["score_marginal_query_weight"]
+                .to(device=plan.device, dtype=plan.dtype)
+                [:, None, None, :]
+                * base_rho
+            )
+            support_target = (
+                score_marginal_payload["score_marginal_support_weight"]
+                .to(device=plan.device, dtype=plan.dtype)
+                .reshape(
+                    plan.shape[0],
+                    int(way_num),
+                    int(shot_num),
+                    plan.shape[-1],
+                )
+                * base_rho
+            )
+            query_l1 = (row_mass - query_target.expand_as(row_mass)).abs().sum(dim=-1)
+            support_l1 = (col_mass - support_target).abs().sum(dim=-1)
+            score_marginal_payload.update(
+                {
+                    "score_marginal/query_l1_drift": query_l1.mean().detach(),
+                    "score_marginal/support_l1_drift": support_l1.mean().detach(),
+                    "score_marginal/l1_drift": (
+                        0.5 * (query_l1.mean() + support_l1.mean())
+                    ).detach(),
+                }
+            )
 
         if dmuot_payload:
             plan = payload["transport_plan"]
@@ -3436,6 +3689,10 @@ class OursM2(JECOTM2):
             payload.update(mspta_payload)
         if evidence_payload:
             payload.update(evidence_payload)
+        if score_marginal_payload:
+            payload.update(score_marginal_payload)
+        if hcuot_payload:
+            payload.update(hcuot_payload)
         if episode_contrast_payload:
             payload.update(episode_contrast_payload)
         if residual_aligned_payload:
@@ -3861,6 +4118,9 @@ class OursM2(JECOTM2):
             if "episode_contrast_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["episode_contrast_guided_cost_matrix"]
+            if "hcuot_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["hcuot_guided_cost_matrix"]
             if "residual_aligned_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["residual_aligned_guided_cost_matrix"]
@@ -3979,8 +4239,8 @@ class OursM2(JECOTM2):
             "cost_matrix_modulated",
             "mspta_guided_cost_matrix",
             "episode_contrast_guided_cost_matrix",
+            "hcuot_guided_cost_matrix",
             "residual_aligned_guided_cost_matrix",
-            "rae_uot_guided_cost_matrix",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
@@ -4009,6 +4269,22 @@ class OursM2(JECOTM2):
             "adaptive_region_query_weight",
             "episode_contrast_pair_gate",
             "episode_contrast_query_weight",
+            "score_marginal_pair_evidence",
+            "score_marginal_query_weight",
+            "score_marginal_support_weight",
+            "score_marginal_query_advantage",
+            "ours_probe_negative_utility_mass_ratio",
+            "ours_probe_common_mass_ratio",
+            "ours_probe_harm_share",
+            "ours_probe_dead_query_ratio",
+            "ours_probe_query_mass_entropy",
+            "ours_probe_effective_query_fraction",
+            "ours_probe_utility_score",
+            "ours_probe_mass_score",
+            "ours_probe_cost_distance",
+            "hcuot_pair_specificity",
+            "hcuot_query_weight",
+            "hcuot_support_weight",
             "residual_aligned_pair_evidence",
             "residual_aligned_query_weight",
             "rae_uot_pair_evidence",
@@ -4092,6 +4368,9 @@ class OursM2(JECOTM2):
             "mspta/",
             "rvuot/",
             "episode_contrast/",
+            "score_marginal/",
+            "ours_probe/",
+            "hcuot/",
             "residual_aligned/",
             "rae_uot/",
             "transport_audit/",

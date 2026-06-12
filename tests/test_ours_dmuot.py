@@ -7,7 +7,9 @@ import pytest
 import torch
 
 from net.model_factory import build_model_from_args
+from net.modules.ours_final_failure_probe import OursFinalFailureProbe
 from net.ours import OursM2
+from run_all_experiments import build_ours_final_failure_probe_variants
 
 
 def _tiny_ours_final(**overrides) -> OursM2:
@@ -831,10 +833,7 @@ def test_rival_aware_evidence_uot_suppresses_common_match_and_shapes_both_margin
     model = _tiny_ours_final(
         enable_rival_aware_evidence_uot=True,
         rae_uot_tau=0.25,
-        rae_uot_margin=0.0,
-        rae_uot_marginal_tau=0.25,
         rae_uot_marginal_mix=1.0,
-        rae_uot_cost_weight=0.50,
     )
     query_tokens = torch.tensor(
         [
@@ -869,7 +868,7 @@ def test_rival_aware_evidence_uot_suppresses_common_match_and_shapes_both_margin
     cost[0, 0, 1, 1] = 0.01
     cost[0, 1, 1, 1] = 0.90
 
-    guided_cost, query_weight, support_weight, pair_evidence, payload = (
+    unchanged_cost, query_weight, support_weight, pair_evidence, payload = (
         model._apply_rival_aware_evidence_uot(
             cost,
             query_weight=None,
@@ -890,11 +889,75 @@ def test_rival_aware_evidence_uot_suppresses_common_match_and_shapes_both_margin
     assert torch.allclose(query_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
     assert torch.allclose(support_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
     assert pair_evidence[0, 0, 0, 1, 1] > pair_evidence[0, 0, 0, 0, 0]
-    assert guided_cost[0, 0, 0, 0] > guided_cost[0, 0, 1, 1]
+    assert torch.equal(unchanged_cost, cost)
     assert query_weight[0, 0, 1] > query_weight[0, 0, 0]
     assert support_weight[0, 0, 1] > support_weight[0, 0, 0]
     assert payload["rae_uot/evidence_std"].item() > 0.0
-    assert payload["rae_uot/cost_delta_ratio"].item() > 0.0
+
+
+def test_rival_aware_evidence_uot_common_only_case_falls_back_to_uniform_marginals():
+    model = _tiny_ours_final(
+        enable_rival_aware_evidence_uot=True,
+        rae_uot_marginal_mix=1.0,
+    )
+    query_tokens = torch.tensor([[[4.0, 0.0], [1.0, 0.0], [0.0, 1.0]]])
+    support_tokens = torch.tensor(
+        [
+            [[[4.0, 0.0], [1.0, 0.0], [0.0, 1.0]]],
+            [[[4.0, 0.0], [1.0, 0.0], [0.0, 1.0]]],
+        ]
+    )
+    cost = torch.ones(1, 2, 3, 3)
+
+    _, query_weight, support_weight, pair_evidence, payload = (
+        model._apply_rival_aware_evidence_uot(
+            cost,
+            query_weight=None,
+            support_weight=None,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=2,
+            shot_num=1,
+        )
+    )
+
+    assert torch.allclose(query_weight, torch.full_like(query_weight, 1.0 / 3.0), atol=1e-6)
+    assert torch.allclose(support_weight, torch.full_like(support_weight, 1.0 / 3.0), atol=1e-6)
+    assert torch.count_nonzero(pair_evidence) == 0
+    assert payload["rae_uot/uniform_fallback_query_share"].item() == pytest.approx(1.0)
+    assert payload["rae_uot/uniform_fallback_support_share"].item() == pytest.approx(1.0)
+
+
+def test_rival_aware_evidence_uot_common_only_case_keeps_original_local_score():
+    model = _tiny_ours_final(enable_rival_aware_evidence_uot=True)
+    model.eval()
+    query_tokens = torch.tensor([[[4.0, 0.0], [1.0, 0.0], [0.0, 1.0]]])
+    support_tokens = torch.tensor(
+        [
+            [[[4.0, 0.0], [1.0, 0.0], [0.0, 1.0]]],
+            [[[4.0, 0.0], [1.0, 0.0], [0.0, 1.0]]],
+        ]
+    )
+    cost = torch.ones(1, 2, 3, 3)
+
+    with torch.no_grad():
+        outputs = model._forward_ecot_budget_bank(
+            cost,
+            way_num=2,
+            shot_num=1,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+        )
+
+    assert "shot_evidence_score_mass" not in outputs
+    assert torch.isfinite(outputs["shot_logits"]).all()
+    assert torch.all(outputs["shot_logits"] < 0.0)
+    assert torch.allclose(
+        outputs["shot_logits"][:, 0],
+        outputs["shot_logits"][:, 1],
+        atol=1e-6,
+        rtol=1e-6,
+    )
 
 
 def test_rival_aware_evidence_uot_is_equivariant_to_token_position_permutations():
@@ -958,10 +1021,11 @@ def test_rival_aware_evidence_uot_forward_is_finite_for_few_shot(shot):
     with torch.no_grad():
         outputs = model(query, support, return_aux=True)
 
-    assert model.ecot_m2_cost_per_mass_score
+    assert not model.ecot_m2_cost_per_mass_score
     assert model.egsm_marginal is None
     assert torch.isfinite(outputs["logits"]).all()
     assert torch.isfinite(outputs["transport_plan"]).all()
+    assert "shot_evidence_score_mass" not in outputs
     assert outputs["rae_uot_pair_evidence"].shape[2] == shot
     assert torch.allclose(
         outputs["rae_uot_query_weight"].sum(dim=-1),
@@ -973,6 +1037,315 @@ def test_rival_aware_evidence_uot_forward_is_finite_for_few_shot(shot):
         torch.ones_like(outputs["rae_uot_support_weight"].sum(dim=-1)),
         atol=1e-5,
     )
+
+
+def test_ours_final_uniform_marginal_mode_matches_original_baseline():
+    torch.manual_seed(522)
+    baseline = _tiny_ours_final()
+    explicit_uniform = _tiny_ours_final(ours_final_marginal_mode="uniform")
+    explicit_uniform.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    explicit_uniform.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = explicit_uniform(query, support)
+
+    assert torch.equal(actual, expected)
+
+
+def test_ours_final_failure_probe_detects_negative_utility_and_common_mass():
+    probe = OursFinalFailureProbe(common_margin=0.10)
+    cost = torch.tensor(
+        [
+            [
+                [[0.10, 0.90], [0.90, 0.90]],
+                [[0.10, 0.90], [0.20, 0.90]],
+            ]
+        ]
+    )
+    plan = torch.zeros(1, 2, 1, 2, 2)
+    plan[0, 0, 0, 0, 0] = 0.4
+    plan[0, 0, 0, 1, 1] = 0.4
+    plan[0, 1, 0, 0, 0] = 0.4
+    plan[0, 1, 0, 1, 0] = 0.4
+
+    payload = probe(
+        cost,
+        plan,
+        threshold=torch.tensor(0.5),
+        way_num=2,
+        shot_num=1,
+    )
+
+    assert payload["ours_probe_negative_utility_mass_ratio"][0, 0].item() == pytest.approx(0.5)
+    assert payload["ours_probe_negative_utility_mass_ratio"][0, 1].item() == pytest.approx(0.0)
+    assert payload["ours_probe_common_mass_ratio"][0, 0].item() == pytest.approx(0.5)
+    assert payload["ours_probe_dead_query_ratio"][0, 0].item() == pytest.approx(0.5)
+    assert payload["ours_probe_harm_share"][0, 0].item() == pytest.approx(0.5)
+    assert payload["ours_probe_utility_score"][0, 1] > payload["ours_probe_utility_score"][0, 0]
+
+
+def test_ours_final_failure_probe_flag_does_not_change_logits():
+    torch.manual_seed(5221)
+    baseline = _tiny_ours_final()
+    probed = _tiny_ours_final(enable_ours_final_failure_probe=True)
+    probed.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    probed.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support, return_aux=True)
+        actual = probed(query, support, return_aux=True)
+
+    assert torch.equal(actual["logits"], expected["logits"])
+    assert torch.equal(actual["transport_plan"], expected["transport_plan"])
+    assert actual["ours_probe_negative_utility_mass_ratio"].shape == actual["logits"].shape
+    assert torch.isfinite(actual["ours_probe/harm_share"])
+
+
+def test_ours_final_failure_probe_runner_builds_baseline_and_novelty_ablation():
+    variants = build_ours_final_failure_probe_variants()
+
+    assert [variant["tag"] for variant in variants] == [
+        "ours_final_probe_uniform",
+        "ours_final_probe_utility_fixed",
+        "ours_final_probe_utility_adaptive",
+    ]
+    assert all("--enable_ours_final_failure_probe" in variant["extra_args"] for variant in variants)
+    assert "--ours_final_marginal_mode" not in variants[0]["extra_args"]
+    assert variants[1]["extra_args"][-1] == "false"
+    assert variants[2]["extra_args"][-1] == "true"
+
+
+def test_score_aligned_ours_final_marginals_are_nonuniform_and_query_shared():
+    model = _tiny_ours_final(
+        ours_final_marginal_mode="score_aligned",
+        score_marginal_tau=0.25,
+        score_marginal_mix=1.0,
+    )
+    cost = torch.ones(1, 2, 3, 3)
+    cost[0, 0, 0, 0] = 0.01
+    cost[0, 1, 0, 0] = 0.01
+    cost[0, 0, 1, 1] = 0.01
+    cost[0, 1, 1, 1] = 0.90
+
+    query_weight, support_weight, payload = model._apply_score_aligned_marginals(
+        cost,
+        query_weight=None,
+        support_weight=None,
+        way_num=2,
+        shot_num=1,
+    )
+
+    assert query_weight.shape == (1, 3)
+    assert support_weight.shape == (1, 2, 3)
+    assert torch.allclose(query_weight.sum(dim=-1), torch.ones(1), atol=1e-6)
+    assert torch.allclose(support_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
+    assert query_weight[0, 1] > query_weight[0, 0]
+    assert support_weight[0, 0, 1] > support_weight[0, 0, 0]
+    assert payload["score_marginal/query_is_class_shared"].item() == pytest.approx(1.0)
+    assert payload["score_marginal/query_weight_peak"].item() > 1.0 / 3.0
+    assert payload["score_marginal/effective_mix"].item() <= 1.0
+    assert payload["score_marginal/evidence_confidence"].item() > 0.0
+
+
+def test_score_aligned_ours_final_improves_controlled_score_margin_over_uniform():
+    uniform_model = _tiny_ours_final(enable_ours_final_failure_probe=True)
+    score_marginal_model = _tiny_ours_final(
+        ours_final_marginal_mode="score_aligned",
+        score_marginal_tau=0.25,
+        score_marginal_mix=1.0,
+        enable_ours_final_failure_probe=True,
+    )
+    uniform_model.eval()
+    score_marginal_model.eval()
+    cost = torch.ones(1, 2, 3, 3)
+    cost[0, 0, 0, 0] = 0.01
+    cost[0, 1, 0, 0] = 0.01
+    cost[0, 0, 1, 1] = 0.01
+    cost[0, 1, 1, 1] = 0.90
+
+    with torch.no_grad():
+        uniform_outputs = uniform_model._forward_ecot_budget_bank(
+            cost,
+            way_num=2,
+            shot_num=1,
+        )
+        score_marginal_outputs = score_marginal_model._forward_ecot_budget_bank(
+            cost,
+            way_num=2,
+            shot_num=1,
+        )
+
+    uniform_margin = (
+        uniform_outputs["shot_logits"][0, 0, 0]
+        - uniform_outputs["shot_logits"][0, 1, 0]
+    )
+    score_marginal_margin = (
+        score_marginal_outputs["shot_logits"][0, 0, 0]
+        - score_marginal_outputs["shot_logits"][0, 1, 0]
+    )
+    assert score_marginal_margin > uniform_margin
+    assert (
+        score_marginal_outputs["ours_probe_negative_utility_mass_ratio"][0, 0]
+        < uniform_outputs["ours_probe_negative_utility_mass_ratio"][0, 0]
+    )
+    assert (
+        score_marginal_outputs["ours_probe_common_mass_ratio"][0, 0]
+        < uniform_outputs["ours_probe_common_mass_ratio"][0, 0]
+    )
+    assert (
+        score_marginal_outputs["ours_probe_harm_share"][0, 0]
+        < uniform_outputs["ours_probe_harm_share"][0, 0]
+    )
+    assert torch.isfinite(score_marginal_outputs["score_marginal/l1_drift"])
+
+
+def test_score_aligned_ours_final_common_only_case_falls_back_to_uniform():
+    model = _tiny_ours_final(
+        ours_final_marginal_mode="score_aligned",
+        score_marginal_mix=1.0,
+    )
+    cost = torch.ones(1, 2, 3, 3)
+
+    query_weight, support_weight, payload = model._apply_score_aligned_marginals(
+        cost,
+        query_weight=None,
+        support_weight=None,
+        way_num=2,
+        shot_num=1,
+    )
+
+    assert torch.allclose(query_weight, torch.full_like(query_weight, 1.0 / 3.0), atol=1e-6)
+    assert torch.allclose(support_weight, torch.full_like(support_weight, 1.0 / 3.0), atol=1e-6)
+    assert payload["score_marginal/uniform_fallback_query_share"].item() == pytest.approx(1.0)
+    assert payload["score_marginal/uniform_fallback_support_share"].item() == pytest.approx(1.0)
+
+
+def test_score_aligned_ours_final_is_invariant_to_duplicate_shots():
+    torch.manual_seed(523)
+    model = _tiny_ours_final(ours_final_marginal_mode="score_aligned")
+    way_num = 3
+    cost_one = torch.rand(2, way_num, 4, 5)
+    cost_five = (
+        cost_one.reshape(2, way_num, 1, 4, 5)
+        .expand(-1, -1, 5, -1, -1)
+        .reshape(2, way_num * 5, 4, 5)
+        .clone()
+    )
+
+    query_one, support_one, payload_one = model._apply_score_aligned_marginals(
+        cost_one,
+        query_weight=None,
+        support_weight=None,
+        way_num=way_num,
+        shot_num=1,
+    )
+    query_five, support_five, payload_five = model._apply_score_aligned_marginals(
+        cost_five,
+        query_weight=None,
+        support_weight=None,
+        way_num=way_num,
+        shot_num=5,
+    )
+
+    assert torch.allclose(query_five, query_one, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        support_five.reshape(2, way_num, 5, 5)[:, :, 0],
+        support_one.reshape(2, way_num, 1, 5)[:, :, 0],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        payload_five["score_marginal_pair_evidence"][:, :, 0],
+        payload_one["score_marginal_pair_evidence"][:, :, 0],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("shot", [1, 5])
+def test_score_aligned_ours_final_forward_is_finite(shot):
+    torch.manual_seed(524 + shot)
+    model = _tiny_ours_final(
+        ours_final_marginal_mode="score_aligned",
+        enable_global_residual_score=True,
+        global_residual_weight=0.10,
+    )
+    model.eval()
+    query, support = _episode(shot=shot)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert not model.ecot_m2_cost_per_mass_score
+    assert model.egsm_marginal is None
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["transport_plan"]).all()
+    assert outputs["score_marginal_pair_evidence"].shape[2] == shot
+    assert torch.allclose(
+        outputs["score_marginal_query_weight"].sum(dim=-1),
+        torch.ones_like(outputs["score_marginal_query_weight"].sum(dim=-1)),
+        atol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["score_marginal_support_weight"].sum(dim=-1),
+        torch.ones_like(outputs["score_marginal_support_weight"].sum(dim=-1)),
+        atol=1e-5,
+    )
+    assert torch.isfinite(outputs["score_marginal/query_l1_drift"])
+    assert torch.isfinite(outputs["score_marginal/support_l1_drift"])
+
+
+def test_score_aligned_ours_final_factory_flags_are_forwarded_and_scoped():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        ours_final_marginal_mode="score_aligned",
+        score_marginal_tau=0.31,
+        score_marginal_mix=0.72,
+        score_marginal_adaptive_mix="false",
+        score_marginal_confidence_power=1.5,
+        enable_ours_final_failure_probe="true",
+        ours_probe_common_margin=0.12,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(model="ours_final", ours_ablation="full", **common)
+    )
+
+    assert ours_final.ours_final_marginal_mode == "score_aligned"
+    assert ours_final.score_marginal_tau == pytest.approx(0.31)
+    assert ours_final.score_marginal_mix == pytest.approx(0.72)
+    assert not ours_final.score_marginal_adaptive_mix
+    assert ours_final.score_marginal_confidence_power == pytest.approx(1.5)
+    assert ours_final.enable_ours_final_failure_probe
+    assert ours_final.ours_probe_common_margin == pytest.approx(0.12)
+    assert not ours_final.ecot_m2_cost_per_mass_score
+    assert ours_final.egsm_marginal is None
+
+    with pytest.raises(
+        ValueError,
+        match="supported only with --model ours_final",
+    ):
+        build_model_from_args(
+            SimpleNamespace(model="ours", ours_ablation="full", **common)
+        )
+
+
+def test_score_aligned_ours_final_rejects_competing_marginal_paths():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _tiny_ours_final(
+            ours_final_marginal_mode="score_aligned",
+            enable_rival_aware_evidence_uot=True,
+        )
 
 
 def test_episode_contrastive_uot_factory_flags_are_forwarded():
@@ -1055,11 +1428,7 @@ def test_rival_aware_evidence_uot_factory_flags_are_forwarded_and_scoped():
         hrot_sinkhorn_tolerance=1e-5,
         enable_rival_aware_evidence_uot="true",
         rae_uot_tau=0.31,
-        rae_uot_margin=0.02,
-        rae_uot_marginal_tau=0.41,
         rae_uot_marginal_mix=0.72,
-        rae_uot_cost_weight=0.19,
-        rae_uot_detach="false",
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -1071,12 +1440,8 @@ def test_rival_aware_evidence_uot_factory_flags_are_forwarded_and_scoped():
 
     assert ours_final.enable_rival_aware_evidence_uot
     assert ours_final.rae_uot_tau == pytest.approx(0.31)
-    assert ours_final.rae_uot_margin == pytest.approx(0.02)
-    assert ours_final.rae_uot_marginal_tau == pytest.approx(0.41)
     assert ours_final.rae_uot_marginal_mix == pytest.approx(0.72)
-    assert ours_final.rae_uot_cost_weight == pytest.approx(0.19)
-    assert not ours_final.rae_uot_detach
-    assert ours_final.ecot_m2_cost_per_mass_score
+    assert not ours_final.ecot_m2_cost_per_mass_score
     assert ours_final.egsm_marginal is None
 
     with pytest.raises(
@@ -1097,6 +1462,268 @@ def test_rival_aware_evidence_uot_rejects_competing_local_transport_paths():
         _tiny_ours_final(
             enable_rival_aware_evidence_uot=True,
             enable_reciprocal_verified_uot=True,
+        )
+
+
+def test_hubness_calibrated_uot_suppresses_common_hubs_before_transport():
+    model = _tiny_ours_final(
+        enable_hubness_calibrated_uot=True,
+        hcuot_topk=1,
+        hcuot_temperature=0.25,
+        hcuot_cost_weight=0.50,
+        hcuot_marginal_mix=1.0,
+    )
+    query_tokens = torch.tensor(
+        [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]]
+    )
+    support_tokens = torch.tensor(
+        [
+            [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]],
+            [[[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]]],
+        ]
+    )
+    cost = torch.ones(1, 2, 3, 3)
+
+    guided_cost, query_weight, support_weight, specificity, payload = (
+        model._apply_hubness_calibrated_uot(
+            cost,
+            query_weight=None,
+            support_weight=None,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=2,
+            shot_num=1,
+        )
+    )
+
+    assert guided_cost[0, 0, 1, 1] < guided_cost[0, 0, 0, 0]
+    assert specificity[0, 0, 0, 1, 1] > specificity[0, 0, 0, 0, 0]
+    assert query_weight[0, 0, 1] > query_weight[0, 0, 0]
+    assert support_weight[0, 0, 1] > support_weight[0, 0, 0]
+    assert torch.allclose(query_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
+    assert torch.allclose(support_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
+    assert payload["hcuot/cost_delta_ratio"].item() > 0.0
+    assert payload["hcuot/common_pair_share"].item() > 0.0
+
+
+def test_hubness_calibrated_uot_common_only_case_is_neutral():
+    model = _tiny_ours_final(
+        enable_hubness_calibrated_uot=True,
+        hcuot_topk=1,
+        hcuot_marginal_mix=1.0,
+    )
+    shared = torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    query_tokens = shared.unsqueeze(0)
+    support_tokens = shared.view(1, 1, 3, 2).expand(2, -1, -1, -1).clone()
+    cost = torch.ones(1, 2, 3, 3)
+
+    guided_cost, query_weight, support_weight, specificity, payload = (
+        model._apply_hubness_calibrated_uot(
+            cost,
+            query_weight=None,
+            support_weight=None,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=2,
+            shot_num=1,
+        )
+    )
+
+    assert torch.allclose(guided_cost, cost, atol=1e-6, rtol=1e-6)
+    assert torch.count_nonzero(specificity) == 0
+    assert torch.allclose(query_weight, torch.full_like(query_weight, 1.0 / 3.0), atol=1e-6)
+    assert torch.allclose(support_weight, torch.full_like(support_weight, 1.0 / 3.0), atol=1e-6)
+    assert payload["hcuot/uniform_fallback_query_share"].item() == pytest.approx(1.0)
+    assert payload["hcuot/uniform_fallback_support_share"].item() == pytest.approx(1.0)
+
+
+def test_hubness_calibrated_uot_is_invariant_to_duplicate_shots():
+    torch.manual_seed(530)
+    model = _tiny_ours_final(enable_hubness_calibrated_uot=True, hcuot_topk=2)
+    query_tokens = torch.randn(2, 4, 6)
+    support_one = torch.randn(3, 1, 5, 6)
+    support_five = support_one.expand(-1, 5, -1, -1).clone()
+    cost_one = torch.rand(2, 3, 4, 5)
+    cost_five = (
+        cost_one.reshape(2, 3, 1, 4, 5)
+        .expand(-1, -1, 5, -1, -1)
+        .reshape(2, 15, 4, 5)
+        .clone()
+    )
+
+    one = model._apply_hubness_calibrated_uot(
+        cost_one,
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens,
+        support_tokens=support_one,
+        way_num=3,
+        shot_num=1,
+    )
+    five = model._apply_hubness_calibrated_uot(
+        cost_five,
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens,
+        support_tokens=support_five,
+        way_num=3,
+        shot_num=5,
+    )
+
+    one_cost, one_query, one_support, one_specificity, _ = one
+    five_cost, five_query, five_support, five_specificity, _ = five
+    assert torch.allclose(
+        five_cost.reshape(2, 3, 5, 4, 5)[:, :, 0],
+        one_cost.reshape(2, 3, 1, 4, 5)[:, :, 0],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        five_query.reshape(2, 3, 5, 4)[:, :, 0],
+        one_query.reshape(2, 3, 1, 4)[:, :, 0],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        five_support.reshape(2, 3, 5, 5)[:, :, 0],
+        one_support.reshape(2, 3, 1, 5)[:, :, 0],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        five_specificity[:, :, 0],
+        one_specificity[:, :, 0],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+def test_hubness_calibrated_uot_is_equivariant_to_token_permutations():
+    torch.manual_seed(535)
+    model = _tiny_ours_final(enable_hubness_calibrated_uot=True, hcuot_topk=2)
+    way_num, shot_num = 3, 2
+    query_tokens = torch.randn(2, 4, 6)
+    support_tokens = torch.randn(way_num, shot_num, 5, 6)
+    cost = torch.rand(2, way_num * shot_num, 4, 5)
+    query_perm = torch.tensor([2, 0, 3, 1])
+    support_perm = torch.tensor([4, 1, 3, 0, 2])
+
+    original = model._apply_hubness_calibrated_uot(
+        cost,
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens,
+        support_tokens=support_tokens,
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+    permuted = model._apply_hubness_calibrated_uot(
+        cost[:, :, query_perm][:, :, :, support_perm],
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens[:, query_perm],
+        support_tokens=support_tokens[:, :, support_perm],
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+
+    original_cost, original_query, original_support, original_specificity, _ = original
+    permuted_cost, permuted_query, permuted_support, permuted_specificity, _ = permuted
+    assert torch.allclose(
+        permuted_cost,
+        original_cost[:, :, query_perm][:, :, :, support_perm],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        permuted_query,
+        original_query[:, :, query_perm],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        permuted_support,
+        original_support[:, :, support_perm],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        permuted_specificity,
+        original_specificity[:, :, :, query_perm][:, :, :, :, support_perm],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("shot", [1, 5])
+def test_hubness_calibrated_uot_forward_is_finite_for_few_shot(shot):
+    torch.manual_seed(540 + shot)
+    model = _tiny_ours_final(
+        enable_hubness_calibrated_uot=True,
+        enable_global_residual_score=True,
+        global_residual_weight=0.10,
+    )
+    model.eval()
+    query, support = _episode(shot=shot)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["transport_plan"]).all()
+    assert outputs["hcuot_pair_specificity"].shape[2] == shot
+    assert torch.allclose(
+        outputs["hcuot_query_weight"].sum(dim=-1),
+        torch.ones_like(outputs["hcuot_query_weight"].sum(dim=-1)),
+        atol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["hcuot_support_weight"].sum(dim=-1),
+        torch.ones_like(outputs["hcuot_support_weight"].sum(dim=-1)),
+        atol=1e-5,
+    )
+
+
+def test_hubness_calibrated_uot_factory_flags_are_forwarded_and_scoped():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_hubness_calibrated_uot="true",
+        hcuot_topk=2,
+        hcuot_temperature=0.31,
+        hcuot_cost_weight=0.42,
+        hcuot_marginal_mix=0.67,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(model="ours_final", ours_ablation="full", **common)
+    )
+
+    assert ours_final.enable_hubness_calibrated_uot
+    assert ours_final.hcuot_topk == 2
+    assert ours_final.hcuot_temperature == pytest.approx(0.31)
+    assert ours_final.hcuot_cost_weight == pytest.approx(0.42)
+    assert ours_final.hcuot_marginal_mix == pytest.approx(0.67)
+    assert ours_final.egsm_marginal is None
+
+    with pytest.raises(
+        ValueError,
+        match="--enable_hubness_calibrated_uot is supported only with --model ours_final",
+    ):
+        build_model_from_args(
+            SimpleNamespace(model="ours", ours_ablation="full", **common)
+        )
+
+
+def test_hubness_calibrated_uot_rejects_competing_local_transport_paths():
+    with pytest.raises(ValueError, match="defines the complete local transport path"):
+        _tiny_ours_final(
+            enable_hubness_calibrated_uot=True,
+            enable_rival_aware_evidence_uot=True,
         )
 
 

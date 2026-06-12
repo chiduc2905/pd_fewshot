@@ -376,10 +376,30 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_global_residual_score is supported only with --model ours_final")
+    marginal_mode = str(
+        getattr(args, "ours_final_marginal_mode", "uniform")
+    ).strip().lower().replace("-", "_")
+    if marginal_mode != "uniform" and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError(
+            "--ours_final_marginal_mode score_aligned is supported only with --model ours_final"
+        )
+    if _bool_flag(
+        getattr(args, "enable_ours_final_failure_probe", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_ours_final_failure_probe is supported only with --model ours_final"
+        )
     if _bool_flag(getattr(args, "enable_rival_aware_evidence_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_rival_aware_evidence_uot is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_hubness_calibrated_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_hubness_calibrated_uot is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_discriminative_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2856,6 +2876,35 @@ def build_model_from_args(args):
                     "dm_debug": str(getattr(args, "dm_debug", "auto")),
                     "dm_debug_dir": str(getattr(args, "dm_debug_dir", "results/dmt_debug")),
                     "dm_debug_max_episodes": int(getattr(args, "dm_debug_max_episodes", 5)),
+                    **(
+                        {
+                            "ours_final_marginal_mode": str(
+                                getattr(args, "ours_final_marginal_mode", "uniform")
+                            ),
+                            "score_marginal_tau": float(
+                                getattr(args, "score_marginal_tau", 0.25)
+                            ),
+                            "score_marginal_mix": float(
+                                getattr(args, "score_marginal_mix", 0.65)
+                            ),
+                            "score_marginal_adaptive_mix": _bool_flag(
+                                getattr(args, "score_marginal_adaptive_mix", "true"),
+                                default=True,
+                            ),
+                            "score_marginal_confidence_power": float(
+                                getattr(args, "score_marginal_confidence_power", 1.0)
+                            ),
+                            "enable_ours_final_failure_probe": _bool_flag(
+                                getattr(args, "enable_ours_final_failure_probe", "false"),
+                                default=False,
+                            ),
+                            "ours_probe_common_margin": float(
+                                getattr(args, "ours_probe_common_margin", 0.10)
+                            ),
+                        }
+                        if is_ours_final_model
+                        else {}
+                    ),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
                     **(resolve_ours_final_evidence_config(args) if is_ours_final_model else {}),
                     **(
@@ -2953,24 +3002,34 @@ def build_model_from_args(args):
                         {
                             "enable_rival_aware_evidence_uot": True,
                             "rae_uot_tau": float(getattr(args, "rae_uot_tau", 0.25)),
-                            "rae_uot_margin": float(getattr(args, "rae_uot_margin", 0.0)),
-                            "rae_uot_marginal_tau": float(
-                                getattr(args, "rae_uot_marginal_tau", 0.50)
-                            ),
                             "rae_uot_marginal_mix": float(
                                 getattr(args, "rae_uot_marginal_mix", 0.65)
-                            ),
-                            "rae_uot_cost_weight": float(
-                                getattr(args, "rae_uot_cost_weight", 0.25)
-                            ),
-                            "rae_uot_detach": _bool_flag(
-                                getattr(args, "rae_uot_detach", "true"),
-                                default=True,
                             ),
                         }
                         if is_ours_final_model
                         and _bool_flag(
                             getattr(args, "enable_rival_aware_evidence_uot", False),
+                            default=False,
+                        )
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_hubness_calibrated_uot": True,
+                            "hcuot_topk": int(getattr(args, "hcuot_topk", 3)),
+                            "hcuot_temperature": float(
+                                getattr(args, "hcuot_temperature", 0.25)
+                            ),
+                            "hcuot_cost_weight": float(
+                                getattr(args, "hcuot_cost_weight", 0.35)
+                            ),
+                            "hcuot_marginal_mix": float(
+                                getattr(args, "hcuot_marginal_mix", 0.50)
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(
+                            getattr(args, "enable_hubness_calibrated_uot", False),
                             default=False,
                         )
                         else {}

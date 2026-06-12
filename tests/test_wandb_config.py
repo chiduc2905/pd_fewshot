@@ -103,3 +103,75 @@ def test_ours_final_wandb_config_logs_verified_uot_for_verified_alias():
     assert cfg["verified_uot_beta"] == 0.75
     assert cfg["verified_uot_tau"] == 0.1
     assert "care_enable_qesm" not in cfg
+
+
+def test_ours_final_wandb_config_logs_hcuot_only_when_enabled():
+    args = SimpleNamespace(
+        model="ours_final",
+        enable_hubness_calibrated_uot=True,
+        hcuot_topk=3,
+        hcuot_temperature=0.25,
+        hcuot_cost_weight=0.35,
+        hcuot_marginal_mix=0.50,
+        deepemd_solver="sinkhorn",
+    )
+
+    cfg = build_wandb_init_config(
+        args,
+        _model_meta(),
+        selection_split="val",
+        merge_val_into_train=False,
+    )
+
+    assert cfg["enable_hubness_calibrated_uot"] is True
+    assert cfg["hcuot_topk"] == 3
+    assert cfg["hcuot_temperature"] == 0.25
+    assert cfg["hcuot_cost_weight"] == 0.35
+    assert cfg["hcuot_marginal_mix"] == 0.50
+    assert "deepemd_solver" not in cfg
+
+
+def test_ours_final_wandb_config_logs_score_aligned_marginal_mode():
+    args = SimpleNamespace(
+        model="ours_final",
+        ours_final_marginal_mode="score_aligned",
+        score_marginal_tau=0.25,
+        score_marginal_mix=0.65,
+        score_marginal_adaptive_mix="true",
+        score_marginal_confidence_power=1.0,
+        deepemd_solver="sinkhorn",
+    )
+
+    cfg = build_wandb_init_config(
+        args,
+        _model_meta(),
+        selection_split="val",
+        merge_val_into_train=False,
+    )
+
+    assert cfg["ours_final_marginal_mode"] == "score_aligned"
+    assert cfg["score_marginal_tau"] == 0.25
+    assert cfg["score_marginal_mix"] == 0.65
+    assert cfg["score_marginal_adaptive_mix"] == "true"
+    assert cfg["score_marginal_confidence_power"] == 1.0
+    assert "deepemd_solver" not in cfg
+
+
+def test_ours_final_wandb_config_logs_failure_probe_only_when_enabled():
+    args = SimpleNamespace(
+        model="ours_final",
+        enable_ours_final_failure_probe="true",
+        ours_probe_common_margin=0.10,
+        deepemd_solver="sinkhorn",
+    )
+
+    cfg = build_wandb_init_config(
+        args,
+        _model_meta(),
+        selection_split="val",
+        merge_val_into_train=False,
+    )
+
+    assert cfg["enable_ours_final_failure_probe"] == "true"
+    assert cfg["ours_probe_common_margin"] == 0.10
+    assert "deepemd_solver" not in cfg

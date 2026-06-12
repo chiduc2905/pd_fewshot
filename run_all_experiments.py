@@ -372,6 +372,9 @@ def get_args():
             "evidence",
             "pulse_region",
             "global_residual",
+            "score_marginal",
+            "failure_probe",
+            "hubness_uot",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -386,7 +389,10 @@ def get_args():
             "mass_on=shot-consensus threshold-mass score variants; "
             "evidence=cost-derived evidence marginal ablation (query/support/both/rival); "
             "pulse_region=pulse cost guidance and conservative pulse mass-mix candidates; "
-            "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls."
+            "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls; "
+            "score_marginal=original uniform baseline plus Ours-Final score-aligned marginal sweep; "
+            "failure_probe=uniform diagnostic baseline versus fixed/adaptive utility-contrastive marginals; "
+            "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only."
         ),
     )
     parser.add_argument(
@@ -406,7 +412,10 @@ def get_args():
             "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
             "Aliases: full/original/uot, ccem_uot/evidence, full_ot/ot/balanced_ot, "
             "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
-            "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>. "
+            "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
+            "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
+            "probe_uniform, probe_fixed, probe_adaptive, "
+            "hcuot, hcuot_cost_only, hcuot_marginal_only. "
             "Default all keeps the suite's normal variants."
         ),
     )
@@ -1595,6 +1604,157 @@ def build_ours_final_global_residual_variants():
         ]
     )
     return variants
+
+
+def build_ours_final_hubness_uot_variants():
+    """HC-UOT candidate and mechanism ablations with the accepted global residual."""
+    base = _ours_final_base_args()
+    global_residual = [
+        "--enable_global_residual_score",
+        "--global_residual_mode",
+        "residual",
+        "--global_residual_weight",
+        "0.1",
+    ]
+    hcuot = [
+        "--enable_hubness_calibrated_uot",
+        "true",
+        "--hcuot_topk",
+        "3",
+        "--hcuot_temperature",
+        "0.25",
+    ]
+    return [
+        {
+            "tag": "ours_final_global_res_w0p1",
+            "checkpoint_tag": "global_res_w0p1",
+            "label": "Accepted Ours-Final local UOT + global residual weight=0.1 baseline",
+            "extra_args": base + global_residual,
+        },
+        {
+            "tag": "ours_final_hcuot_global_res",
+            "checkpoint_tag": "hcuot_global_res",
+            "label": "HC-UOT two-sided hubness-calibrated cost+marginals + global residual",
+            "extra_args": base
+            + global_residual
+            + hcuot
+            + [
+                "--hcuot_cost_weight",
+                "0.35",
+                "--hcuot_marginal_mix",
+                "0.50",
+            ],
+        },
+        {
+            "tag": "ours_final_hcuot_cost_only_global_res",
+            "checkpoint_tag": "hcuot_cost_only_global_res",
+            "label": "HC-UOT cost calibration only + global residual",
+            "extra_args": base
+            + global_residual
+            + hcuot
+            + [
+                "--hcuot_cost_weight",
+                "0.35",
+                "--hcuot_marginal_mix",
+                "0.0",
+            ],
+        },
+        {
+            "tag": "ours_final_hcuot_marginal_only_global_res",
+            "checkpoint_tag": "hcuot_marginal_only_global_res",
+            "label": "HC-UOT marginal calibration only + global residual",
+            "extra_args": base
+            + global_residual
+            + hcuot
+            + [
+                "--hcuot_cost_weight",
+                "0.0",
+                "--hcuot_marginal_mix",
+                "0.50",
+            ],
+        },
+    ]
+
+
+def build_ours_final_score_marginal_variants():
+    """Original Ours-Final versus score-aligned non-uniform marginals."""
+    base = _ours_final_base_args()
+    variants = [
+        {
+            "tag": "ours_final_uniform_marginal",
+            "checkpoint_tag": "uniform_marginal",
+            "label": "Original Ours-Final with uniform UOT marginals",
+            "extra_args": base,
+        }
+    ]
+    for marginal_mix in (0.35, 0.65, 0.85):
+        mix_tag = str(marginal_mix).replace(".", "p")
+        variants.append(
+            {
+                "tag": f"ours_final_score_marginal_mix{mix_tag}",
+                "checkpoint_tag": f"score_marginal_mix{mix_tag}",
+                "label": (
+                    "Ours-Final score-aligned non-uniform marginals "
+                    f"(tau=0.25, marginal_mix={marginal_mix:g})"
+                ),
+                "extra_args": base + [
+                    "--ours_final_marginal_mode",
+                    "score_aligned",
+                    "--score_marginal_tau",
+                    "0.25",
+                    "--score_marginal_mix",
+                    f"{marginal_mix:g}",
+                ],
+            }
+        )
+    return variants
+
+
+def build_ours_final_failure_probe_variants():
+    """Diagnose original Ours-Final, then test the utility-contrastive novelty."""
+    base = _ours_final_base_args()
+    probe = [
+        "--enable_ours_final_failure_probe",
+        "true",
+        "--ours_probe_common_margin",
+        "0.10",
+    ]
+    score_aligned = [
+        "--ours_final_marginal_mode",
+        "score_aligned",
+        "--score_marginal_tau",
+        "0.25",
+        "--score_marginal_mix",
+        "0.65",
+        "--score_marginal_confidence_power",
+        "1.0",
+    ]
+    return [
+        {
+            "tag": "ours_final_probe_uniform",
+            "checkpoint_tag": "probe_uniform",
+            "label": "Original Ours-Final uniform marginals with failure probe",
+            "extra_args": base + probe,
+        },
+        {
+            "tag": "ours_final_probe_utility_fixed",
+            "checkpoint_tag": "probe_utility_fixed",
+            "label": "Ours-Final utility-contrastive marginals with fixed mixing and failure probe",
+            "extra_args": base
+            + probe
+            + score_aligned
+            + ["--score_marginal_adaptive_mix", "false"],
+        },
+        {
+            "tag": "ours_final_probe_utility_adaptive",
+            "checkpoint_tag": "probe_utility_adaptive",
+            "label": "Ours-Final utility-contrastive marginals with confidence-adaptive mixing and failure probe",
+            "extra_args": base
+            + probe
+            + score_aligned
+            + ["--score_marginal_adaptive_mix", "true"],
+        },
+    ]
 
 
 def _cfuget_base_args(
@@ -2983,6 +3143,28 @@ def parse_ours_final_variant_filter(variants_str):
         "global_residual_w0p3": "ours_final_global_res_w0p3",
         "global_residual_w0p30": "ours_final_global_res_w0p3",
         "global_residual": "ours_final_global_res_w0p1",
+        "uniform_marginal": "ours_final_uniform_marginal",
+        "score_marginal": "ours_final_score_marginal_mix0p65",
+        "score_mix0p35": "ours_final_score_marginal_mix0p35",
+        "score_mix0p65": "ours_final_score_marginal_mix0p65",
+        "score_mix0p85": "ours_final_score_marginal_mix0p85",
+        "ours_final_uniform_marginal": "ours_final_uniform_marginal",
+        "ours_final_score_marginal_mix0p35": "ours_final_score_marginal_mix0p35",
+        "ours_final_score_marginal_mix0p65": "ours_final_score_marginal_mix0p65",
+        "ours_final_score_marginal_mix0p85": "ours_final_score_marginal_mix0p85",
+        "probe_uniform": "ours_final_probe_uniform",
+        "probe_fixed": "ours_final_probe_utility_fixed",
+        "probe_adaptive": "ours_final_probe_utility_adaptive",
+        "ours_final_probe_uniform": "ours_final_probe_uniform",
+        "ours_final_probe_utility_fixed": "ours_final_probe_utility_fixed",
+        "ours_final_probe_utility_adaptive": "ours_final_probe_utility_adaptive",
+        "hcuot": "ours_final_hcuot_global_res",
+        "hcuot_full": "ours_final_hcuot_global_res",
+        "ours_final_hcuot_global_res": "ours_final_hcuot_global_res",
+        "hcuot_cost_only": "ours_final_hcuot_cost_only_global_res",
+        "ours_final_hcuot_cost_only_global_res": "ours_final_hcuot_cost_only_global_res",
+        "hcuot_marginal_only": "ours_final_hcuot_marginal_only_global_res",
+        "ours_final_hcuot_marginal_only_global_res": "ours_final_hcuot_marginal_only_global_res",
         "mass_scaled": "ours_final_mass_scaled_b0p5",
         "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
         "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
@@ -3021,7 +3203,10 @@ def parse_ours_final_variant_filter(variants_str):
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
                 "Use full, ccem_uot, partial_ot, full_ot, gap, mass_off, class_pooled, "
                 "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
-                "rho_<value>, dmuot_<name>, or exact tags."
+                "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
+                "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
+                "probe_adaptive, hcuot, hcuot_cost_only, "
+                "hcuot_marginal_only, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)
@@ -3513,6 +3698,9 @@ def main():
         evidence_variants = build_ours_final_evidence_marginal_variants()
         pulse_region_variants = build_ours_final_pulse_region_variants()
         global_residual_variants = build_ours_final_global_residual_variants()
+        score_marginal_variants = build_ours_final_score_marginal_variants()
+        failure_probe_variants = build_ours_final_failure_probe_variants()
+        hubness_uot_variants = build_ours_final_hubness_uot_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -3530,6 +3718,18 @@ def main():
         pulse_region_variants = filter_ours_final_variants(pulse_region_variants, ours_final_variant_filter)
         global_residual_variants = filter_ours_final_variants(
             global_residual_variants,
+            ours_final_variant_filter,
+        )
+        score_marginal_variants = filter_ours_final_variants(
+            score_marginal_variants,
+            ours_final_variant_filter,
+        )
+        failure_probe_variants = filter_ours_final_variants(
+            failure_probe_variants,
+            ours_final_variant_filter,
+        )
+        hubness_uot_variants = filter_ours_final_variants(
+            hubness_uot_variants,
             ours_final_variant_filter,
         )
         if suite_name == "rho_grid":
@@ -3550,6 +3750,12 @@ def main():
             ablation_variants = pulse_region_variants
         elif suite_name == "global_residual":
             ablation_variants = global_residual_variants
+        elif suite_name == "score_marginal":
+            ablation_variants = score_marginal_variants
+        elif suite_name == "failure_probe":
+            ablation_variants = failure_probe_variants
+        elif suite_name == "hubness_uot":
+            ablation_variants = hubness_uot_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -3724,6 +3930,57 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in global_residual_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "score_marginal":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in score_marginal_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "failure_probe":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in failure_probe_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "hubness_uot":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in hubness_uot_variants
                 for samples in samples_list
                 for shot in shots
             )

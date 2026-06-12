@@ -1,64 +1,52 @@
-# Rival-Aware Evidence UOT (RAE-UOT)
+# Minimal Rival-Aware Evidence UOT
 
 ## Motivation
 
-A locally cheap match is not necessarily useful evidence. In a scalogram, a
-background or noise pattern can be cheap for several candidate classes. Plain
-UOT may retain that match because it only sees the candidate pair, while a
-few-shot classifier needs evidence that is cheap for one class relative to the
-other classes in the same episode.
+A cheap local match is not necessarily class evidence. Background or noise can
+be cheap for several candidate classes. The minimal RAE-UOT rule is:
 
-RAE-UOT defines one local decision principle:
+> Use episode-rival evidence only to decide where UOT receives marginal mass.
 
-> Transport mass only where query and support cross-reference each other and
-> the match is more compatible with the candidate class than with its rivals.
+It replaces EGSM. It does not modify the ground cost and does not replace the
+original Ours-Final score. It is not combined with ECT-UOT, RV-UOT,
+residual-aligned UOT, pulse masks, or other local guidance paths.
 
-It replaces the default EGSM marginal. It is not stacked with ECT-UOT,
-RV-UOT, residual-aligned UOT, pulse masks, or other local verification paths.
-The global residual remains an optional, separate class-level stabilizer.
+## Rival specificity
 
-## Rival-normalized specificity
-
-For query token \(i\), candidate class \(c\), shot \(s\), and support token
-\(j\), let \(D_{c,s,i,j}\) be the local ground cost. The rival reference is
-computed in two steps. First, take a soft minimum over support tokens inside
-each rival shot:
+For local ground cost \(D_{c,s,i,j}\), first compute a soft minimum over the
+support tokens in each rival shot:
 
 \[
 d_{c',s',i}
-=-\tau\log\sum_{j'}\exp\left(-D_{c',s',i,j'}/\tau\right).
+=-\tau\log\sum_{j'}\exp(-D_{c',s',i,j'}/\tau).
 \]
 
-Then aggregate rival class-shot pairs with a normalized soft minimum:
+Aggregate rival class-shot pairs with log-mean-exp:
 
 \[
 \bar D^{-c}_{i}
 =-\tau\left[
-\log\sum_{c'\ne c,s'}\exp\left(-d_{c',s',i}/\tau\right)
+\log\sum_{c'\ne c,s'}\exp(-d_{c',s',i}/\tau)
 -\log N^{-c}
 \right].
 \]
 
-The \(-\log N^{-c}\) term makes the reference a log-mean-exp. Duplicating an
-identical rival shot therefore does not change the gate. The inner soft
-minimum still preserves an isolated cheap rival token instead of averaging it
-away. This removes a systematic 1-shot versus 5-shot bias without hiding
-common cheap matches.
+The normalization makes the reference invariant to duplicating identical
+rival shots, avoiding a systematic 1-shot versus 5-shot shift.
 
 \[
 g_{c,s,i,j}
-=\sigma\left((\bar D^{-c}_{i}-D_{c,s,i,j}-m)/\tau\right),
+=\sigma((\bar D^{-c}_{i}-D_{c,s,i,j})/\tau),
 \qquad
 r_{c,s,i,j}=\max(2g_{c,s,i,j}-1,0).
 \]
 
-An equal-cost candidate/rival match has \(g=0.5\) and \(r=0\). It is treated
-as common evidence rather than class evidence.
+An equal-cost candidate/rival match has zero specificity.
 
-## Bidirectional cross-reference marginals
+## Bidirectional pair marginals
 
-Let \(q_i\) and \(z_{c,s,j}\) be normalized local descriptors. Let
-\(\bar q\) and \(\bar z_{c,s}\) be their pooled descriptors.
+Let \(q_i,z_{c,s,j}\) be normalized local descriptors and
+\(\bar q,\bar z_{c,s}\) their pooled descriptors:
 
 \[
 x^q_{c,s,i}=[q_i^\top\bar z_{c,s}]_+,
@@ -66,101 +54,88 @@ x^q_{c,s,i}=[q_i^\top\bar z_{c,s}]_+,
 x^s_{c,s,j}=[z_{c,s,j}^\top\bar q]_+.
 \]
 
-These are the symmetric cross-reference terms learned from DeepEMD's useful
-observation: the other image should determine which local descriptors receive
-mass. RAE-UOT adds episodic class competition:
+Cross-reference and rival specificity define non-negative evidence:
 
 \[
-a_{c,s,i}\propto
-\exp\left(
-\log(x^q_{c,s,i}\,[\max_j r_{c,s,i,j}+\epsilon])/\tau_m
-\right),
+e^q_{c,s,i}=x^q_{c,s,i}\max_j r_{c,s,i,j},
+\qquad
+e^s_{c,s,j}=x^s_{c,s,j}\max_i r_{c,s,i,j}.
 \]
+
+Each evidence vector is normalized directly. If its total evidence is zero,
+the marginal falls back exactly to uniform:
 
 \[
-b_{c,s,j}\propto
-\exp\left(
-\log(x^s_{c,s,j}\,[\max_i r_{c,s,i,j}+\epsilon])/\tau_m
-\right).
+a=\begin{cases}
+e^q/\sum_i e^q_i,&\sum_i e^q_i>0,\\
+u,&\text{otherwise},
+\end{cases}
+\qquad
+b=\begin{cases}
+e^s/\sum_j e^s_j,&\sum_j e^s_j>0,\\
+u,&\text{otherwise}.
+\end{cases}
 \]
 
-Both marginals are pair-specific. A uniform mixture keeps a non-zero
-exploration floor:
+A uniform mixture provides a fixed exploration floor:
 
 \[
 \tilde a=(1-\lambda)u+\lambda a,\qquad
 \tilde b=(1-\lambda)u+\lambda b.
 \]
 
-## One evidence variable for transport and score
+The only tunable values are rival temperature \(\tau\) and marginal mixture
+\(\lambda\).
 
-The pair evidence is
+## Transport and score
 
-\[
-E_{c,s,i,j}
-=r_{c,s,i,j}
-\sqrt{\hat a_{c,s,i}\hat b_{c,s,j}},
-\]
-
-where juxtaposition denotes multiplication: the implemented expression is the
-rival specificity times the geometric mean of peak-normalized marginal
-probabilities.
-
-The same evidence raises the cost of unsupported matches:
+RAE-UOT changes only the two marginals:
 
 \[
-D' = D+\gamma\,\operatorname{std}(D)\,(1-E).
+P=\operatorname{UOT}(D,\tilde a,\tilde b,\rho=0.8).
 \]
 
-UOT with fixed transported budget \(\rho=0.8\) is then solved using
-\(\tilde a,\tilde b,D'\). The local class score is the negative mean evidence
-transport cost:
+The ground cost and original Ours-Final local score remain unchanged:
 
 \[
-S_{\text{local}}
-=-\frac{\langle P,D'E\rangle}
-{\langle P,E\rangle+\epsilon}.
+S_{\mathrm{local}}=T\,M(P)-\langle P,D\rangle.
 \]
 
-With the existing global residual:
+The existing global residual is optional:
 
 \[
-S=S_{\text{local}}+0.1S_{\text{global}}.
+S=S_{\mathrm{local}}+0.1S_{\mathrm{global}}.
 \]
 
-The local branch answers "where is candidate-specific correspondence?" The
-global branch answers "is the episode-level class prototype compatible?" They
-operate at different statistical scales.
+The evidence determines where mass is offered, UOT determines which offered
+mass is transported, and the original score evaluates the resulting plan.
+The rival signal is therefore used once rather than repeated in the marginal,
+ground cost, and score.
 
-## Why this is not brightness/time bias
+## Bias and falsification
 
 RAE-UOT receives no pixel intensity, fixed time coordinate, frequency mask, or
-hand-selected PD window. Its decisions use learned feature compatibility and
-relative class competition inside each episode. Translating a discharge event
-does not directly change the rule. The uniform marginal floor also prevents a
-single time region from becoming a hard prior.
+hand-selected PD window. Token-position permutation equivariance verifies that
+the mechanism itself has no fixed time prior. This does not prove that the
+backbone cannot learn dataset artifacts.
 
-This does not prove dataset independence. It creates falsifiable checks:
+The method should be rejected if:
 
-1. Rival gates must remain stable when identical rival shots are duplicated.
-2. Common cheap matches must receive lower evidence than class-specific cheap
-   matches in controlled tensors.
-3. Evidence concentration and accuracy must be reported under time shift,
-   noise, and clean protocols.
-4. The method is rejected if visualization improves but clean/noise accuracy
-   or cross-seed stability does not.
+1. Identical rival-shot duplication changes the rival gate.
+2. Common-only evidence does not return uniform marginals.
+3. Clean/noise accuracy or cross-seed stability is worse than the global
+   residual baseline.
+4. Visualization improves without corresponding classification improvement.
 
 ## Novelty boundary
 
-The cross-reference idea alone is not novel; DeepEMD already uses the other
-image to weight local descriptors. The candidate contribution is the unified
+Cross-reference weighting alone is not novel; DeepEMD already uses the other
+image to weight local descriptors. The candidate contribution is the complete
 combination of:
 
 - bidirectional query-conditioned and support-conditioned pair marginals;
 - episode-rival-normalized specificity with shot-count invariance;
-- unbalanced transport that can discard unsupported mass;
-- one evidence variable shared by marginal construction, ground-cost shaping,
-  and mass-normalized local scoring.
+- exact uniform fallback for episodes without class-specific local evidence;
+- UOT mass rejection while retaining the original ground cost and score.
 
-Novelty should be claimed for this complete local decision rule only after
-ablation and literature checks, not for any individual component.
+Novelty should be claimed only after ablation and literature comparison.

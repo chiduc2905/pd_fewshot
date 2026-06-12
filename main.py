@@ -554,16 +554,45 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "ours_final_marginal_mode",
+        frozenset(
+            {
+                "ours_final_marginal_mode",
+                "score_marginal_tau",
+                "score_marginal_mix",
+                "score_marginal_adaptive_mix",
+                "score_marginal_confidence_power",
+            }
+        ),
+    ),
+    (
+        "enable_ours_final_failure_probe",
+        frozenset(
+            {
+                "enable_ours_final_failure_probe",
+                "ours_probe_common_margin",
+            }
+        ),
+    ),
+    (
         "enable_rival_aware_evidence_uot",
         frozenset(
             {
                 "enable_rival_aware_evidence_uot",
                 "rae_uot_tau",
-                "rae_uot_margin",
-                "rae_uot_marginal_tau",
                 "rae_uot_marginal_mix",
-                "rae_uot_cost_weight",
-                "rae_uot_detach",
+            }
+        ),
+    ),
+    (
+        "enable_hubness_calibrated_uot",
+        frozenset(
+            {
+                "enable_hubness_calibrated_uot",
+                "hcuot_topk",
+                "hcuot_temperature",
+                "hcuot_cost_weight",
+                "hcuot_marginal_mix",
             }
         ),
     ),
@@ -759,6 +788,8 @@ def _wandb_flag_enabled(cfg, key):
 
 
 def _wandb_optional_group_enabled_for_ours_final(cfg, gate_key):
+    if gate_key == "ours_final_marginal_mode":
+        return str(cfg.get(gate_key, "uniform")).strip().lower() == "score_aligned"
     if gate_key == "enable_verified_uot_score":
         model_name = str(cfg.get("model", "") or "").strip().lower()
         if model_name == "ours_final_verified_uot":
@@ -2561,6 +2592,41 @@ def get_args():
     parser.add_argument("--rauot_mass_mix", type=float, default=0.25)
     parser.add_argument("--rauot_detach", type=str, default="true", choices=["true", "false"])
     parser.add_argument(
+        "--ours_final_marginal_mode",
+        type=str,
+        default="uniform",
+        choices=["uniform", "score_aligned"],
+        help=(
+            "Ours-Final only: uniform preserves the original path; score_aligned "
+            "replaces only the UOT marginals using the existing T*M-C utility."
+        ),
+    )
+    parser.add_argument("--score_marginal_tau", type=float, default=0.25)
+    parser.add_argument("--score_marginal_mix", type=float, default=0.65)
+    parser.add_argument(
+        "--score_marginal_adaptive_mix",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help=(
+            "Shrink score-aligned marginals toward uniform when the episode has "
+            "weak positive, rival-specific utility."
+        ),
+    )
+    parser.add_argument("--score_marginal_confidence_power", type=float, default=1.0)
+    parser.add_argument(
+        "--enable_ours_final_failure_probe",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: log failure diagnostics from the solved transport "
+            "plan without changing logits."
+        ),
+    )
+    parser.add_argument("--ours_probe_common_margin", type=float, default=0.10)
+    parser.add_argument(
         "--enable_rival_aware_evidence_uot",
         nargs="?",
         const="true",
@@ -2568,15 +2634,26 @@ def get_args():
         choices=["true", "false"],
         help=(
             "Ours-Final only: replace EGSM with bidirectional cross-reference, "
-            "rival-specific pair marginals and evidence-normalized UOT scoring."
+            "rival-specific pair marginals while preserving the original UOT cost and score."
         ),
     )
     parser.add_argument("--rae_uot_tau", type=float, default=0.25)
-    parser.add_argument("--rae_uot_margin", type=float, default=0.0)
-    parser.add_argument("--rae_uot_marginal_tau", type=float, default=0.50)
     parser.add_argument("--rae_uot_marginal_mix", type=float, default=0.65)
-    parser.add_argument("--rae_uot_cost_weight", type=float, default=0.25)
-    parser.add_argument("--rae_uot_detach", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--enable_hubness_calibrated_uot",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: apply class-excluded, two-sided local-density "
+            "calibration to UOT costs and marginals before transport."
+        ),
+    )
+    parser.add_argument("--hcuot_topk", type=int, default=3)
+    parser.add_argument("--hcuot_temperature", type=float, default=0.25)
+    parser.add_argument("--hcuot_cost_weight", type=float, default=0.35)
+    parser.add_argument("--hcuot_marginal_mix", type=float, default=0.50)
     parser.add_argument(
         "--enable_discriminative_uot",
         action="store_true",
@@ -4291,7 +4368,21 @@ def get_model(args):
                 getattr(args, "enable_rival_aware_evidence_uot", "false"),
                 default=False,
             )
-            if rae_uot_enabled:
+            hcuot_enabled = _bool_flag(
+                getattr(args, "enable_hubness_calibrated_uot", "false"),
+                default=False,
+            )
+            score_marginal_enabled = (
+                str(getattr(args, "ours_final_marginal_mode", "uniform")).strip().lower()
+                == "score_aligned"
+            )
+            if score_marginal_enabled:
+                egsm_enabled = False
+                evidence_text = "score-aligned non-uniform UOT marginals"
+            elif hcuot_enabled:
+                egsm_enabled = False
+                evidence_text = "HC-UOT class-excluded two-sided density calibration"
+            elif rae_uot_enabled:
                 egsm_enabled = False
                 evidence_text = "RAE-UOT cross-reference+rival evidence"
             else:
@@ -4312,14 +4403,8 @@ def get_model(args):
                 default=(args.model not in OURS_FINAL_MODEL_NAMES),
             )
             cost_per_mass = _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"), default=False)
-            if rae_uot_enabled:
-                cost_per_mass = True
             if cost_per_mass:
-                score_text = (
-                    "evidence cost-per-mass score"
-                    if rae_uot_enabled
-                    else "cost-per-mass score"
-                )
+                score_text = "cost-per-mass score"
             elif ablate_mass:
                 score_text = "cost-only score(-C)"
             else:
@@ -4931,13 +5016,21 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "rauot_cost_weight",
             "rauot_mass_mix",
             "rauot_detach",
+            "ours_final_marginal_mode",
+            "score_marginal_tau",
+            "score_marginal_mix",
+            "score_marginal_adaptive_mix",
+            "score_marginal_confidence_power",
+            "enable_ours_final_failure_probe",
+            "ours_probe_common_margin",
             "enable_rival_aware_evidence_uot",
             "rae_uot_tau",
-            "rae_uot_margin",
-            "rae_uot_marginal_tau",
             "rae_uot_marginal_mix",
-            "rae_uot_cost_weight",
-            "rae_uot_detach",
+            "enable_hubness_calibrated_uot",
+            "hcuot_topk",
+            "hcuot_temperature",
+            "hcuot_cost_weight",
+            "hcuot_marginal_mix",
             "enable_discriminative_uot",
             "discriminative_uot_tau",
             "discriminative_uot_margin",
@@ -5895,6 +5988,47 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     ):
         metrics.update(summarize_class_score_tensor(competitive_local_scores, targets, prefix="competitive_local"))
 
+    ours_probe_distance_tensors = {
+        "ours_probe_negative_utility_mass_ratio": "ours_probe_negative_utility_mass",
+        "ours_probe_common_mass_ratio": "ours_probe_common_mass",
+        "ours_probe_harm_share": "ours_probe_harm",
+        "ours_probe_dead_query_ratio": "ours_probe_dead_query",
+        "ours_probe_cost_distance": "ours_probe_cost",
+    }
+    for probe_key, prefix in ours_probe_distance_tensors.items():
+        probe_tensor = scores.get(probe_key)
+        if (
+            torch.is_tensor(probe_tensor)
+            and probe_tensor.dim() == 2
+            and probe_tensor.shape[0] == targets.shape[0]
+        ):
+            metrics.update(
+                summarize_class_distance_tensor(
+                    probe_tensor,
+                    targets,
+                    prefix=prefix,
+                )
+            )
+
+    ours_probe_score_tensors = {
+        "ours_probe_utility_score": "ours_probe_utility",
+        "ours_probe_mass_score": "ours_probe_mass",
+    }
+    for probe_key, prefix in ours_probe_score_tensors.items():
+        probe_tensor = scores.get(probe_key)
+        if (
+            torch.is_tensor(probe_tensor)
+            and probe_tensor.dim() == 2
+            and probe_tensor.shape[0] == targets.shape[0]
+        ):
+            metrics.update(
+                summarize_class_score_tensor(
+                    probe_tensor,
+                    targets,
+                    prefix=prefix,
+                )
+            )
+
     rho = scores.get("rho")
     if torch.is_tensor(rho) and rho.dim() == 2 and rho.shape[0] == targets.shape[0]:
         metrics.update(summarize_budget_tensor(rho, targets, prefix="budget"))
@@ -6219,22 +6353,67 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "residual_aligned/query_weight_entropy",
         "residual_aligned/support_weight_entropy",
         "residual_aligned/anchor_norm",
+        "score_marginal/enabled",
+        "score_marginal/tau",
+        "score_marginal/mix",
+        "score_marginal/adaptive_mix",
+        "score_marginal/effective_mix",
+        "score_marginal/evidence_confidence",
+        "score_marginal/query_is_class_shared",
+        "score_marginal/uniform_fallback_query_share",
+        "score_marginal/uniform_fallback_support_share",
+        "score_marginal/query_weight_entropy",
+        "score_marginal/support_weight_entropy",
+        "score_marginal/query_weight_peak",
+        "score_marginal/support_weight_peak",
+        "score_marginal/class_advantage_mean",
+        "score_marginal/positive_advantage_mean",
+        "score_marginal/query_threshold_acceptance_mean",
+        "score_marginal/edge_threshold_acceptance_mean",
+        "score_marginal/query_l1_drift",
+        "score_marginal/support_l1_drift",
+        "score_marginal/l1_drift",
+        "ours_probe/enabled",
+        "ours_probe/common_margin",
+        "ours_probe/negative_utility_mass_ratio",
+        "ours_probe/common_mass_ratio",
+        "ours_probe/harm_share",
+        "ours_probe/dead_query_ratio",
+        "ours_probe/query_mass_entropy",
+        "ours_probe/effective_query_fraction",
+        "ours_probe/full_mass_winner_agreement",
+        "ours_probe/full_cost_winner_agreement",
+        "ours_probe/mass_cost_winner_agreement",
         "rae_uot/enabled",
         "rae_uot/tau",
-        "rae_uot/margin",
-        "rae_uot/marginal_tau",
         "rae_uot/marginal_mix",
-        "rae_uot/cost_weight",
         "rae_uot/rival_gate_mean",
         "rae_uot/specificity_mean",
         "rae_uot/evidence_mean",
         "rae_uot/evidence_std",
-        "rae_uot/cost_delta_ratio",
+        "rae_uot/uniform_fallback_query_share",
+        "rae_uot/uniform_fallback_support_share",
         "rae_uot/query_weight_entropy",
         "rae_uot/support_weight_entropy",
         "rae_uot/query_weight_peak",
         "rae_uot/support_weight_peak",
         "rae_uot/rival_advantage_mean",
+        "hcuot/enabled",
+        "hcuot/topk",
+        "hcuot/temperature",
+        "hcuot/cost_weight",
+        "hcuot/marginal_mix",
+        "hcuot/adjusted_similarity_mean",
+        "hcuot/adjusted_similarity_std",
+        "hcuot/positive_specificity_mean",
+        "hcuot/common_pair_share",
+        "hcuot/cost_delta_ratio",
+        "hcuot/query_weight_entropy",
+        "hcuot/support_weight_entropy",
+        "hcuot/query_weight_peak",
+        "hcuot/support_weight_peak",
+        "hcuot/uniform_fallback_query_share",
+        "hcuot/uniform_fallback_support_share",
         "transport_audit/common_mass_ratio",
         "transport_audit/specific_mass_ratio",
         "transport_audit/common_score_term",
@@ -6640,13 +6819,36 @@ def format_diagnostic_summary(metrics):
         "residual_aligned/pair_evidence_std",
         "residual_aligned/cost_delta_ratio",
         "residual_aligned/query_weight_entropy",
+        "score_marginal/uniform_fallback_query_share",
+        "score_marginal/uniform_fallback_support_share",
+        "score_marginal/query_weight_entropy",
+        "score_marginal/support_weight_entropy",
+        "score_marginal/query_weight_peak",
+        "score_marginal/support_weight_peak",
+        "score_marginal/positive_advantage_mean",
+        "score_marginal/query_threshold_acceptance_mean",
+        "score_marginal/edge_threshold_acceptance_mean",
+        "score_marginal/query_l1_drift",
+        "score_marginal/support_l1_drift",
+        "score_marginal/l1_drift",
         "rae_uot/rival_gate_mean",
         "rae_uot/specificity_mean",
         "rae_uot/evidence_mean",
         "rae_uot/evidence_std",
-        "rae_uot/cost_delta_ratio",
+        "rae_uot/uniform_fallback_query_share",
+        "rae_uot/uniform_fallback_support_share",
         "rae_uot/query_weight_entropy",
         "rae_uot/support_weight_entropy",
+        "rae_uot/query_weight_peak",
+        "rae_uot/support_weight_peak",
+        "hcuot/adjusted_similarity_mean",
+        "hcuot/positive_specificity_mean",
+        "hcuot/common_pair_share",
+        "hcuot/cost_delta_ratio",
+        "hcuot/query_weight_entropy",
+        "hcuot/support_weight_entropy",
+        "hcuot/uniform_fallback_query_share",
+        "hcuot/uniform_fallback_support_share",
         "transport_audit/common_mass_ratio",
         "transport_audit/specific_mass_ratio",
         "transport_audit/common_score_term",
