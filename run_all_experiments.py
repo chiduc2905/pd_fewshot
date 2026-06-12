@@ -374,6 +374,7 @@ def get_args():
             "global_residual",
             "score_marginal",
             "failure_probe",
+            "rival_cost",
             "hubness_uot",
         ],
         help=(
@@ -392,6 +393,7 @@ def get_args():
             "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls; "
             "score_marginal=original uniform baseline plus Ours-Final score-aligned marginal sweep; "
             "failure_probe=uniform diagnostic baseline versus fixed/adaptive utility-contrastive marginals; "
+            "rival_cost=original Ours-Final versus rival-conditional ground cost only; "
             "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only."
         ),
     )
@@ -414,7 +416,7 @@ def get_args():
             "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
             "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
             "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
-            "probe_uniform, probe_fixed, probe_adaptive, "
+            "probe_uniform, probe_fixed, probe_adaptive, rc_cost_baseline, rc_cost, "
             "hcuot, hcuot_cost_only, hcuot_marginal_only. "
             "Default all keeps the suite's normal variants."
         ),
@@ -1753,6 +1755,40 @@ def build_ours_final_failure_probe_variants():
             + probe
             + score_aligned
             + ["--score_marginal_adaptive_mix", "true"],
+        },
+    ]
+
+
+def build_ours_final_rival_cost_variants():
+    """Isolate the rival-conditional ground-cost hypothesis."""
+    base = _ours_final_base_args()
+    probe = [
+        "--enable_ours_final_failure_probe",
+        "true",
+        "--ours_probe_common_margin",
+        "0.10",
+    ]
+    return [
+        {
+            "tag": "ours_final_rc_cost_baseline",
+            "checkpoint_tag": "rc_cost_baseline",
+            "label": "Original Ours-Final cosine ground cost",
+            "extra_args": base + probe,
+        },
+        {
+            "tag": "ours_final_rc_cost",
+            "checkpoint_tag": "rc_cost",
+            "label": "Ours-Final with rival-conditional ground cost only",
+            "extra_args": base
+            + probe
+            + [
+                "--enable_rival_conditional_cost",
+                "true",
+                "--rc_cost_weight",
+                "0.50",
+                "--rc_cost_temperature",
+                "0.25",
+            ],
         },
     ]
 
@@ -3158,6 +3194,12 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_probe_uniform": "ours_final_probe_uniform",
         "ours_final_probe_utility_fixed": "ours_final_probe_utility_fixed",
         "ours_final_probe_utility_adaptive": "ours_final_probe_utility_adaptive",
+        "rc_cost_baseline": "ours_final_rc_cost_baseline",
+        "rival_cost_baseline": "ours_final_rc_cost_baseline",
+        "ours_final_rc_cost_baseline": "ours_final_rc_cost_baseline",
+        "rc_cost": "ours_final_rc_cost",
+        "rival_cost": "ours_final_rc_cost",
+        "ours_final_rc_cost": "ours_final_rc_cost",
         "hcuot": "ours_final_hcuot_global_res",
         "hcuot_full": "ours_final_hcuot_global_res",
         "ours_final_hcuot_global_res": "ours_final_hcuot_global_res",
@@ -3205,7 +3247,7 @@ def parse_ours_final_variant_filter(variants_str):
                 "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
                 "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
                 "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
-                "probe_adaptive, hcuot, hcuot_cost_only, "
+                "probe_adaptive, rc_cost_baseline, rc_cost, hcuot, hcuot_cost_only, "
                 "hcuot_marginal_only, or exact tags."
             )
         if tag not in parsed:
@@ -3700,6 +3742,7 @@ def main():
         global_residual_variants = build_ours_final_global_residual_variants()
         score_marginal_variants = build_ours_final_score_marginal_variants()
         failure_probe_variants = build_ours_final_failure_probe_variants()
+        rival_cost_variants = build_ours_final_rival_cost_variants()
         hubness_uot_variants = build_ours_final_hubness_uot_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
@@ -3728,6 +3771,10 @@ def main():
             failure_probe_variants,
             ours_final_variant_filter,
         )
+        rival_cost_variants = filter_ours_final_variants(
+            rival_cost_variants,
+            ours_final_variant_filter,
+        )
         hubness_uot_variants = filter_ours_final_variants(
             hubness_uot_variants,
             ours_final_variant_filter,
@@ -3754,6 +3801,8 @@ def main():
             ablation_variants = score_marginal_variants
         elif suite_name == "failure_probe":
             ablation_variants = failure_probe_variants
+        elif suite_name == "rival_cost":
+            ablation_variants = rival_cost_variants
         elif suite_name == "hubness_uot":
             ablation_variants = hubness_uot_variants
         elif suite_name == "partial_ot":
@@ -3964,6 +4013,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in failure_probe_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "rival_cost":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in rival_cost_variants
                 for samples in samples_list
                 for shot in shots
             )

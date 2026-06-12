@@ -32,6 +32,7 @@ from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_sal
 from net.modules.ours_final_failure_probe import OursFinalFailureProbe
 from net.modules.reciprocal_verified_transport import ReciprocalVerifiedTransport
 from net.modules.region_structural_uot import RegionStructuralUOTGuidance
+from net.modules.rival_conditional_ground_cost import RivalConditionalGroundCost
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.modules.utility_contrastive_marginals import UtilityContrastiveMarginals
@@ -346,6 +347,9 @@ class OursM2(JECOTM2):
         score_marginal_confidence_power: float = 1.0,
         enable_ours_final_failure_probe: bool = False,
         ours_probe_common_margin: float = 0.10,
+        enable_rival_conditional_cost: bool = False,
+        rc_cost_weight: float = 0.50,
+        rc_cost_temperature: float = 0.25,
         enable_evidence_marginals: bool = False,
         evidence_tau: float = 0.1,
         evidence_tau_marginal: float = 1.0,
@@ -521,6 +525,11 @@ class OursM2(JECOTM2):
             enable_ours_final_failure_probe
         )
         self.ours_probe_common_margin = float(ours_probe_common_margin)
+        self.enable_rival_conditional_cost = _bool_config(
+            enable_rival_conditional_cost
+        )
+        self.rc_cost_weight = float(rc_cost_weight)
+        self.rc_cost_temperature = float(rc_cost_temperature)
         if self.lambda_cost < 0.0:
             raise ValueError("lambda_cost must be non-negative")
         if self.lambda_cost > 0.0 and self.token_g_kind == "none":
@@ -710,6 +719,44 @@ class OursM2(JECOTM2):
                     "cannot be combined with: "
                     + ", ".join(active_conflicts)
                 )
+        if self.enable_rival_conditional_cost:
+            if self.ours_ablation != "full":
+                raise ValueError(
+                    "enable_rival_conditional_cost requires ours_ablation='full'"
+                )
+            conflicts = {
+                "ours_final_marginal_mode": self.ours_final_marginal_mode != "uniform",
+                "enable_rival_aware_evidence_uot": enable_rival_aware_evidence_uot,
+                "enable_hubness_calibrated_uot": enable_hubness_calibrated_uot,
+                "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
+                "enable_residual_aligned_uot": enable_residual_aligned_uot,
+                "enable_verified_uot_score": enable_verified_uot_score,
+                "enable_reciprocal_verified_uot": enable_reciprocal_verified_uot,
+                "enable_discriminative_uot": enable_discriminative_uot,
+                "enable_region_structural_uot": enable_region_structural_uot,
+                "enable_adaptive_region_uot": enable_adaptive_region_uot,
+                "enable_pulse_region_uot": enable_pulse_region_uot,
+                "enable_multiscale_ot": enable_multiscale_ot,
+                "enable_mspta": enable_mspta,
+                "enable_evidence_marginals": _bool_config(enable_evidence_marginals),
+                "enable_global_residual_score": enable_global_residual_score,
+                "enable_context_enrichment": enable_context_enrichment,
+                "enable_structural_augmentation": enable_structural_augmentation,
+                "enable_label_ot": enable_label_ot,
+                "enable_pot_guide": enable_pot_guide,
+                "pre_transport_shot_pool": _bool_config(
+                    kwargs.get("pre_transport_shot_pool", False)
+                ),
+                "use_differential_mode": self.use_differential_mode,
+                "token_g_kind": self.token_g_kind != "none",
+            }
+            active_conflicts = [name for name, active in conflicts.items() if active]
+            if active_conflicts:
+                raise ValueError(
+                    "enable_rival_conditional_cost isolates the ground-cost change "
+                    "and cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
         if _bool_config(enable_evidence_marginals):
             if self.marginal_kind == "discriminative":
                 raise ValueError(
@@ -735,6 +782,12 @@ class OursM2(JECOTM2):
         if self.enable_ours_final_failure_probe:
             self.ours_final_failure_probe = OursFinalFailureProbe(
                 common_margin=self.ours_probe_common_margin,
+                eps=self.eps,
+            )
+        if self.enable_rival_conditional_cost:
+            self.rival_conditional_ground_cost = RivalConditionalGroundCost(
+                penalty_weight=self.rc_cost_weight,
+                temperature=self.rc_cost_temperature,
                 eps=self.eps,
             )
         self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
@@ -872,6 +925,10 @@ class OursM2(JECOTM2):
             raise ValueError("score_marginal_confidence_power must be positive")
         if self.ours_probe_common_margin < 0.0:
             raise ValueError("ours_probe_common_margin must be non-negative")
+        if self.rc_cost_weight < 0.0:
+            raise ValueError("rc_cost_weight must be non-negative")
+        if self.rc_cost_temperature <= 0.0:
+            raise ValueError("rc_cost_temperature must be positive")
         if self.rae_uot_tau <= 0.0:
             raise ValueError("rae_uot_tau must be positive")
         if not 0.0 <= self.rae_uot_marginal_mix <= 1.0:
@@ -3192,6 +3249,20 @@ class OursM2(JECOTM2):
         query_tokens: torch.Tensor | None = None,
         spatial_hw: tuple[int, int] | None = None,
     ) -> dict[str, torch.Tensor]:
+        rc_cost_payload: dict[str, torch.Tensor] = {}
+        if self.enable_rival_conditional_cost:
+            flat_cost, rc_cost_payload = self.rival_conditional_ground_cost(
+                flat_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            rc_cost_payload["rc_cost_guided_cost_matrix"] = flat_cost.reshape(
+                flat_cost.shape[0],
+                int(way_num),
+                int(shot_num),
+                flat_cost.shape[-2],
+                flat_cost.shape[-1],
+            )
         if getattr(self, "enable_multiscale_ot", False):
             return self._forward_multiscale_ecot_budget_bank(
                 flat_cost,
@@ -3699,6 +3770,8 @@ class OursM2(JECOTM2):
             payload.update(residual_aligned_payload)
         if rae_uot_payload:
             payload.update(rae_uot_payload)
+        if rc_cost_payload:
+            payload.update(rc_cost_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         if (
@@ -4118,6 +4191,9 @@ class OursM2(JECOTM2):
             if "episode_contrast_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["episode_contrast_guided_cost_matrix"]
+            if "rc_cost_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["rc_cost_guided_cost_matrix"]
             if "hcuot_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["hcuot_guided_cost_matrix"]
@@ -4282,6 +4358,16 @@ class OursM2(JECOTM2):
             "ours_probe_utility_score",
             "ours_probe_mass_score",
             "ours_probe_cost_distance",
+            "ours_probe_cost_only_score",
+            "ours_probe_cost_per_mass_score",
+            "ours_probe_threshold_x0_score",
+            "ours_probe_threshold_x0p5_score",
+            "ours_probe_threshold_x2_score",
+            "ours_probe_threshold_x4_score",
+            "rc_cost_class_probability",
+            "rc_cost_penalty",
+            "rc_cost_class_energy",
+            "rc_cost_guided_cost_matrix",
             "hcuot_pair_specificity",
             "hcuot_query_weight",
             "hcuot_support_weight",
@@ -4370,6 +4456,7 @@ class OursM2(JECOTM2):
             "episode_contrast/",
             "score_marginal/",
             "ours_probe/",
+            "rc_cost/",
             "hcuot/",
             "residual_aligned/",
             "rae_uot/",

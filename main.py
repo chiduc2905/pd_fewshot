@@ -575,6 +575,16 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_rival_conditional_cost",
+        frozenset(
+            {
+                "enable_rival_conditional_cost",
+                "rc_cost_weight",
+                "rc_cost_temperature",
+            }
+        ),
+    ),
+    (
         "enable_rival_aware_evidence_uot",
         frozenset(
             {
@@ -2626,6 +2636,19 @@ def get_args():
         ),
     )
     parser.add_argument("--ours_probe_common_margin", type=float, default=0.10)
+    parser.add_argument(
+        "--enable_rival_conditional_cost",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: replace the cosine ground cost by a class-relative "
+            "rival-conditional cost while keeping UOT, marginals, and T*M-C scoring."
+        ),
+    )
+    parser.add_argument("--rc_cost_weight", type=float, default=0.50)
+    parser.add_argument("--rc_cost_temperature", type=float, default=0.25)
     parser.add_argument(
         "--enable_rival_aware_evidence_uot",
         nargs="?",
@@ -5023,6 +5046,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "score_marginal_confidence_power",
             "enable_ours_final_failure_probe",
             "ours_probe_common_margin",
+            "enable_rival_conditional_cost",
+            "rc_cost_weight",
+            "rc_cost_temperature",
             "enable_rival_aware_evidence_uot",
             "rae_uot_tau",
             "rae_uot_marginal_mix",
@@ -6013,6 +6039,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     ours_probe_score_tensors = {
         "ours_probe_utility_score": "ours_probe_utility",
         "ours_probe_mass_score": "ours_probe_mass",
+        "ours_probe_cost_only_score": "ours_probe_cost_only",
+        "ours_probe_cost_per_mass_score": "ours_probe_cost_per_mass",
+        "ours_probe_threshold_x0_score": "ours_probe_threshold_x0",
+        "ours_probe_threshold_x0p5_score": "ours_probe_threshold_x0p5",
+        "ours_probe_threshold_x2_score": "ours_probe_threshold_x2",
+        "ours_probe_threshold_x4_score": "ours_probe_threshold_x4",
     }
     for probe_key, prefix in ours_probe_score_tensors.items():
         probe_tensor = scores.get(probe_key)
@@ -6384,6 +6416,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "ours_probe/full_mass_winner_agreement",
         "ours_probe/full_cost_winner_agreement",
         "ours_probe/mass_cost_winner_agreement",
+        "rc_cost/enabled",
+        "rc_cost/penalty_weight",
+        "rc_cost/temperature",
+        "rc_cost/class_entropy",
+        "rc_cost/class_probability_peak",
+        "rc_cost/common_query_share",
+        "rc_cost/penalty_mean",
+        "rc_cost/penalty_to_cost_ratio",
         "rae_uot/enabled",
         "rae_uot/tau",
         "rae_uot/marginal_mix",

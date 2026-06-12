@@ -5,11 +5,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from net.model_factory import build_model_from_args
 from net.modules.ours_final_failure_probe import OursFinalFailureProbe
+from net.modules.rival_conditional_ground_cost import RivalConditionalGroundCost
 from net.ours import OursM2
-from run_all_experiments import build_ours_final_failure_probe_variants
+from run_all_experiments import (
+    build_ours_final_failure_probe_variants,
+    build_ours_final_rival_cost_variants,
+)
 
 
 def _tiny_ours_final(**overrides) -> OursM2:
@@ -1118,6 +1123,173 @@ def test_ours_final_failure_probe_runner_builds_baseline_and_novelty_ablation():
     assert "--ours_final_marginal_mode" not in variants[0]["extra_args"]
     assert variants[1]["extra_args"][-1] == "false"
     assert variants[2]["extra_args"][-1] == "true"
+
+
+def test_rival_conditional_cost_zero_weight_is_exact_identity():
+    module = RivalConditionalGroundCost(
+        penalty_weight=0.0,
+        temperature=0.25,
+    )
+    cost = torch.rand(2, 6, 4, 3)
+
+    guided, payload = module(cost, way_num=3, shot_num=2)
+
+    assert guided is cost
+    assert torch.count_nonzero(payload["rc_cost_penalty"]) == 0
+    assert payload["rc_cost/penalty_to_cost_ratio"].item() == pytest.approx(0.0)
+
+
+def test_rival_conditional_cost_penalizes_common_and_rival_matches():
+    module = RivalConditionalGroundCost(
+        penalty_weight=0.5,
+        temperature=0.25,
+    )
+    cost = torch.tensor(
+        [
+            [
+                [[0.10, 0.10], [0.10, 0.20]],
+                [[0.10, 0.10], [0.90, 1.00]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+
+    guided, payload = module(cost, way_num=2, shot_num=1)
+    probability = payload["rc_cost_class_probability"]
+    penalty = payload["rc_cost_penalty"]
+
+    assert probability[0, 0, 0].item() == pytest.approx(0.5, abs=1e-5)
+    assert probability[0, 1, 0].item() == pytest.approx(0.5, abs=1e-5)
+    assert probability[0, 0, 1] > probability[0, 1, 1]
+    assert penalty[0, 0, 0] > penalty[0, 0, 1]
+    assert penalty[0, 1, 1] > penalty[0, 0, 1]
+    torch.testing.assert_close(
+        guided.reshape(1, 2, 1, 2, 2) - cost.reshape(1, 2, 1, 2, 2),
+        penalty[:, :, None, :, None].expand(-1, -1, 1, -1, 2),
+    )
+
+
+def test_rival_conditional_cost_has_finite_ground_cost_gradient():
+    module = RivalConditionalGroundCost(
+        penalty_weight=0.5,
+        temperature=0.25,
+    )
+    cost = torch.rand(2, 3, 4, 5, requires_grad=True)
+
+    guided, _ = module(cost, way_num=3, shot_num=1)
+    guided.square().mean().backward()
+
+    assert cost.grad is not None
+    assert torch.isfinite(cost.grad).all()
+    assert cost.grad.abs().sum() > 0
+
+
+def test_rival_conditional_cost_zero_weight_preserves_model_logits():
+    torch.manual_seed(5222)
+    baseline = _tiny_ours_final()
+    identity = _tiny_ours_final(
+        enable_rival_conditional_cost=True,
+        rc_cost_weight=0.0,
+    )
+    identity.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    identity.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support, return_aux=True)
+        actual = identity(query, support, return_aux=True)
+
+    assert torch.equal(actual["logits"], expected["logits"])
+    assert torch.equal(actual["transport_plan"], expected["transport_plan"])
+    assert actual["rc_cost/enabled"].item() == pytest.approx(1.0)
+
+
+def test_rival_conditional_cost_model_changes_only_ground_cost_and_backpropagates():
+    torch.manual_seed(5223)
+    model = _tiny_ours_final(
+        enable_rival_conditional_cost=True,
+        rc_cost_weight=0.5,
+        rc_cost_temperature=0.25,
+    )
+    model.train()
+    query, support = _episode()
+    targets = torch.tensor([0, 1], dtype=torch.long)
+
+    outputs = model(
+        query,
+        support,
+        query_targets=targets,
+        return_aux=True,
+    )
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    assert outputs["cost_matrix"].shape == outputs["base_cost_matrix"].shape
+    assert not torch.equal(outputs["cost_matrix"], outputs["base_cost_matrix"])
+    assert torch.isfinite(outputs["logits"]).all()
+    assert outputs["rc_cost/penalty_to_cost_ratio"] > 0.0
+    gradients = [
+        parameter.grad
+        for parameter in model.parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    ]
+    assert gradients
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    assert sum(gradient.abs().sum() for gradient in gradients) > 0.0
+
+
+def test_rival_conditional_cost_runner_isolates_one_architecture_change():
+    variants = build_ours_final_rival_cost_variants()
+
+    assert [variant["tag"] for variant in variants] == [
+        "ours_final_rc_cost_baseline",
+        "ours_final_rc_cost",
+    ]
+    assert "--enable_rival_conditional_cost" not in variants[0]["extra_args"]
+    assert "--enable_rival_conditional_cost" in variants[1]["extra_args"]
+    assert "--ours_final_marginal_mode" not in variants[1]["extra_args"]
+    assert "--enable_global_residual_score" not in variants[1]["extra_args"]
+
+
+def test_rival_conditional_cost_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_rival_conditional_cost="true",
+        rc_cost_weight=0.4,
+        rc_cost_temperature=0.3,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+
+    assert ours_final.enable_rival_conditional_cost
+    assert ours_final.rc_cost_weight == pytest.approx(0.4)
+    assert ours_final.rc_cost_temperature == pytest.approx(0.3)
+    assert hasattr(ours_final, "rival_conditional_ground_cost")
+
+    with pytest.raises(
+        ValueError,
+        match="--enable_rival_conditional_cost is supported only with --model ours_final",
+    ):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
 
 
 def test_score_aligned_ours_final_marginals_are_nonuniform_and_query_shared():

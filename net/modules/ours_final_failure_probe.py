@@ -130,6 +130,8 @@ class OursFinalFailureProbe(nn.Module):
             class_mass = shot_mass.mean(dim=2)
             class_cost = shot_cost.mean(dim=2)
             class_utility = shot_utility.mean(dim=2)
+            class_cost_per_mass = class_cost / class_mass.clamp_min(self.eps)
+            threshold_scalar = threshold_plan.detach().mean()
 
             predicted = (
                 logits.detach().argmax(dim=1)
@@ -155,6 +157,18 @@ class OursFinalFailureProbe(nn.Module):
                 "ours_probe_utility_score": class_utility,
                 "ours_probe_mass_score": class_mass,
                 "ours_probe_cost_distance": class_cost,
+                "ours_probe_cost_only_score": -class_cost,
+                "ours_probe_cost_per_mass_score": -class_cost_per_mass,
+                "ours_probe_threshold_x0_score": -class_cost,
+                "ours_probe_threshold_x0p5_score": (
+                    0.5 * threshold_scalar * class_mass - class_cost
+                ),
+                "ours_probe_threshold_x2_score": (
+                    2.0 * threshold_scalar * class_mass - class_cost
+                ),
+                "ours_probe_threshold_x4_score": (
+                    4.0 * threshold_scalar * class_mass - class_cost
+                ),
                 "ours_probe/enabled": flat_cost.new_tensor(1.0),
                 "ours_probe/common_margin": flat_cost.new_tensor(self.common_margin),
                 "ours_probe/negative_utility_mass_ratio": class_negative_mass_ratio.mean(),

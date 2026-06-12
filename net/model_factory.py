@@ -392,6 +392,13 @@ def validate_dmuot_scope(args) -> None:
         raise ValueError(
             "--enable_ours_final_failure_probe is supported only with --model ours_final"
         )
+    if _bool_flag(
+        getattr(args, "enable_rival_conditional_cost", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_rival_conditional_cost is supported only with --model ours_final"
+        )
     if _bool_flag(getattr(args, "enable_rival_aware_evidence_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2900,6 +2907,20 @@ def build_model_from_args(args):
                             ),
                             "ours_probe_common_margin": float(
                                 getattr(args, "ours_probe_common_margin", 0.10)
+                            ),
+                            "enable_rival_conditional_cost": _bool_flag(
+                                getattr(
+                                    args,
+                                    "enable_rival_conditional_cost",
+                                    "false",
+                                ),
+                                default=False,
+                            ),
+                            "rc_cost_weight": float(
+                                getattr(args, "rc_cost_weight", 0.50)
+                            ),
+                            "rc_cost_temperature": float(
+                                getattr(args, "rc_cost_temperature", 0.25)
                             ),
                         }
                         if is_ours_final_model
