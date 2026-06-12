@@ -376,6 +376,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_global_residual_score is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_rival_aware_evidence_uot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_rival_aware_evidence_uot is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_discriminative_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -2927,6 +2931,48 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_global_residual_score", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_residual_aligned_uot": True,
+                            "rauot_tau": float(getattr(args, "rauot_tau", 0.50)),
+                            "rauot_margin": float(getattr(args, "rauot_margin", 0.0)),
+                            "rauot_cost_weight": float(getattr(args, "rauot_cost_weight", 0.15)),
+                            "rauot_mass_mix": float(getattr(args, "rauot_mass_mix", 0.25)),
+                            "rauot_detach": _bool_flag(
+                                getattr(args, "rauot_detach", "true"),
+                                default=True,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_residual_aligned_uot", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_rival_aware_evidence_uot": True,
+                            "rae_uot_tau": float(getattr(args, "rae_uot_tau", 0.25)),
+                            "rae_uot_margin": float(getattr(args, "rae_uot_margin", 0.0)),
+                            "rae_uot_marginal_tau": float(
+                                getattr(args, "rae_uot_marginal_tau", 0.50)
+                            ),
+                            "rae_uot_marginal_mix": float(
+                                getattr(args, "rae_uot_marginal_mix", 0.65)
+                            ),
+                            "rae_uot_cost_weight": float(
+                                getattr(args, "rae_uot_cost_weight", 0.25)
+                            ),
+                            "rae_uot_detach": _bool_flag(
+                                getattr(args, "rae_uot_detach", "true"),
+                                default=True,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(
+                            getattr(args, "enable_rival_aware_evidence_uot", False),
+                            default=False,
+                        )
                         else {}
                     ),
                     **(

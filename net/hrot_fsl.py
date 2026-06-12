@@ -3270,16 +3270,20 @@ class HROTFSL(BaseConv64FewShotModel):
                 if torch.is_tensor(value)
             }
         elif support_weight is not None:
-            if tuple(support_weight.shape) != (way_num, shot_num, support_len):
+            support_weight = support_weight.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp_min(0.0)
+            if tuple(support_weight.shape) == (num_query, num_pairs, support_len):
+                support_prob = support_weight / support_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                b_bank = support_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            elif tuple(support_weight.shape) == (way_num, shot_num, support_len):
+                support_prob = support_weight / support_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+                support_prob = support_prob.reshape(1, num_pairs, support_len).expand(num_query, -1, -1)
+                b_bank = support_prob.unsqueeze(2) * rho_bank.view(1, 1, budget_count, 1)
+            else:
                 raise ValueError(
-                    "support_weight must have shape (Way, Shot, SupportTokens), "
+                    "support_weight must have shape (Way, Shot, SupportTokens) or "
+                    "(NumQuery, Way*Shot, SupportTokens), "
                     f"got {tuple(support_weight.shape)}"
                 )
-            support_weight = support_weight.to(device=flat_cost.device, dtype=flat_cost.dtype)
-            support_weight = support_weight / support_weight.sum(dim=-1, keepdim=True).clamp_min(self.eps)
-            support_weight = support_weight.reshape(1, num_pairs, 1, support_len)
-            b_bank = support_weight * rho_bank.view(1, 1, budget_count, 1)
-            b_bank = b_bank.expand(num_query, -1, -1, -1)
             transport_kwargs["b"] = b_bank.reshape(num_query, num_pairs * budget_count, support_len)
 
             if query_weight is None:

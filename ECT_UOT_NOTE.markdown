@@ -72,6 +72,9 @@ and ECT-UOT:
 ```text
 transport_audit/common_mass_ratio
 transport_audit/specific_mass_ratio
+transport_audit/common_score_term
+transport_audit/common_score_positive_rate
+transport_audit/common_score_abs_share
 transport_audit/cost_per_mass
 transport_audit/query_mass_entropy
 episode_contrast/gate_mean
@@ -79,6 +82,18 @@ episode_contrast/cost_delta_ratio
 episode_contrast/query_weight_entropy
 ```
 
-The key sanity check is that `common_mass_ratio` should drop while accuracy does
-not fall.  If it drops but accuracy falls, the contrast gate is too aggressive
-and should be relaxed through `ect_uot_cost_weight` or `ect_uot_query_mass_mix`.
+The key sanity check is not just that `common_mass_ratio` drops.  Apparent
+texture/noise can be a valid PD cue if it is episode-discriminative and robust.
+The audit therefore decomposes the UOT score term:
+
+```text
+common_score_term = threshold * common_mass - common_cost
+specific_score_term = threshold * specific_mass - specific_cost
+```
+
+If `common_mass_ratio` is high but `common_score_term` is positive and clean/noise
+accuracy remains stable, the model is using a useful local cue and ECT-UOT should
+not aggressively suppress it.  If `common_score_term` is positive on clean data
+but accuracy collapses under noise or domain perturbation, it is shortcut
+evidence: cheap in the current episode but not stable.  ECT-UOT is justified only
+when it reduces shortcut mass without reducing robust accuracy.

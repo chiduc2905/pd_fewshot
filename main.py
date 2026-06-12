@@ -541,6 +541,33 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_residual_aligned_uot",
+        frozenset(
+            {
+                "enable_residual_aligned_uot",
+                "rauot_tau",
+                "rauot_margin",
+                "rauot_cost_weight",
+                "rauot_mass_mix",
+                "rauot_detach",
+            }
+        ),
+    ),
+    (
+        "enable_rival_aware_evidence_uot",
+        frozenset(
+            {
+                "enable_rival_aware_evidence_uot",
+                "rae_uot_tau",
+                "rae_uot_margin",
+                "rae_uot_marginal_tau",
+                "rae_uot_marginal_mix",
+                "rae_uot_cost_weight",
+                "rae_uot_detach",
+            }
+        ),
+    ),
+    (
         "enable_multiscale_ot",
         frozenset({"enable_multiscale_ot", "multiscale_pool_sizes", "multiscale_per_scale_T"}),
     ),
@@ -2518,6 +2545,39 @@ def get_args():
         help="Weight of the global prototype residual logits when enable_global_residual_score is set.",
     )
     parser.add_argument(
+        "--enable_residual_aligned_uot",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: use the global residual prototype anchor to shape local UOT "
+            "costs/marginals before transport."
+        ),
+    )
+    parser.add_argument("--rauot_tau", type=float, default=0.50)
+    parser.add_argument("--rauot_margin", type=float, default=0.0)
+    parser.add_argument("--rauot_cost_weight", type=float, default=0.15)
+    parser.add_argument("--rauot_mass_mix", type=float, default=0.25)
+    parser.add_argument("--rauot_detach", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
+        "--enable_rival_aware_evidence_uot",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: replace EGSM with bidirectional cross-reference, "
+            "rival-specific pair marginals and evidence-normalized UOT scoring."
+        ),
+    )
+    parser.add_argument("--rae_uot_tau", type=float, default=0.25)
+    parser.add_argument("--rae_uot_margin", type=float, default=0.0)
+    parser.add_argument("--rae_uot_marginal_tau", type=float, default=0.50)
+    parser.add_argument("--rae_uot_marginal_mix", type=float, default=0.65)
+    parser.add_argument("--rae_uot_cost_weight", type=float, default=0.25)
+    parser.add_argument("--rae_uot_detach", type=str, default="true", choices=["true", "false"])
+    parser.add_argument(
         "--enable_discriminative_uot",
         action="store_true",
         default=False,
@@ -4227,7 +4287,15 @@ def get_model(args):
                 if normalized_ours_ablation == "no_egsm"
                 else resolve_hrot_ecot_enable_egsm(args) == "true"
             )
-            evidence_text = "EGSM on" if egsm_enabled else "EGSM off"
+            rae_uot_enabled = _bool_flag(
+                getattr(args, "enable_rival_aware_evidence_uot", "false"),
+                default=False,
+            )
+            if rae_uot_enabled:
+                egsm_enabled = False
+                evidence_text = "RAE-UOT cross-reference+rival evidence"
+            else:
+                evidence_text = "EGSM on" if egsm_enabled else "EGSM off"
             base_rho_text = getattr(args, "hrot_ecot_base_rho", None) or 0.8
             if normalized_ours_ablation == "full_ot":
                 transport_text = "balanced full OT(rho=1.0)"
@@ -4244,8 +4312,14 @@ def get_model(args):
                 default=(args.model not in OURS_FINAL_MODEL_NAMES),
             )
             cost_per_mass = _bool_flag(getattr(args, "hrot_ecot_m2_cost_per_mass_score", "false"), default=False)
+            if rae_uot_enabled:
+                cost_per_mass = True
             if cost_per_mass:
-                score_text = "cost-per-mass score"
+                score_text = (
+                    "evidence cost-per-mass score"
+                    if rae_uot_enabled
+                    else "cost-per-mass score"
+                )
             elif ablate_mass:
                 score_text = "cost-only score(-C)"
             else:
@@ -4851,6 +4925,19 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_global_residual_score",
             "global_residual_mode",
             "global_residual_weight",
+            "enable_residual_aligned_uot",
+            "rauot_tau",
+            "rauot_margin",
+            "rauot_cost_weight",
+            "rauot_mass_mix",
+            "rauot_detach",
+            "enable_rival_aware_evidence_uot",
+            "rae_uot_tau",
+            "rae_uot_margin",
+            "rae_uot_marginal_tau",
+            "rae_uot_marginal_mix",
+            "rae_uot_cost_weight",
+            "rae_uot_detach",
             "enable_discriminative_uot",
             "discriminative_uot_tau",
             "discriminative_uot_margin",
@@ -6119,8 +6206,41 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "episode_contrast/cost_delta_ratio",
         "episode_contrast/query_weight_entropy",
         "episode_contrast/query_specificity_mean",
+        "residual_aligned/enabled",
+        "residual_aligned/tau",
+        "residual_aligned/margin",
+        "residual_aligned/cost_weight",
+        "residual_aligned/mass_mix",
+        "residual_aligned/query_gate_mean",
+        "residual_aligned/support_gate_mean",
+        "residual_aligned/pair_evidence_mean",
+        "residual_aligned/pair_evidence_std",
+        "residual_aligned/cost_delta_ratio",
+        "residual_aligned/query_weight_entropy",
+        "residual_aligned/support_weight_entropy",
+        "residual_aligned/anchor_norm",
+        "rae_uot/enabled",
+        "rae_uot/tau",
+        "rae_uot/margin",
+        "rae_uot/marginal_tau",
+        "rae_uot/marginal_mix",
+        "rae_uot/cost_weight",
+        "rae_uot/rival_gate_mean",
+        "rae_uot/specificity_mean",
+        "rae_uot/evidence_mean",
+        "rae_uot/evidence_std",
+        "rae_uot/cost_delta_ratio",
+        "rae_uot/query_weight_entropy",
+        "rae_uot/support_weight_entropy",
+        "rae_uot/query_weight_peak",
+        "rae_uot/support_weight_peak",
+        "rae_uot/rival_advantage_mean",
         "transport_audit/common_mass_ratio",
         "transport_audit/specific_mass_ratio",
+        "transport_audit/common_score_term",
+        "transport_audit/specific_score_term",
+        "transport_audit/common_score_positive_rate",
+        "transport_audit/common_score_abs_share",
         "transport_audit/gate_mean",
         "transport_audit/gate_low_share",
         "transport_audit/rival_advantage_mean",
@@ -6128,6 +6248,10 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "transport_audit/query_mass_entropy",
         "transport_audit_unverified/common_mass_ratio",
         "transport_audit_unverified/specific_mass_ratio",
+        "transport_audit_unverified/common_score_term",
+        "transport_audit_unverified/specific_score_term",
+        "transport_audit_unverified/common_score_positive_rate",
+        "transport_audit_unverified/common_score_abs_share",
         "transport_audit_unverified/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
@@ -6512,8 +6636,22 @@ def format_diagnostic_summary(metrics):
         "rvuot/shot_logit_delta_abs",
         "episode_contrast/gate_mean",
         "episode_contrast/cost_delta_ratio",
+        "residual_aligned/pair_evidence_mean",
+        "residual_aligned/pair_evidence_std",
+        "residual_aligned/cost_delta_ratio",
+        "residual_aligned/query_weight_entropy",
+        "rae_uot/rival_gate_mean",
+        "rae_uot/specificity_mean",
+        "rae_uot/evidence_mean",
+        "rae_uot/evidence_std",
+        "rae_uot/cost_delta_ratio",
+        "rae_uot/query_weight_entropy",
+        "rae_uot/support_weight_entropy",
         "transport_audit/common_mass_ratio",
         "transport_audit/specific_mass_ratio",
+        "transport_audit/common_score_term",
+        "transport_audit/common_score_positive_rate",
+        "transport_audit/common_score_abs_share",
         "transport_audit/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",

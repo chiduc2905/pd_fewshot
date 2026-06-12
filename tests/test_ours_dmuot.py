@@ -700,7 +700,279 @@ def test_transport_specificity_audit_reports_common_mass():
 
     assert audit["audit/common_mass_ratio"].item() > 0.0
     assert audit["audit/specific_mass_ratio"].item() > 0.0
+    assert audit["audit/common_score_term"].item() > 0.0
+    assert 0.0 <= audit["audit/common_score_positive_rate"].item() <= 1.0
+    assert 0.0 <= audit["audit/common_score_abs_share"].item() <= 1.0
     assert audit["audit/cost_per_mass"].item() > 0.0
+
+
+def test_residual_aligned_uot_uses_global_residual_anchor_before_transport():
+    model = _tiny_ours_final(
+        enable_global_residual_score=True,
+        enable_residual_aligned_uot=True,
+        rauot_tau=0.35,
+        rauot_cost_weight=0.50,
+        rauot_mass_mix=0.75,
+    )
+    query_tokens = torch.tensor(
+        [
+            [
+                [2.0, 0.0],
+                [-2.0, 0.0],
+                [0.0, 1.0],
+            ]
+        ]
+    )
+    support_tokens = torch.tensor(
+        [
+            [
+                [
+                    [2.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                ]
+            ],
+            [
+                [
+                    [-2.0, 0.0],
+                    [-1.0, 0.0],
+                    [0.0, 1.0],
+                ]
+            ],
+        ]
+    )
+    cost = torch.ones(1, 2, 3, 3)
+    cost[0, 0, 0, 2] = 2.0
+    cost[0, 1, 1, 2] = 2.0
+
+    guided_cost, query_weight, support_weight, payload = model._apply_residual_aligned_uot(
+        cost,
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens,
+        support_tokens=support_tokens,
+        way_num=2,
+        shot_num=1,
+    )
+
+    assert guided_cost.shape == cost.shape
+    assert query_weight is not None
+    assert support_weight is not None
+    assert query_weight.shape == (1, 2, 3)
+    assert support_weight.shape == (2, 1, 3)
+    assert guided_cost[0, 0, 0, 0] < guided_cost[0, 0, 2, 2]
+    assert query_weight[0, 0, 0] > query_weight[0, 0, 1]
+    assert query_weight[0, 1, 1] > query_weight[0, 1, 0]
+    assert support_weight[0, 0, 0] > support_weight[0, 0, 2]
+    assert support_weight[1, 0, 0] > support_weight[1, 0, 2]
+    assert payload["residual_aligned/pair_evidence_std"].item() > 0.0
+    assert payload["residual_aligned/cost_delta_ratio"].item() > 0.0
+
+
+def test_residual_aligned_uot_requires_global_residual_score():
+    with pytest.raises(ValueError, match="requires enable_global_residual_score"):
+        _tiny_ours_final(enable_residual_aligned_uot=True)
+
+
+def test_rival_aware_evidence_uot_flag_off_matches_baseline_logits():
+    torch.manual_seed(518)
+    baseline = _tiny_ours_final()
+    flag_off = _tiny_ours_final(enable_rival_aware_evidence_uot=False)
+    flag_off.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    flag_off.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support)
+        actual = flag_off(query, support)
+
+    assert torch.equal(actual, expected)
+
+
+def test_rival_gate_is_invariant_to_duplicate_rival_shots():
+    model = _tiny_ours_final()
+    one_shot_cost = torch.tensor(
+        [
+            [
+                [[0.1, 0.8], [0.7, 0.2]],
+                [[0.4, 0.6], [0.3, 0.9]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    five_shot_cost = (
+        one_shot_cost.reshape(1, 2, 1, 2, 2)
+        .expand(-1, -1, 5, -1, -1)
+        .reshape(1, 10, 2, 2)
+        .clone()
+    )
+
+    gate_one, _ = model._episode_contrastive_pair_gate(
+        one_shot_cost,
+        way_num=2,
+        shot_num=1,
+        tau=0.25,
+        margin=0.0,
+    )
+    gate_five, _ = model._episode_contrastive_pair_gate(
+        five_shot_cost,
+        way_num=2,
+        shot_num=5,
+        tau=0.25,
+        margin=0.0,
+    )
+
+    assert torch.allclose(gate_five[:, :, 0], gate_one[:, :, 0], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(gate_five, gate_five[:, :, :1].expand_as(gate_five), atol=1e-6, rtol=1e-6)
+
+
+def test_rival_aware_evidence_uot_suppresses_common_match_and_shapes_both_marginals():
+    model = _tiny_ours_final(
+        enable_rival_aware_evidence_uot=True,
+        rae_uot_tau=0.25,
+        rae_uot_margin=0.0,
+        rae_uot_marginal_tau=0.25,
+        rae_uot_marginal_mix=1.0,
+        rae_uot_cost_weight=0.50,
+    )
+    query_tokens = torch.tensor(
+        [
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.0, 0.0],
+            ]
+        ]
+    )
+    support_tokens = torch.tensor(
+        [
+            [
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ]
+            ],
+            [
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ],
+        ]
+    )
+    cost = torch.ones(1, 2, 3, 3)
+    cost[0, 0, 0, 0] = 0.01
+    cost[0, 1, 0, 0] = 0.01
+    cost[0, 0, 1, 1] = 0.01
+    cost[0, 1, 1, 1] = 0.90
+
+    guided_cost, query_weight, support_weight, pair_evidence, payload = (
+        model._apply_rival_aware_evidence_uot(
+            cost,
+            query_weight=None,
+            support_weight=None,
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=2,
+            shot_num=1,
+        )
+    )
+
+    assert query_weight is not None
+    assert support_weight is not None
+    assert pair_evidence is not None
+    assert query_weight.shape == (1, 2, 3)
+    assert support_weight.shape == (1, 2, 3)
+    assert pair_evidence.shape == (1, 2, 1, 3, 3)
+    assert torch.allclose(query_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
+    assert torch.allclose(support_weight.sum(dim=-1), torch.ones(1, 2), atol=1e-6)
+    assert pair_evidence[0, 0, 0, 1, 1] > pair_evidence[0, 0, 0, 0, 0]
+    assert guided_cost[0, 0, 0, 0] > guided_cost[0, 0, 1, 1]
+    assert query_weight[0, 0, 1] > query_weight[0, 0, 0]
+    assert support_weight[0, 0, 1] > support_weight[0, 0, 0]
+    assert payload["rae_uot/evidence_std"].item() > 0.0
+    assert payload["rae_uot/cost_delta_ratio"].item() > 0.0
+
+
+def test_rival_aware_evidence_uot_is_equivariant_to_token_position_permutations():
+    torch.manual_seed(519)
+    model = _tiny_ours_final(enable_rival_aware_evidence_uot=True)
+    way_num, shot_num = 3, 2
+    query_tokens = torch.randn(2, 4, 6)
+    support_tokens = torch.randn(way_num, shot_num, 5, 6)
+    cost = torch.rand(2, way_num * shot_num, 4, 5)
+    query_perm = torch.tensor([2, 0, 3, 1])
+    support_perm = torch.tensor([4, 1, 3, 0, 2])
+
+    original = model._apply_rival_aware_evidence_uot(
+        cost,
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens,
+        support_tokens=support_tokens,
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+    permuted = model._apply_rival_aware_evidence_uot(
+        cost[:, :, query_perm][:, :, :, support_perm],
+        query_weight=None,
+        support_weight=None,
+        query_tokens=query_tokens[:, query_perm],
+        support_tokens=support_tokens[:, :, support_perm],
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+
+    original_cost, original_query, original_support, original_evidence, _ = original
+    permuted_cost, permuted_query, permuted_support, permuted_evidence, _ = permuted
+    assert torch.allclose(
+        permuted_cost,
+        original_cost[:, :, query_perm][:, :, :, support_perm],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(permuted_query, original_query[:, :, query_perm], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(permuted_support, original_support[:, :, support_perm], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        permuted_evidence,
+        original_evidence[:, :, :, query_perm][:, :, :, :, support_perm],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("shot", [1, 5])
+def test_rival_aware_evidence_uot_forward_is_finite_for_few_shot(shot):
+    torch.manual_seed(520 + shot)
+    model = _tiny_ours_final(
+        enable_rival_aware_evidence_uot=True,
+        enable_global_residual_score=True,
+        global_residual_weight=0.10,
+    )
+    model.eval()
+    query, support = _episode(shot=shot)
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert model.ecot_m2_cost_per_mass_score
+    assert model.egsm_marginal is None
+    assert torch.isfinite(outputs["logits"]).all()
+    assert torch.isfinite(outputs["transport_plan"]).all()
+    assert outputs["rae_uot_pair_evidence"].shape[2] == shot
+    assert torch.allclose(
+        outputs["rae_uot_query_weight"].sum(dim=-1),
+        torch.ones_like(outputs["rae_uot_query_weight"].sum(dim=-1)),
+        atol=1e-5,
+    )
+    assert torch.allclose(
+        outputs["rae_uot_support_weight"].sum(dim=-1),
+        torch.ones_like(outputs["rae_uot_support_weight"].sum(dim=-1)),
+        atol=1e-5,
+    )
 
 
 def test_episode_contrastive_uot_factory_flags_are_forwarded():
@@ -735,6 +1007,97 @@ def test_episode_contrastive_uot_factory_flags_are_forwarded():
     assert ours_final.ect_uot_query_mass_mix == pytest.approx(0.60)
     assert ours_final.ect_uot_query_tau == pytest.approx(0.70)
     assert not ours_final.ect_uot_detach
+
+
+def test_residual_aligned_uot_factory_flags_are_forwarded():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_global_residual_score="true",
+        global_residual_weight=0.1,
+        enable_residual_aligned_uot="true",
+        rauot_tau=0.41,
+        rauot_margin=0.03,
+        rauot_cost_weight=0.17,
+        rauot_mass_mix=0.29,
+        rauot_detach="false",
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+
+    assert ours_final.enable_global_residual_score
+    assert ours_final.enable_residual_aligned_uot
+    assert ours_final.rauot_tau == pytest.approx(0.41)
+    assert ours_final.rauot_margin == pytest.approx(0.03)
+    assert ours_final.rauot_cost_weight == pytest.approx(0.17)
+    assert ours_final.rauot_mass_mix == pytest.approx(0.29)
+    assert not ours_final.rauot_detach
+
+
+def test_rival_aware_evidence_uot_factory_flags_are_forwarded_and_scoped():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_rival_aware_evidence_uot="true",
+        rae_uot_tau=0.31,
+        rae_uot_margin=0.02,
+        rae_uot_marginal_tau=0.41,
+        rae_uot_marginal_mix=0.72,
+        rae_uot_cost_weight=0.19,
+        rae_uot_detach="false",
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+
+    assert ours_final.enable_rival_aware_evidence_uot
+    assert ours_final.rae_uot_tau == pytest.approx(0.31)
+    assert ours_final.rae_uot_margin == pytest.approx(0.02)
+    assert ours_final.rae_uot_marginal_tau == pytest.approx(0.41)
+    assert ours_final.rae_uot_marginal_mix == pytest.approx(0.72)
+    assert ours_final.rae_uot_cost_weight == pytest.approx(0.19)
+    assert not ours_final.rae_uot_detach
+    assert ours_final.ecot_m2_cost_per_mass_score
+    assert ours_final.egsm_marginal is None
+
+    with pytest.raises(
+        ValueError,
+        match="--enable_rival_aware_evidence_uot is supported only with --model ours_final",
+    ):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_rival_aware_evidence_uot_rejects_competing_local_transport_paths():
+    with pytest.raises(ValueError, match="defines the complete local transport path"):
+        _tiny_ours_final(
+            enable_rival_aware_evidence_uot=True,
+            enable_reciprocal_verified_uot=True,
+        )
 
 
 def test_discriminative_marginals_log_shapes_and_mass_budget():
