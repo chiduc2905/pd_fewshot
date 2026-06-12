@@ -665,6 +665,20 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_episode_contrastive_uot",
+        frozenset(
+            {
+                "enable_episode_contrastive_uot",
+                "ect_uot_tau",
+                "ect_uot_margin",
+                "ect_uot_cost_weight",
+                "ect_uot_query_mass_mix",
+                "ect_uot_query_tau",
+                "ect_uot_detach",
+            }
+        ),
+    ),
+    (
         "enable_label_ot",
         frozenset(
             {
@@ -2426,6 +2440,13 @@ def get_args():
         default=1.0,
         help="Blend strength for rival-aware pulse evidence gate.",
     )
+    parser.add_argument("--enable_episode_contrastive_uot", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--ect_uot_tau", type=float, default=0.25)
+    parser.add_argument("--ect_uot_margin", type=float, default=0.0)
+    parser.add_argument("--ect_uot_cost_weight", type=float, default=0.35)
+    parser.add_argument("--ect_uot_query_mass_mix", type=float, default=0.50)
+    parser.add_argument("--ect_uot_query_tau", type=float, default=0.50)
+    parser.add_argument("--ect_uot_detach", type=str, default="true", choices=["true", "false"])
     parser.add_argument(
         "--enable_verified_uot_score",
         action="store_true",
@@ -4803,6 +4824,13 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "pulse_discriminative_tau",
             "pulse_discriminative_margin",
             "pulse_discriminative_mix",
+            "enable_episode_contrastive_uot",
+            "ect_uot_tau",
+            "ect_uot_margin",
+            "ect_uot_cost_weight",
+            "ect_uot_query_mass_mix",
+            "ect_uot_query_tau",
+            "ect_uot_detach",
             "enable_verified_uot_score",
             "verified_uot_beta",
             "verified_uot_tau",
@@ -6079,6 +6107,28 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "rvuot/evidence_mass_mean",
         "rvuot/shot_logit_delta",
         "rvuot/shot_logit_delta_abs",
+        "episode_contrast/enabled",
+        "episode_contrast/tau",
+        "episode_contrast/margin",
+        "episode_contrast/cost_weight",
+        "episode_contrast/query_mass_mix",
+        "episode_contrast/query_tau",
+        "episode_contrast/gate_mean",
+        "episode_contrast/gate_low_share",
+        "episode_contrast/rival_advantage_mean",
+        "episode_contrast/cost_delta_ratio",
+        "episode_contrast/query_weight_entropy",
+        "episode_contrast/query_specificity_mean",
+        "transport_audit/common_mass_ratio",
+        "transport_audit/specific_mass_ratio",
+        "transport_audit/gate_mean",
+        "transport_audit/gate_low_share",
+        "transport_audit/rival_advantage_mean",
+        "transport_audit/cost_per_mass",
+        "transport_audit/query_mass_entropy",
+        "transport_audit_unverified/common_mass_ratio",
+        "transport_audit_unverified/specific_mass_ratio",
+        "transport_audit_unverified/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
         "pulse/discriminative_gate_mean",
@@ -6460,6 +6510,11 @@ def format_diagnostic_summary(metrics):
         "rvuot/evidence_retained_mass_ratio",
         "rvuot/shot_logit_delta",
         "rvuot/shot_logit_delta_abs",
+        "episode_contrast/gate_mean",
+        "episode_contrast/cost_delta_ratio",
+        "transport_audit/common_mass_ratio",
+        "transport_audit/specific_mass_ratio",
+        "transport_audit/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
         "compact_loss",

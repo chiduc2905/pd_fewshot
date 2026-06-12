@@ -644,6 +644,99 @@ def test_reciprocal_verified_uot_factory_flags_are_ours_final_only():
         )
 
 
+def test_episode_contrastive_uot_penalizes_common_mode_before_transport():
+    model = _tiny_ours_final(
+        enable_episode_contrastive_uot=True,
+        ect_uot_tau=0.25,
+        ect_uot_margin=0.0,
+        ect_uot_cost_weight=0.50,
+        ect_uot_query_mass_mix=1.0,
+        ect_uot_query_tau=0.25,
+    )
+    cost = torch.ones(1, 2, 4, 4)
+
+    # Query token 0 is common-mode: both classes provide an equally cheap match.
+    cost[:, 0, 0, 0] = 0.01
+    cost[:, 1, 0, 0] = 0.01
+
+    # Query token 1 is class-specific evidence for class 0.
+    cost[:, 0, 1, 1] = 0.01
+    cost[:, 1, 1, 1] = 0.80
+
+    guided_cost, query_weight, payload = model._apply_episode_contrastive_uot(
+        cost,
+        query_weight=None,
+        way_num=2,
+        shot_num=1,
+    )
+
+    assert guided_cost.shape == cost.shape
+    assert query_weight is not None
+    assert query_weight.shape == (1, 2, 4)
+    assert guided_cost[0, 0, 0, 0] > guided_cost[0, 0, 1, 1]
+    assert query_weight[0, 0, 1] > query_weight[0, 0, 0]
+    assert payload["episode_contrast/gate_mean"].item() < 1.0
+    assert payload["episode_contrast/cost_delta_ratio"].item() > 0.0
+
+
+def test_transport_specificity_audit_reports_common_mass():
+    model = _tiny_ours_final()
+    cost = torch.ones(1, 2, 4, 4)
+    plan = torch.zeros(1, 2, 1, 4, 4)
+    cost[:, 0, 0, 0] = 0.01
+    cost[:, 1, 0, 0] = 0.01
+    cost[:, 0, 1, 1] = 0.01
+    cost[:, 1, 1, 1] = 0.80
+    plan[:, 0, 0, 0, 0] = 0.30
+    plan[:, 0, 0, 1, 1] = 0.10
+
+    audit = model._transport_specificity_audit(
+        flat_cost=cost,
+        plan=plan,
+        way_num=2,
+        shot_num=1,
+        prefix="audit",
+    )
+
+    assert audit["audit/common_mass_ratio"].item() > 0.0
+    assert audit["audit/specific_mass_ratio"].item() > 0.0
+    assert audit["audit/cost_per_mass"].item() > 0.0
+
+
+def test_episode_contrastive_uot_factory_flags_are_forwarded():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_episode_contrastive_uot="true",
+        ect_uot_tau=0.31,
+        ect_uot_margin=0.02,
+        ect_uot_cost_weight=0.40,
+        ect_uot_query_mass_mix=0.60,
+        ect_uot_query_tau=0.70,
+        ect_uot_detach="false",
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+
+    assert ours_final.enable_episode_contrastive_uot
+    assert ours_final.ect_uot_tau == pytest.approx(0.31)
+    assert ours_final.ect_uot_margin == pytest.approx(0.02)
+    assert ours_final.ect_uot_cost_weight == pytest.approx(0.40)
+    assert ours_final.ect_uot_query_mass_mix == pytest.approx(0.60)
+    assert ours_final.ect_uot_query_tau == pytest.approx(0.70)
+    assert not ours_final.ect_uot_detach
+
+
 def test_discriminative_marginals_log_shapes_and_mass_budget():
     torch.manual_seed(513)
     model = _tiny_ours_final(

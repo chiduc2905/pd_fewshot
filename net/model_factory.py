@@ -2856,6 +2856,25 @@ def build_model_from_args(args):
                     **(resolve_ours_final_evidence_config(args) if is_ours_final_model else {}),
                     **(
                         {
+                            "enable_episode_contrastive_uot": _bool_flag(
+                                getattr(args, "enable_episode_contrastive_uot", "false"),
+                                default=False,
+                            ),
+                            "ect_uot_tau": float(getattr(args, "ect_uot_tau", 0.25)),
+                            "ect_uot_margin": float(getattr(args, "ect_uot_margin", 0.0)),
+                            "ect_uot_cost_weight": float(getattr(args, "ect_uot_cost_weight", 0.35)),
+                            "ect_uot_query_mass_mix": float(getattr(args, "ect_uot_query_mass_mix", 0.50)),
+                            "ect_uot_query_tau": float(getattr(args, "ect_uot_query_tau", 0.50)),
+                            "ect_uot_detach": _bool_flag(
+                                getattr(args, "ect_uot_detach", "true"),
+                                default=True,
+                            ),
+                        }
+                        if is_ours_final_model
+                        else {}
+                    ),
+                    **(
+                        {
                             "enable_verified_uot_score": True,
                             "verified_uot_beta": float(getattr(args, "verified_uot_beta", 0.75)),
                             "verified_uot_tau": float(getattr(args, "verified_uot_tau", 0.10)),

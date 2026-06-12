@@ -409,6 +409,13 @@ class OursM2(JECOTM2):
         pulse_discriminative_tau = float(kwargs.pop("pulse_discriminative_tau", 0.05))
         pulse_discriminative_margin = float(kwargs.pop("pulse_discriminative_margin", 0.02))
         pulse_discriminative_mix = float(kwargs.pop("pulse_discriminative_mix", 1.0))
+        enable_episode_contrastive_uot = _bool_config(kwargs.pop("enable_episode_contrastive_uot", False))
+        ect_uot_tau = float(kwargs.pop("ect_uot_tau", 0.25))
+        ect_uot_margin = float(kwargs.pop("ect_uot_margin", 0.0))
+        ect_uot_cost_weight = float(kwargs.pop("ect_uot_cost_weight", 0.35))
+        ect_uot_query_mass_mix = float(kwargs.pop("ect_uot_query_mass_mix", 0.50))
+        ect_uot_query_tau = float(kwargs.pop("ect_uot_query_tau", 0.50))
+        ect_uot_detach = _bool_config(kwargs.pop("ect_uot_detach", True))
         enable_verified_uot_score = _bool_config(kwargs.pop("enable_verified_uot_score", False))
         verified_uot_beta = float(kwargs.pop("verified_uot_beta", 0.75))
         verified_uot_tau = float(kwargs.pop("verified_uot_tau", 0.10))
@@ -611,6 +618,13 @@ class OursM2(JECOTM2):
         self.pulse_discriminative_tau = float(pulse_discriminative_tau)
         self.pulse_discriminative_margin = float(pulse_discriminative_margin)
         self.pulse_discriminative_mix = float(pulse_discriminative_mix)
+        self.enable_episode_contrastive_uot = bool(enable_episode_contrastive_uot)
+        self.ect_uot_tau = float(ect_uot_tau)
+        self.ect_uot_margin = float(ect_uot_margin)
+        self.ect_uot_cost_weight = float(ect_uot_cost_weight)
+        self.ect_uot_query_mass_mix = float(ect_uot_query_mass_mix)
+        self.ect_uot_query_tau = float(ect_uot_query_tau)
+        self.ect_uot_detach = bool(ect_uot_detach)
         self.enable_verified_uot_score = bool(enable_verified_uot_score)
         self.verified_uot_beta = float(verified_uot_beta)
         self.verified_uot_tau = float(verified_uot_tau)
@@ -648,6 +662,8 @@ class OursM2(JECOTM2):
             ("discriminative_uot_mass_weight", self.discriminative_uot_mass_weight),
             ("discriminative_uot_cost_weight", self.discriminative_uot_cost_weight),
             ("pulse_discriminative_margin", self.pulse_discriminative_margin),
+            ("ect_uot_margin", self.ect_uot_margin),
+            ("ect_uot_cost_weight", self.ect_uot_cost_weight),
             ("verified_uot_ratio_threshold", self.verified_uot_ratio_threshold),
             ("rvuot_ratio_threshold", self.rvuot_ratio_threshold),
             ("rvuot_rival_margin", self.rvuot_rival_margin),
@@ -688,6 +704,12 @@ class OursM2(JECOTM2):
             raise ValueError("pulse_discriminative_tau must be positive")
         if not 0.0 <= self.pulse_discriminative_mix <= 1.0:
             raise ValueError("pulse_discriminative_mix must be in [0, 1]")
+        if self.ect_uot_tau <= 0.0:
+            raise ValueError("ect_uot_tau must be positive")
+        if self.ect_uot_query_tau <= 0.0:
+            raise ValueError("ect_uot_query_tau must be positive")
+        if not 0.0 <= self.ect_uot_query_mass_mix <= 1.0:
+            raise ValueError("ect_uot_query_mass_mix must be in [0, 1]")
         if self.label_ot_epsilon <= 0.0:
             raise ValueError("label_ot_epsilon must be positive")
         if self.label_ot_iterations < 1:
@@ -1075,6 +1097,178 @@ class OursM2(JECOTM2):
             "discriminative_uot/rival_advantage_mean": rival_advantage.mean().detach(),
         }
         return pair_evidence, payload
+
+    def _episode_contrastive_pair_gate(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+        tau: float,
+        margin: float,
+        detach: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match way*shot={way_num * shot_num}")
+
+        reference_cost = flat_cost.detach() if detach else flat_cost
+        cost_view = reference_cost.reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+        if int(way_num) <= 1:
+            gate = torch.ones_like(cost_view)
+            return gate, torch.zeros_like(cost_view)
+
+        scale = reference_cost.std(dim=(1, 2, 3), keepdim=True, unbiased=False).clamp_min(float(self.eps))
+        temperature = (float(tau) * scale).clamp_min(float(self.eps))
+        margin_cost = float(margin) * scale
+        temperature_pair = temperature.reshape(num_query, 1, 1, 1)
+        temperature_rival = temperature.reshape(num_query, 1, 1)
+        temperature_query = temperature.reshape(num_query, 1)
+        margin_pair = margin_cost.reshape(num_query, 1, 1, 1)
+
+        gates = []
+        advantages = []
+        all_classes = torch.arange(int(way_num), device=flat_cost.device)
+        for class_idx in range(int(way_num)):
+            rival_mask = all_classes != int(class_idx)
+            rival_cost = cost_view[:, rival_mask]
+            rival_cost = rival_cost.permute(0, 3, 1, 2, 4).reshape(num_query, query_len, -1)
+            rival_softmin = -temperature_query * (
+                torch.logsumexp(-rival_cost / temperature_rival, dim=-1)
+            )
+            advantage = rival_softmin[:, None, :, None] - cost_view[:, class_idx] - margin_pair
+            gate = torch.sigmoid(advantage / temperature_pair)
+            advantages.append(advantage)
+            gates.append(gate)
+        return torch.stack(gates, dim=1), torch.stack(advantages, dim=1)
+
+    def _apply_episode_contrastive_uot(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        query_weight: torch.Tensor | None,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, dict[str, torch.Tensor]]:
+        if not getattr(self, "enable_episode_contrastive_uot", False):
+            return flat_cost, query_weight, {}
+
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        gate, advantage = self._episode_contrastive_pair_gate(
+            flat_cost,
+            way_num=way_num,
+            shot_num=shot_num,
+            tau=float(self.ect_uot_tau),
+            margin=float(self.ect_uot_margin),
+            detach=bool(self.ect_uot_detach),
+        )
+        gate_flat = gate.reshape(num_query, num_pairs, query_len, support_len)
+        scale = flat_cost.detach().std(dim=(1, 2, 3), keepdim=True, unbiased=False).clamp_min(float(self.eps))
+        penalty = flat_cost.new_tensor(float(self.ect_uot_cost_weight)) * scale * (1.0 - gate_flat)
+        guided_cost = flat_cost + penalty.to(device=flat_cost.device, dtype=flat_cost.dtype)
+
+        specificity = gate_flat.amax(dim=-1).clamp_min(float(self.eps))
+        specificity_prob = torch.softmax(
+            specificity.clamp_min(float(self.eps)).log() / float(self.ect_uot_query_tau),
+            dim=-1,
+        )
+        uniform = torch.full_like(specificity_prob, 1.0 / float(max(query_len, 1)))
+        mix = flat_cost.new_tensor(float(self.ect_uot_query_mass_mix))
+        contrast_query_weight = (1.0 - mix) * uniform + mix * specificity_prob
+
+        if query_weight is None:
+            mixed_query_weight = contrast_query_weight
+        else:
+            current = query_weight.to(device=flat_cost.device, dtype=flat_cost.dtype).clamp_min(0.0)
+            if tuple(current.shape) == (num_query, query_len):
+                current = current[:, None, :].expand(-1, num_pairs, -1)
+            elif tuple(current.shape) != (num_query, num_pairs, query_len):
+                raise ValueError(
+                    "query_weight must have shape (NumQuery, QueryTokens) or "
+                    "(NumQuery, Way*Shot, QueryTokens), "
+                    f"got {tuple(query_weight.shape)}"
+                )
+            mixed_query_weight = current * contrast_query_weight
+            mixed_query_weight = mixed_query_weight / mixed_query_weight.sum(dim=-1, keepdim=True).clamp_min(
+                float(self.eps)
+            )
+
+        normalized_query_weight = mixed_query_weight / mixed_query_weight.sum(dim=-1, keepdim=True).clamp_min(
+            float(self.eps)
+        )
+        entropy = -(
+            normalized_query_weight
+            * normalized_query_weight.clamp_min(float(self.eps)).log()
+        ).sum(dim=-1)
+        payload = {
+            "episode_contrast_guided_cost_matrix": guided_cost.reshape(
+                num_query,
+                int(way_num),
+                int(shot_num),
+                query_len,
+                support_len,
+            ),
+            "episode_contrast_pair_gate": gate.detach(),
+            "episode_contrast_query_weight": normalized_query_weight.detach(),
+            "episode_contrast/enabled": flat_cost.new_tensor(1.0),
+            "episode_contrast/tau": flat_cost.new_tensor(float(self.ect_uot_tau)),
+            "episode_contrast/margin": flat_cost.new_tensor(float(self.ect_uot_margin)),
+            "episode_contrast/cost_weight": flat_cost.new_tensor(float(self.ect_uot_cost_weight)),
+            "episode_contrast/query_mass_mix": mix.detach(),
+            "episode_contrast/query_tau": flat_cost.new_tensor(float(self.ect_uot_query_tau)),
+            "episode_contrast/gate_mean": gate.mean().detach(),
+            "episode_contrast/gate_low_share": (gate < 0.5).to(flat_cost.dtype).mean().detach(),
+            "episode_contrast/rival_advantage_mean": advantage.mean().detach(),
+            "episode_contrast/cost_delta_ratio": (
+                penalty.detach().abs().mean() / flat_cost.detach().abs().mean().clamp_min(float(self.eps))
+            ),
+            "episode_contrast/query_weight_entropy": entropy.mean().detach(),
+            "episode_contrast/query_specificity_mean": specificity.mean().detach(),
+        }
+        return guided_cost, normalized_query_weight, payload
+
+    def _transport_specificity_audit(
+        self,
+        *,
+        flat_cost: torch.Tensor,
+        plan: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+        prefix: str,
+    ) -> dict[str, torch.Tensor]:
+        if flat_cost.dim() != 4 or plan.dim() != 5:
+            return {}
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if tuple(plan.shape) != (num_query, int(way_num), int(shot_num), query_len, support_len):
+            return {}
+        gate, advantage = self._episode_contrastive_pair_gate(
+            flat_cost,
+            way_num=way_num,
+            shot_num=shot_num,
+            tau=float(getattr(self, "ect_uot_tau", 0.25)),
+            margin=0.0,
+            detach=True,
+        )
+        mass = plan.detach().clamp_min(0.0)
+        total_mass = mass.sum(dim=(-1, -2)).clamp_min(float(self.eps))
+        common_mass_ratio = (mass * (gate < 0.5).to(mass.dtype)).sum(dim=(-1, -2)) / total_mass
+        specific_mass_ratio = (mass * (gate > 0.75).to(mass.dtype)).sum(dim=(-1, -2)) / total_mass
+        cost_view = flat_cost.detach().reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+        cost_per_mass = (mass * cost_view).sum(dim=(-1, -2)) / total_mass
+        row_mass = mass.sum(dim=-1)
+        row_prob = row_mass / row_mass.sum(dim=-1, keepdim=True).clamp_min(float(self.eps))
+        row_entropy = -(row_prob * row_prob.clamp_min(float(self.eps)).log()).sum(dim=-1)
+        return {
+            f"{prefix}/common_mass_ratio": common_mass_ratio.mean().detach(),
+            f"{prefix}/specific_mass_ratio": specific_mass_ratio.mean().detach(),
+            f"{prefix}/gate_mean": gate.mean().detach(),
+            f"{prefix}/gate_low_share": (gate < 0.5).to(flat_cost.dtype).mean().detach(),
+            f"{prefix}/rival_advantage_mean": advantage.mean().detach(),
+            f"{prefix}/cost_per_mass": cost_per_mass.mean().detach(),
+            f"{prefix}/query_mass_entropy": row_entropy.mean().detach(),
+        }
 
     def _record_pulse_saliency(self, images: torch.Tensor, feature_map: torch.Tensor) -> None:
         if not getattr(self, "enable_pulse_region_uot", False):
@@ -2635,6 +2829,14 @@ class OursM2(JECOTM2):
             if ev_support_marginal is not None:
                 support_weight = ev_support_marginal
 
+        episode_contrast_payload: dict[str, torch.Tensor] = {}
+        cost_for_transport, query_weight, episode_contrast_payload = self._apply_episode_contrastive_uot(
+            cost_for_transport,
+            query_weight=query_weight,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+
         payload = super()._forward_ecot_budget_bank(
             cost_for_transport,
             way_num=way_num,
@@ -2667,6 +2869,26 @@ class OursM2(JECOTM2):
             shot_num=shot_num,
             spatial_hw=spatial_hw,
         )
+        if torch.is_tensor(payload.get("transport_plan")):
+            payload.update(
+                self._transport_specificity_audit(
+                    flat_cost=cost_for_transport,
+                    plan=payload["transport_plan"],
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    prefix="transport_audit",
+                )
+            )
+        if torch.is_tensor(payload.get("rvuot_unverified_transport_plan")):
+            payload.update(
+                self._transport_specificity_audit(
+                    flat_cost=cost_for_transport,
+                    plan=payload["rvuot_unverified_transport_plan"],
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    prefix="transport_audit_unverified",
+                )
+            )
 
         if dmuot_payload:
             plan = payload["transport_plan"]
@@ -2700,6 +2922,8 @@ class OursM2(JECOTM2):
             payload.update(mspta_payload)
         if evidence_payload:
             payload.update(evidence_payload)
+        if episode_contrast_payload:
+            payload.update(episode_contrast_payload)
         if self.enable_pot_guide and self._last_pot_guide_diagnostics is not None:
             payload.update(self._last_pot_guide_diagnostics)
         if (
@@ -3116,6 +3340,9 @@ class OursM2(JECOTM2):
             if "adaptive_region_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["adaptive_region_guided_cost_matrix"]
+            if "episode_contrast_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["episode_contrast_guided_cost_matrix"]
             if self.lambda_cost > 0.0 and "cost_matrix_modulated" in outputs:
                 if "base_cost_matrix" not in outputs and "cost_matrix" in outputs:
                     outputs["base_cost_matrix"] = outputs["cost_matrix"]
@@ -3230,6 +3457,7 @@ class OursM2(JECOTM2):
             "marginal_support",
             "cost_matrix_modulated",
             "mspta_guided_cost_matrix",
+            "episode_contrast_guided_cost_matrix",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs], dim=0)
@@ -3256,6 +3484,8 @@ class OursM2(JECOTM2):
             "adaptive_region_transport_cost",
             "adaptive_region_transported_mass",
             "adaptive_region_query_weight",
+            "episode_contrast_pair_gate",
+            "episode_contrast_query_weight",
             "rvuot_verifier_gate",
             "rvuot_evidence_verifier_gate",
             "rvuot_evidence_transport_plan",
@@ -3330,6 +3560,9 @@ class OursM2(JECOTM2):
             "adaptive_region/",
             "mspta/",
             "rvuot/",
+            "episode_contrast/",
+            "transport_audit/",
+            "transport_audit_unverified/",
         ):
             for key in sorted(k for k in batch_outputs[0] if str(k).startswith(prefix)):
                 values = [item[key] for item in batch_outputs if key in item]
