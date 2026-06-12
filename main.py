@@ -7643,6 +7643,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         q1_enabled
         or args.model == "crj_fsl"
         or egsm_test_diagnostics
+        or _bool_flag(
+            getattr(args, "enable_ours_final_failure_probe", "false"),
+            default=False,
+        )
     )
     ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
@@ -8032,6 +8036,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 f"noise/{metric_scope}/accuracy_ci95": acc_ci95,
                 f"noise/{metric_scope}/f1": f1,
                 f"noise/{metric_scope}/inference_time_mean_ms": time_mean,
+                **prefix_diagnostics(
+                    test_diag,
+                    f"noise/{metric_scope}/diag_",
+                ),
             }
         )
     wandb.log(test_metrics)
@@ -8045,6 +8053,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         summary_scope = sanitize_result_tag(current_test_name)
         wandb.run.summary[f"noise/{summary_scope}/accuracy_mean"] = acc_mean
         wandb.run.summary[f"noise/{summary_scope}/accuracy_ci95"] = acc_ci95
+        for key, value in test_diag.items():
+            wandb.run.summary[f"noise/{summary_scope}/diag_{key}"] = value
 
     support_summary = {}
     if support_summary_count > 0.0:
