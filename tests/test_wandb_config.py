@@ -281,7 +281,9 @@ def test_ours_final_wandb_config_hides_other_model_flags_and_keeps_global_residu
         "ec_mrot_response_mode",
         "hrot_hlm_min_mass",
         "mspta_mass_mode",
+        "hrot_ecot_enable_egsm",
         "hrot_ecot_egsm_hidden_dim",
+        "hrot_ecot_egsm_adaptive_rho",
     ):
         assert unrelated_key not in cfg
 

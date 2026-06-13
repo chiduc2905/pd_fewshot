@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from main import get_args, infer_hrot_arch_overrides_from_state_dict, infer_hrot_variant_from_state_dict
@@ -320,6 +321,39 @@ def test_infer_hrot_arch_overrides_detects_mea_marginal_state():
     assert infer_hrot_variant_from_state_dict(state_dict, checkpoint_args=checkpoint_args) == "J_ECOT_M2"
     assert overrides["hrot_variant"] == "J_ECOT_M2"
     assert overrides["hrot_ecot_enable_mea_marginal"] == "true"
+
+
+def test_infer_hrot_arch_overrides_detects_token_attention_marginal_state():
+    state_dict = {
+        "raw_ecot_lambda": torch.tensor(0.0),
+        "episode_controller.network.0.weight": torch.randn(32, 11),
+        "token_attention_marginal.scorer.0.weight": torch.randn(17, 24),
+        "token_attention_marginal.scorer.0.bias": torch.randn(17),
+        "token_attention_marginal.scorer.2.weight": torch.randn(1, 17),
+        "token_attention_marginal.scorer.2.bias": torch.randn(1),
+        "token_attention_marginal.raw_temperature": torch.tensor(0.0),
+        "token_attention_marginal.uniform_floor_value": torch.tensor(0.2),
+        "token_attention_marginal.detach_weights_value": torch.tensor(1.0),
+    }
+    checkpoint_args = {
+        "hrot_variant": "J_ECOT_M2",
+        "hrot_ecot_rho_bank": "0.80",
+        "hrot_ecot_base_rho": 0.80,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(
+        state_dict,
+        checkpoint_args=checkpoint_args,
+    )
+
+    assert overrides["enable_token_attention_marginal"] == "true"
+    assert overrides["tam_hidden_dim"] == 17
+    assert overrides["tam_temperature_init"] == pytest.approx(
+        torch.nn.functional.softplus(torch.tensor(0.0)).item()
+    )
+    assert overrides["tam_uniform_floor"] == pytest.approx(0.2)
+    assert overrides["tam_detach_weights"] == "true"
+    assert overrides["tam_share_qk"] == "true"
 
 
 def test_infer_hrot_arch_overrides_detects_cata_state():

@@ -366,7 +366,6 @@ _OURS_FINAL_WANDB_CORE_KEYS = frozenset(
         "hrot_ecot_transport_mode",
         "hrot_ecot_episode_feature_normalize",
         "hrot_ecot_episode_feature_norm_eps",
-        "hrot_ecot_enable_egsm",
         "ours_ablation",
         "use_differential_mode",
         "dm_alpha",
@@ -442,30 +441,6 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
-        "hrot_ecot_enable_egsm",
-        frozenset(
-            {
-                "hrot_ecot_enable_egsm",
-                "hrot_ecot_egsm_hidden_dim",
-                "hrot_ecot_egsm_candidate_tau_q",
-                "hrot_ecot_egsm_candidate_tau_b",
-                "hrot_ecot_egsm_kappa_min",
-                "hrot_ecot_egsm_kappa_max",
-            }
-        ),
-    ),
-    (
-        "hrot_ecot_egsm_adaptive_rho",
-        frozenset(
-            {
-                "hrot_ecot_egsm_adaptive_rho",
-                "hrot_ecot_egsm_rho_delta_max",
-                "hrot_ecot_egsm_rho_grad_clip",
-                "hrot_ecot_egsm_rho_reg_lambda",
-            }
-        ),
-    ),
-    (
         "hrot_ecot_enable_ccem_marginal",
         frozenset(
             {
@@ -537,6 +512,19 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "enable_global_residual_score",
                 "global_residual_mode",
                 "global_residual_weight",
+            }
+        ),
+    ),
+    (
+        "enable_token_attention_marginal",
+        frozenset(
+            {
+                "enable_token_attention_marginal",
+                "tam_hidden_dim",
+                "tam_temperature_init",
+                "tam_uniform_floor",
+                "tam_detach_weights",
+                "tam_share_qk",
             }
         ),
     ),
@@ -848,8 +836,6 @@ def _wandb_optional_group_enabled_for_ours_final(cfg, gate_key):
         model_name = str(cfg.get("model", "") or "").strip().lower()
         if model_name == "ours_final_verified_uot":
             return True
-    if gate_key == "hrot_ecot_enable_egsm" and _wandb_flag_enabled(cfg, "hrot_ecot_egsm_adaptive_rho"):
-        return True
     return _wandb_flag_enabled(cfg, gate_key)
 
 
@@ -2630,6 +2616,36 @@ def get_args():
         help="Weight of the global prototype residual logits when enable_global_residual_score is set.",
     )
     parser.add_argument(
+        "--enable_token_attention_marginal",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: replace uniform UOT token marginals with "
+            "learned per-token attention weights."
+        ),
+    )
+    parser.add_argument("--tam_hidden_dim", type=int, default=64)
+    parser.add_argument("--tam_temperature_init", type=float, default=1.0)
+    parser.add_argument("--tam_uniform_floor", type=float, default=0.1)
+    parser.add_argument(
+        "--tam_detach_weights",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help="Stop gradients through TokenAttentionMarginal weights.",
+    )
+    parser.add_argument(
+        "--tam_share_qk",
+        nargs="?",
+        const="true",
+        default="true",
+        choices=["true", "false"],
+        help="Share the TokenAttentionMarginal scorer across query and support.",
+    )
+    parser.add_argument(
         "--enable_residual_aligned_uot",
         nargs="?",
         const="true",
@@ -2794,7 +2810,7 @@ def get_args():
         default="false",
         choices=["true", "false"],
         help=(
-            "Ours-Final only: replace EGSM with bidirectional cross-reference, "
+            "Ours-Final only: replace fixed uniform marginals with bidirectional cross-reference, "
             "rival-specific pair marginals while preserving the original UOT cost and score."
         ),
     )
@@ -3055,7 +3071,8 @@ def get_args():
         help=(
             "Episode-Gated Shrinkage Marginals (EGSM) for J_ECOT_M2 family: true or false only. "
             "If omitted, defaults to true for models ours / ours_cpm and false for other J_ECOT_M2 "
-            "(e.g. m2). Mutually exclusive with MEA/CCDM/CRS/NNCS."
+            "(e.g. m2). EGSM is unavailable for Ours-Final. "
+            "Mutually exclusive with MEA/CCDM/CRS/NNCS."
         ),
     )
     parser.add_argument("--hrot_ecot_egsm_hidden_dim", type=int, default=32)
@@ -4417,6 +4434,32 @@ def get_model(args):
             if args.model in M2_LIKE_MODEL_NAMES
             else "Poincare-ball geometry -> balanced/unbalanced relational transport "
         )
+        if (
+            args.model in OURS_FINAL_MODEL_NAMES
+            and _wandb_flag_enabled(
+                vars(args),
+                "enable_token_attention_marginal",
+            )
+        ):
+            ecot_marginal_text = (
+                "ecot_token_marginals=learned_attention, "
+                f"tam_hidden={getattr(args, 'tam_hidden_dim', 64)}, "
+                f"tam_temperature={getattr(args, 'tam_temperature_init', 1.0)}, "
+                f"tam_uniform_floor={getattr(args, 'tam_uniform_floor', 0.1)}, "
+                f"tam_detach={getattr(args, 'tam_detach_weights', 'false')}, "
+                f"tam_share_qk={getattr(args, 'tam_share_qk', 'true')}, "
+            )
+        elif args.model in OURS_FINAL_MODEL_NAMES:
+            ecot_marginal_text = "ecot_token_marginals=uniform_fixed, "
+        else:
+            ecot_marginal_text = (
+                f"ecot_egsm_enable={resolve_hrot_ecot_enable_egsm(args)}, "
+                f"ecot_egsm_hidden={getattr(args, 'hrot_ecot_egsm_hidden_dim', 32)}, "
+                f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},"
+                f"{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.35)}), "
+                f"ecot_egsm_adaptive_rho={getattr(args, 'hrot_ecot_egsm_adaptive_rho', 'false')}, "
+                f"ecot_egsm_rho_delta_max={getattr(args, 'hrot_ecot_egsm_rho_delta_max', 0.15)}, "
+            )
         print(
             f"  {hrot_label}: backbone spatial tokens -> optional Euclidean projector -> "
             f"{hrot_path_text}"
@@ -4474,11 +4517,7 @@ def get_model(args):
             f"ecot_ccdm_tau_q={getattr(args, 'hrot_ecot_ccdm_tau_q_init', 0.50)}, "
             f"ecot_ccdm_tau_b={getattr(args, 'hrot_ecot_ccdm_tau_b_init', 0.50)}, "
             f"ecot_ccdm_ew={getattr(args, 'hrot_ecot_ccdm_entropy_shot_weight', 0.0)}, "
-            f"ecot_egsm_enable={resolve_hrot_ecot_enable_egsm(args)}, "
-            f"ecot_egsm_hidden={getattr(args, 'hrot_ecot_egsm_hidden_dim', 32)}, "
-            f"ecot_egsm_kappa=({getattr(args, 'hrot_ecot_egsm_kappa_min', 0.05)},{getattr(args, 'hrot_ecot_egsm_kappa_max', 0.35)}), "
-            f"ecot_egsm_adaptive_rho={getattr(args, 'hrot_ecot_egsm_adaptive_rho', 'false')}, "
-            f"ecot_egsm_rho_delta_max={getattr(args, 'hrot_ecot_egsm_rho_delta_max', 0.15)}, "
+            f"{ecot_marginal_text}"
             f"ecot_ccem_enable={getattr(args, 'hrot_ecot_enable_ccem_marginal', 'false')}, "
             f"ecot_ccem_mix={getattr(args, 'hrot_ecot_ccem_uniform_mix', 0.05)}, "
             f"ecot_ccem_tau_q={getattr(args, 'hrot_ecot_ccem_tau_q', 0.25)}, "
@@ -4553,6 +4592,8 @@ def get_model(args):
             elif ear_uot_enabled:
                 egsm_enabled = False
                 evidence_text = "EAR-UOT token-wise KL relaxation"
+            elif args.model in OURS_FINAL_MODEL_NAMES:
+                evidence_text = "uniform fixed marginals"
             else:
                 evidence_text = "EGSM on" if egsm_enabled else "EGSM off"
             base_rho_text = getattr(args, "hrot_ecot_base_rho", None) or 0.8
@@ -4592,9 +4633,9 @@ def get_model(args):
                 else:
                     score_text = "threshold-mass score(T*M-C)"
             if args.model in OURS_FINAL_PARTIAL_OT_MODEL_NAMES:
-                default_text = "local_descriptors+fast_PartialOT(rho=0.8)+EGSM_off+cost/mass"
+                default_text = "local_descriptors+uniform_marginals+fast_PartialOT(rho=0.8)+cost/mass"
             elif args.model in OURS_FINAL_MODEL_NAMES:
-                default_text = "local_descriptors+UOT(rho=0.8)+EGSM_off+T*M-C"
+                default_text = "local_descriptors+uniform_marginals+UOT(rho=0.8)+T*M-C"
             else:
                 default_text = "local_descriptors+UOT(rho=0.8)+EGSM"
             dmt_text = (
@@ -5243,6 +5284,12 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "label_ot_min_queries_per_class",
             "label_ot_min_column_imbalance",
             "label_ot_max_bias",
+            "enable_token_attention_marginal",
+            "tam_hidden_dim",
+            "tam_temperature_init",
+            "tam_uniform_floor",
+            "tam_detach_weights",
+            "tam_share_qk",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -5277,6 +5324,59 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             and any(key.startswith("egsm_marginal.") for key in state_dict)
         ):
             overrides["hrot_ecot_enable_egsm"] = "true"
+        if (
+            "enable_token_attention_marginal" not in overrides
+            and any(
+                key.startswith("token_attention_marginal.")
+                for key in state_dict
+            )
+        ):
+            overrides["enable_token_attention_marginal"] = "true"
+        tam_hidden_weight = state_dict.get(
+            "token_attention_marginal.scorer.0.weight"
+        )
+        if torch.is_tensor(tam_hidden_weight) and tam_hidden_weight.dim() == 2:
+            overrides.setdefault(
+                "tam_hidden_dim",
+                int(tam_hidden_weight.shape[0]),
+            )
+        tam_temperature = state_dict.get(
+            "token_attention_marginal.raw_temperature"
+        )
+        if torch.is_tensor(tam_temperature) and tam_temperature.numel() == 1:
+            overrides.setdefault(
+                "tam_temperature_init",
+                float(F.softplus(tam_temperature.detach().float()).item()),
+            )
+        tam_uniform_floor = state_dict.get(
+            "token_attention_marginal.uniform_floor_value"
+        )
+        if torch.is_tensor(tam_uniform_floor) and tam_uniform_floor.numel() == 1:
+            overrides.setdefault(
+                "tam_uniform_floor",
+                float(tam_uniform_floor.detach().float().item()),
+            )
+        tam_detach = state_dict.get(
+            "token_attention_marginal.detach_weights_value"
+        )
+        if torch.is_tensor(tam_detach) and tam_detach.numel() == 1:
+            overrides.setdefault(
+                "tam_detach_weights",
+                "true" if float(tam_detach.item()) >= 0.5 else "false",
+            )
+        if _bool_flag(
+            overrides.get("enable_token_attention_marginal"),
+            default=False,
+        ):
+            overrides.setdefault(
+                "tam_share_qk",
+                "false"
+                if any(
+                    key.startswith("token_attention_support_marginal.")
+                    for key in state_dict
+                )
+                else "true",
+            )
         if "hrot_use_cata" not in overrides and any(key.startswith("cata.") for key in state_dict):
             overrides["hrot_use_cata"] = "true"
         cata_anchors = state_dict.get("cata.anchors")
@@ -5367,6 +5467,15 @@ def maybe_autoconfigure_hrot_from_checkpoint(args):
     state_dict = strip_module_prefix(unwrap_model_state(checkpoint))
     checkpoint_args = get_checkpoint_args_dict(checkpoint)
     overrides = infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=checkpoint_args)
+    if getattr(args, "model", None) in OURS_FINAL_MODEL_NAMES:
+        if any(key.startswith("egsm_marginal.") for key in state_dict):
+            raise ValueError(
+                "This checkpoint contains EGSM parameters, but EGSM has been removed "
+                "from Ours-Final"
+            )
+        for key in tuple(overrides):
+            if key == "hrot_ecot_enable_egsm" or key.startswith("hrot_ecot_egsm_"):
+                overrides.pop(key)
 
     changed = []
     for key, value in overrides.items():
@@ -7331,6 +7440,42 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "score_marginal/query_l1_drift",
         "score_marginal/support_l1_drift",
         "score_marginal/l1_drift",
+        "token_marginal/enabled",
+        "token_marginal/share_qk",
+        "token_marginal/detach_weights",
+        "token_marginal/entropy",
+        "token_marginal/normalized_entropy",
+        "token_marginal/max_weight",
+        "token_marginal/min_weight",
+        "token_marginal/l1_from_uniform",
+        "token_marginal/logit_std",
+        "token_marginal/temperature",
+        "token_marginal/uniform_floor",
+        "token_marginal/mass_error",
+        "token_marginal/scorer_norm",
+        "token_marginal/query_entropy",
+        "token_marginal/support_entropy",
+        "token_marginal/query_normalized_entropy",
+        "token_marginal/support_normalized_entropy",
+        "token_marginal/query_max_weight",
+        "token_marginal/support_max_weight",
+        "token_marginal/query_min_weight",
+        "token_marginal/support_min_weight",
+        "token_marginal/query_l1_from_uniform",
+        "token_marginal/support_l1_from_uniform",
+        "token_marginal/query_logit_std",
+        "token_marginal/support_logit_std",
+        "token_marginal/query_temperature",
+        "token_marginal/support_temperature",
+        "token_marginal/query_mass_error",
+        "token_marginal/support_mass_error",
+        "token_marginal/query_scorer_norm",
+        "token_marginal/support_scorer_norm",
+        "token_marginal/query_l1_drift",
+        "token_marginal/support_l1_drift",
+        "token_marginal/l1_drift",
+        "token_marginal/transported_mass_fraction",
+        "token_marginal/transported_mass_fraction_min",
         "ours_probe/enabled",
         "ours_probe/common_margin",
         "ours_probe/negative_utility_mass_ratio",

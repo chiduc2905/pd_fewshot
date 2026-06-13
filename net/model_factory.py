@@ -271,11 +271,21 @@ def resolve_ours_final_evidence_config(args) -> dict:
 def resolve_hrot_ecot_enable_egsm(args) -> str:
     """Resolve ``--hrot_ecot_enable_egsm`` to ``'true'`` or ``'false'`` (no auto).
 
-    If the flag is omitted, defaults to ``true`` for legacy ``ours`` /
-    ``ours_cpm`` and ``false`` for ``ours_final`` and other J_ECOT_M2-style
-    models (e.g. ``m2``).
+    Ours-Final rejects EGSM. If the flag is omitted elsewhere, it defaults to
+    ``true`` for legacy ``ours`` / ``ours_cpm`` and ``false`` for other
+    J_ECOT_M2-style models (e.g. ``m2``).
     """
     raw = getattr(args, "hrot_ecot_enable_egsm", None)
+    model = str(getattr(args, "model", "")).strip().lower()
+    if model in OURS_FINAL_MODEL_NAMES:
+        if _bool_flag(raw, default=False):
+            raise ValueError("EGSM has been removed from Ours-Final")
+        if _bool_flag(
+            getattr(args, "hrot_ecot_egsm_adaptive_rho", "false"),
+            default=False,
+        ):
+            raise ValueError("EGSM adaptive rho has been removed from Ours-Final")
+        return "false"
     if raw is not None and str(raw).strip() != "":
         resolved = str(raw).strip().lower()
         if resolved in {"auto", "none"}:
@@ -289,7 +299,6 @@ def resolve_hrot_ecot_enable_egsm(args) -> str:
                 f"(got {raw!r}; legacy 'auto' is no longer supported)."
             )
         return resolved
-    model = str(getattr(args, "model", "")).strip().lower()
     if model in OURS_MODEL_NAMES or model in OURS_CPM_MODEL_NAMES:
         return "true"
     return "false"
@@ -376,6 +385,14 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_global_residual_score is supported only with --model ours_final")
+    if _bool_flag(
+        getattr(args, "enable_token_attention_marginal", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_token_attention_marginal is supported only with "
+            "--model ours_final"
+        )
     marginal_mode = str(
         getattr(args, "ours_final_marginal_mode", "uniform")
     ).strip().lower().replace("-", "_")
@@ -815,7 +832,7 @@ MODEL_REGISTRY = {
     "ours_final": {
         "display_name": "Ours-Final",
         "paper_name": "Ours-Final",
-        "architecture": "Backbone local descriptors -> single-budget rho=0.8 UOT -> threshold-mass score T*M-C -> episode-calibrated shot pooling; EGSM is disabled by default",
+        "architecture": "Backbone local descriptors with fixed uniform marginals -> single-budget rho=0.8 UOT -> threshold-mass score T*M-C -> episode-calibrated shot pooling",
         "metric": "Single-Budget Threshold-Mass Token UOT",
     },
     "ours_final_verified_uot": {
@@ -827,7 +844,7 @@ MODEL_REGISTRY = {
     "ours_final_partial_ot": {
         "display_name": "Ours-Final-PartialOT",
         "paper_name": "Ours-Final Partial OT Ablation",
-        "architecture": "Ours-Final ablation with fast partial OT at rho=0.8 and cost-per-transported-mass scoring; EGSM is disabled by default",
+        "architecture": "Ours-Final ablation with fixed uniform marginals, fast partial OT at rho=0.8, and cost-per-transported-mass scoring",
         "metric": "Fast Partial OT Cost-Per-Mass",
     },
     "ours_cpm": {
@@ -2848,6 +2865,9 @@ def build_model_from_args(args):
             _load_symbol("net.ours_cpm", "OursCPM")
             if is_ours_cpm_model
             else
+            _load_symbol("net.ours", "OursFinalM2")
+            if is_ours_final_model
+            else
             _load_symbol("net.ours", "OursM2")
             if is_ours_entrypoint_model
             else
@@ -3084,6 +3104,38 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_global_residual_score", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_token_attention_marginal": True,
+                            "tam_hidden_dim": int(
+                                getattr(args, "tam_hidden_dim", 64)
+                            ),
+                            "tam_temperature_init": float(
+                                getattr(args, "tam_temperature_init", 1.0)
+                            ),
+                            "tam_uniform_floor": float(
+                                getattr(args, "tam_uniform_floor", 0.1)
+                            ),
+                            "tam_detach_weights": _bool_flag(
+                                getattr(args, "tam_detach_weights", "false"),
+                                default=False,
+                            ),
+                            "tam_share_qk": _bool_flag(
+                                getattr(args, "tam_share_qk", "true"),
+                                default=True,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(
+                            getattr(
+                                args,
+                                "enable_token_attention_marginal",
+                                False,
+                            ),
+                            default=False,
+                        )
                         else {}
                     ),
                     **(
@@ -3602,18 +3654,41 @@ def build_model_from_args(args):
             ecot_ccdm_tau_b_init=float(getattr(args, "hrot_ecot_ccdm_tau_b_init", 0.50)),
             ecot_ccdm_entropy_reg=float(getattr(args, "hrot_ecot_ccdm_entropy_reg", 0.0)),
             ecot_ccdm_entropy_shot_weight=float(getattr(args, "hrot_ecot_ccdm_entropy_shot_weight", 0.0)),
-            ecot_enable_egsm=ecot_enable_egsm_flag,
-            ecot_egsm_hidden_dim=int(getattr(args, "hrot_ecot_egsm_hidden_dim", 32)),
-            ecot_egsm_candidate_tau_q=float(getattr(args, "hrot_ecot_egsm_candidate_tau_q", 1.0)),
-            ecot_egsm_candidate_tau_b=float(getattr(args, "hrot_ecot_egsm_candidate_tau_b", 1.0)),
-            ecot_egsm_kappa_min=float(getattr(args, "hrot_ecot_egsm_kappa_min", 0.05)),
-            ecot_egsm_kappa_max=float(getattr(args, "hrot_ecot_egsm_kappa_max", 0.35)),
-            ecot_egsm_adaptive_rho=_bool_flag(
-                getattr(args, "hrot_ecot_egsm_adaptive_rho", "false"), default=False,
+            **(
+                {"ecot_enable_egsm": False}
+                if is_ours_final_model
+                else {
+                    "ecot_enable_egsm": ecot_enable_egsm_flag,
+                    "ecot_egsm_hidden_dim": int(
+                        getattr(args, "hrot_ecot_egsm_hidden_dim", 32)
+                    ),
+                    "ecot_egsm_candidate_tau_q": float(
+                        getattr(args, "hrot_ecot_egsm_candidate_tau_q", 1.0)
+                    ),
+                    "ecot_egsm_candidate_tau_b": float(
+                        getattr(args, "hrot_ecot_egsm_candidate_tau_b", 1.0)
+                    ),
+                    "ecot_egsm_kappa_min": float(
+                        getattr(args, "hrot_ecot_egsm_kappa_min", 0.05)
+                    ),
+                    "ecot_egsm_kappa_max": float(
+                        getattr(args, "hrot_ecot_egsm_kappa_max", 0.35)
+                    ),
+                    "ecot_egsm_adaptive_rho": _bool_flag(
+                        getattr(args, "hrot_ecot_egsm_adaptive_rho", "false"),
+                        default=False,
+                    ),
+                    "ecot_egsm_rho_delta_max": float(
+                        getattr(args, "hrot_ecot_egsm_rho_delta_max", 0.15)
+                    ),
+                    "ecot_egsm_rho_grad_clip": float(
+                        getattr(args, "hrot_ecot_egsm_rho_grad_clip", 1.0)
+                    ),
+                    "ecot_egsm_rho_reg_lambda": float(
+                        getattr(args, "hrot_ecot_egsm_rho_reg_lambda", 0.01)
+                    ),
+                }
             ),
-            ecot_egsm_rho_delta_max=float(getattr(args, "hrot_ecot_egsm_rho_delta_max", 0.15)),
-            ecot_egsm_rho_grad_clip=float(getattr(args, "hrot_ecot_egsm_rho_grad_clip", 1.0)),
-            ecot_egsm_rho_reg_lambda=float(getattr(args, "hrot_ecot_egsm_rho_reg_lambda", 0.01)),
             ecot_enable_ccem_marginal=_bool_flag(
                 getattr(args, "hrot_ecot_enable_ccem_marginal", "false"),
                 default=False,

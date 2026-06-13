@@ -378,6 +378,7 @@ def get_args():
             "rival_cost",
             "hubness_uot",
             "adaptive_relaxation",
+            "tier1_diagnostic",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -399,6 +400,8 @@ def get_args():
             "rival_cost=original Ours-Final versus rival-conditional ground cost only; "
             "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only; "
             "adaptive_relaxation=scalar UOT versus token-wise evidence-adaptive KL relaxation."
+            " tier1_diagnostic=asymmetric UOT relaxation, threshold-init sensitivity, "
+            "and learned token-attention marginals on the accepted global residual w=0.1 baseline."
         ),
     )
     parser.add_argument(
@@ -1124,8 +1127,6 @@ def _ours_final_base_args(
     return [
         "--ours_ablation",
         str(ablation),
-        "--hrot_ecot_enable_egsm",
-        "false",
         "--hrot_ecot_m2_ablate_threshold_mass",
         str(ablate_threshold_mass),
         "--hrot_ecot_m2_cost_per_mass_score",
@@ -1148,8 +1149,6 @@ def _ours_final_partial_ot_args():
     return [
         "--ours_ablation",
         "full",
-        "--hrot_ecot_enable_egsm",
-        "false",
         "--hrot_ecot_m2_ablate_threshold_mass",
         "false",
         "--hrot_ecot_m2_cost_per_mass_score",
@@ -1173,7 +1172,7 @@ def build_ours_final_ablation_variants():
         {
             "tag": "ours_final_full",
             "checkpoint_tag": "ablation_full",
-            "label": "Ours-Final: local descriptors + UOT rho=0.8 + threshold-mass score, EGSM off",
+            "label": "Ours-Final: local descriptors + uniform marginals + UOT rho=0.8 + threshold-mass score",
             "extra_args": base,
         },
         {
@@ -1612,6 +1611,119 @@ def build_ours_final_global_residual_variants():
                 "checkpoint_tag": "global_res_w0p1_mass_off",
                 "label": "Ours-Final global residual weight=0.1 with threshold-mass reward removed",
                 "extra_args": _ours_final_base_args(ablate_threshold_mass="true") + global_residual_w0p1,
+            },
+        ]
+    )
+    return variants
+
+
+def build_tier1_diagnostic_variants():
+    """Tier-1 tau, threshold-init, and token-attention marginal diagnostics."""
+    base = _ours_final_base_args()
+    global_residual = [
+        "--enable_global_residual_score",
+        "--global_residual_mode",
+        "residual",
+        "--global_residual_weight",
+        "0.1",
+    ]
+    baseline = base + global_residual
+    variants = []
+
+    for tag, tau_q, tau_c in (
+        ("t1_tau_sym_0p5", 0.5, 0.5),
+        ("t1_tau_q_loose", 0.3, 0.5),
+        ("t1_tau_c_strict", 0.5, 0.8),
+        ("t1_tau_asym_best", 0.3, 0.8),
+        ("t1_tau_tight", 0.8, 0.8),
+        ("t1_tau_loose_both", 0.3, 0.3),
+    ):
+        variants.append(
+            {
+                "tag": tag,
+                "checkpoint_tag": tag,
+                "label": (
+                    "Ours-Final + global residual w=0.1, "
+                    f"tau_q={tau_q:g}, tau_c={tau_c:g}"
+                ),
+                "extra_args": baseline
+                + [
+                    "--hrot_tau_q",
+                    f"{tau_q:g}",
+                    "--hrot_tau_c",
+                    f"{tau_c:g}",
+                ],
+            }
+        )
+
+    for tag_suffix, threshold_init in (
+        ("0p25", 0.25),
+        ("0p50", 0.50),
+        ("1p00", 1.00),
+        ("1p50", 1.50),
+    ):
+        tag = f"t1_T_init_{tag_suffix}"
+        variants.append(
+            {
+                "tag": tag,
+                "checkpoint_tag": tag,
+                "label": (
+                    "Ours-Final + global residual w=0.1, "
+                    f"T_init={threshold_init:.2f}"
+                ),
+                "extra_args": baseline
+                + [
+                    "--hrot_transport_cost_threshold_init",
+                    f"{threshold_init:.2f}",
+                ],
+            }
+        )
+
+    variants.extend(
+        [
+            {
+                "tag": "t1_tam_default",
+                "checkpoint_tag": "t1_tam_default",
+                "label": "TAM floor=0.1 + global residual w=0.1",
+                "extra_args": baseline + ["--enable_token_attention_marginal"],
+            },
+            {
+                "tag": "t1_tam_floor0p0",
+                "checkpoint_tag": "t1_tam_floor0p0",
+                "label": "TAM pure attention + global residual w=0.1",
+                "extra_args": baseline
+                + [
+                    "--enable_token_attention_marginal",
+                    "--tam_uniform_floor",
+                    "0.0",
+                ],
+            },
+            {
+                "tag": "t1_tam_floor0p3",
+                "checkpoint_tag": "t1_tam_floor0p3",
+                "label": "TAM floor=0.3 + global residual w=0.1",
+                "extra_args": baseline
+                + [
+                    "--enable_token_attention_marginal",
+                    "--tam_uniform_floor",
+                    "0.3",
+                ],
+            },
+            {
+                "tag": "t1_tam_detach",
+                "checkpoint_tag": "t1_tam_detach",
+                "label": "TAM detached weights + global residual w=0.1",
+                "extra_args": baseline
+                + [
+                    "--enable_token_attention_marginal",
+                    "--tam_detach_weights",
+                ],
+            },
+            {
+                "tag": "t1_tam_no_gres",
+                "checkpoint_tag": "t1_tam_no_gres",
+                "label": "TAM floor=0.1 without global residual",
+                "extra_args": base + ["--enable_token_attention_marginal"],
             },
         ]
     )
@@ -3414,6 +3526,22 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_mass_consensus_a0p75": "ours_final_mass_consensus_a0p75",
         "mass_consensus_a0p5": "ours_final_mass_consensus_a0p5",
         "ours_final_mass_consensus_a0p5": "ours_final_mass_consensus_a0p5",
+        "t1_tau_sym_0p5": "t1_tau_sym_0p5",
+        "t1_t_init_default": "t1_tau_sym_0p5",
+        "t1_tau_q_loose": "t1_tau_q_loose",
+        "t1_tau_c_strict": "t1_tau_c_strict",
+        "t1_tau_asym_best": "t1_tau_asym_best",
+        "t1_tau_tight": "t1_tau_tight",
+        "t1_tau_loose_both": "t1_tau_loose_both",
+        "t1_t_init_0p25": "t1_T_init_0p25",
+        "t1_t_init_0p50": "t1_T_init_0p50",
+        "t1_t_init_1p00": "t1_T_init_1p00",
+        "t1_t_init_1p50": "t1_T_init_1p50",
+        "t1_tam_default": "t1_tam_default",
+        "t1_tam_floor0p0": "t1_tam_floor0p0",
+        "t1_tam_floor0p3": "t1_tam_floor0p3",
+        "t1_tam_detach": "t1_tam_detach",
+        "t1_tam_no_gres": "t1_tam_no_gres",
     }
 
     parsed = []
@@ -3941,6 +4069,7 @@ def main():
         rival_cost_variants = build_ours_final_rival_cost_variants()
         hubness_uot_variants = build_ours_final_hubness_uot_variants()
         adaptive_relaxation_variants = build_ours_final_adaptive_relaxation_variants()
+        tier1_diagnostic_variants = build_tier1_diagnostic_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -3984,6 +4113,10 @@ def main():
             adaptive_relaxation_variants,
             ours_final_variant_filter,
         )
+        tier1_diagnostic_variants = filter_ours_final_variants(
+            tier1_diagnostic_variants,
+            ours_final_variant_filter,
+        )
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -4014,6 +4147,8 @@ def main():
             ablation_variants = hubness_uot_variants
         elif suite_name == "adaptive_relaxation":
             ablation_variants = adaptive_relaxation_variants
+        elif suite_name == "tier1_diagnostic":
+            ablation_variants = tier1_diagnostic_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -4290,6 +4425,26 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in adaptive_relaxation_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "tier1_diagnostic":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get(
+                        "checkpoint_tag",
+                        variant["tag"],
+                    ),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in tier1_diagnostic_variants
                 for samples in samples_list
                 for shot in shots
             )

@@ -27,6 +27,7 @@ from net.modules.egsm_marginal import EpisodeGatedShrinkageMarginal
 from net.modules.cata import CATA
 from net.modules.hrot_transport_projector import HROTTransportProjector, build_hrot_transport_projector
 from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
+from net.modules.token_attention_marginal import TokenAttentionMarginal
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
     compute_partial_transported_mass,
@@ -554,6 +555,12 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_ccem_uniform_mix: float = 0.05,
         ecot_ccem_tau_q: float = 0.25,
         ecot_ccem_tau_s: float = 0.25,
+        enable_token_attention_marginal: bool = False,
+        tam_hidden_dim: int = 64,
+        tam_temperature_init: float = 1.0,
+        tam_uniform_floor: float = 0.1,
+        tam_detach_weights: bool = False,
+        tam_share_qk: bool = True,
         ecot_transport_mode: str | None = None,
         ecot_enable_noise_sink: bool = False,
         ecot_noise_sink_cost_init: float = 1.0,
@@ -758,6 +765,12 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_ccem_uniform_mix must satisfy 0 <= mix < 1")
         if float(ecot_ccem_tau_q) <= 0.0 or float(ecot_ccem_tau_s) <= 0.0:
             raise ValueError("ecot_ccem_tau_q and ecot_ccem_tau_s must be positive")
+        if int(tam_hidden_dim) <= 0:
+            raise ValueError("tam_hidden_dim must be positive")
+        if float(tam_temperature_init) <= 0.0:
+            raise ValueError("tam_temperature_init must be positive")
+        if not 0.0 <= float(tam_uniform_floor) <= 1.0:
+            raise ValueError("tam_uniform_floor must be in [0, 1]")
         ecot_transport_mode = _normalize_ecot_transport_mode(ecot_transport_mode)
         if bool(ecot_enable_noise_sink) and float(ecot_noise_sink_cost_init) <= 0.0:
             raise ValueError("ecot_noise_sink_cost_init must be positive")
@@ -822,6 +835,9 @@ class HROTFSL(BaseConv64FewShotModel):
         self.uses_ecot_ccdm_marginal = self.uses_ecot and bool(ecot_enable_ccdm_marginal)
         self.uses_ecot_egsm_marginal = self.uses_ecot and bool(ecot_enable_egsm)
         self.uses_ecot_ccem_marginal = self.uses_ecot and bool(ecot_enable_ccem_marginal)
+        self.uses_token_attention_marginal = self.uses_ecot and bool(
+            enable_token_attention_marginal
+        )
         self.uses_ecot_noise_sink = self.uses_ecot and bool(ecot_enable_noise_sink)
         if self.uses_ecot_crs_marginal and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CRS marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
@@ -833,6 +849,14 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("EGSM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
         if bool(ecot_enable_ccem_marginal) and variant not in {"J_ECOT", "J_ECOT_M2"}:
             raise ValueError("CCEM marginal is supported only on the J_ECOT/J_ECOT_M2 fixed-budget path")
+        if bool(enable_token_attention_marginal) and variant not in {
+            "J_ECOT",
+            "J_ECOT_M2",
+        }:
+            raise ValueError(
+                "TokenAttentionMarginal is supported only on the "
+                "J_ECOT/J_ECOT_M2 fixed-budget path"
+            )
         if self.uses_ecot_crs_marginal and self.uses_ecot_nncs_marginal:
             raise ValueError("CRS and NNCS support marginals are mutually exclusive")
         if self.uses_ecot_mea_marginal and (self.uses_ecot_crs_marginal or self.uses_ecot_nncs_marginal):
@@ -859,6 +883,20 @@ class HROTFSL(BaseConv64FewShotModel):
             or self.uses_ecot_egsm_marginal
         ):
             raise ValueError("CCEM marginal is mutually exclusive with MEA, CRS, NNCS, CCDM, and EGSM")
+        if self.uses_token_attention_marginal and any(
+            (
+                self.uses_ecot_mea_marginal,
+                self.uses_ecot_crs_marginal,
+                self.uses_ecot_nncs_marginal,
+                self.uses_ecot_ccdm_marginal,
+                self.uses_ecot_egsm_marginal,
+                self.uses_ecot_ccem_marginal,
+            )
+        ):
+            raise ValueError(
+                "TokenAttentionMarginal is mutually exclusive with MEA, CRS, "
+                "NNCS, CCDM, EGSM, and CCEM marginals"
+            )
         # Old J_HLM configuration knobs are accepted only for compatibility;
         # the learned hierarchical/token-mass path is no longer activated.
         self.uses_hlm_mass = False
@@ -1021,6 +1059,9 @@ class HROTFSL(BaseConv64FewShotModel):
                 "ecot_enable_ccdm_marginal": bool(ecot_enable_ccdm_marginal),
                 "ecot_enable_egsm": bool(ecot_enable_egsm),
                 "ecot_enable_ccem_marginal": bool(ecot_enable_ccem_marginal),
+                "enable_token_attention_marginal": bool(
+                    enable_token_attention_marginal
+                ),
             }
             active_conflicts = [name for name, active in elastic_conflicts.items() if active]
             if active_conflicts:
@@ -1052,6 +1093,9 @@ class HROTFSL(BaseConv64FewShotModel):
                 "ecot_enable_ccdm_marginal": bool(ecot_enable_ccdm_marginal),
                 "ecot_enable_egsm": bool(ecot_enable_egsm),
                 "ecot_enable_ccem_marginal": bool(ecot_enable_ccem_marginal),
+                "enable_token_attention_marginal": bool(
+                    enable_token_attention_marginal
+                ),
             }
             active_conflicts = [name for name, active in dustbin_conflicts.items() if active]
             if active_conflicts:
@@ -1157,6 +1201,14 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_ccem_uniform_mix = float(ecot_ccem_uniform_mix)
         self.ecot_ccem_tau_q = float(ecot_ccem_tau_q)
         self.ecot_ccem_tau_s = float(ecot_ccem_tau_s)
+        self.enable_token_attention_marginal = bool(
+            enable_token_attention_marginal
+        )
+        self.tam_hidden_dim = int(tam_hidden_dim)
+        self.tam_temperature_init = float(tam_temperature_init)
+        self.tam_uniform_floor = float(tam_uniform_floor)
+        self.tam_detach_weights = bool(tam_detach_weights)
+        self.tam_share_qk = bool(tam_share_qk)
         self.ecot_transport_mode = ecot_transport_mode
         self.ecot_noise_sink_cost_init = float(ecot_noise_sink_cost_init)
         self.ecot_noise_sink_score_penalty = float(ecot_noise_sink_score_penalty)
@@ -1341,6 +1393,30 @@ class HROTFSL(BaseConv64FewShotModel):
                 rho_reg_lambda=self.ecot_egsm_rho_reg_lambda,
             )
             if self.uses_ecot_egsm_marginal
+            else None
+        )
+        self.token_attention_marginal = (
+            TokenAttentionMarginal(
+                token_dim=self.token_dim,
+                hidden_dim=self.tam_hidden_dim,
+                temperature=self.tam_temperature_init,
+                uniform_floor=self.tam_uniform_floor,
+                detach_weights=self.tam_detach_weights,
+                eps=self.eps,
+            )
+            if self.uses_token_attention_marginal
+            else None
+        )
+        self.token_attention_support_marginal = (
+            TokenAttentionMarginal(
+                token_dim=self.token_dim,
+                hidden_dim=self.tam_hidden_dim,
+                temperature=self.tam_temperature_init,
+                uniform_floor=self.tam_uniform_floor,
+                detach_weights=self.tam_detach_weights,
+                eps=self.eps,
+            )
+            if self.uses_token_attention_marginal and not self.tam_share_qk
             else None
         )
         self.ccdm_entropy_shot_weight = (
@@ -3247,7 +3323,135 @@ class HROTFSL(BaseConv64FewShotModel):
         ccdm_payload: dict[str, torch.Tensor] = {}
         egsm_payload: dict[str, torch.Tensor] = {}
         ccem_payload: dict[str, torch.Tensor] = {}
-        if self.mea_marginal is not None:
+        tam_payload: dict[str, torch.Tensor] = {}
+        if self.token_attention_marginal is not None:
+            if query_weight is not None or support_weight is not None:
+                raise ValueError(
+                    "TokenAttentionMarginal cannot be combined with explicit "
+                    "query/support weights"
+                )
+            if support_tokens is None or query_tokens is None:
+                raise ValueError(
+                    "TokenAttentionMarginal requires support_tokens and query_tokens"
+                )
+            if tuple(query_tokens.shape[:2]) != (num_query, query_len):
+                raise ValueError(
+                    "query_tokens must have shape (NumQuery, QueryTokens, Dim), "
+                    f"got {tuple(query_tokens.shape)}"
+                )
+            if tuple(support_tokens.shape[:3]) != (
+                way_num,
+                shot_num,
+                support_len,
+            ):
+                raise ValueError(
+                    "support_tokens must have shape "
+                    "(Way, Shot, SupportTokens, Dim), "
+                    f"got {tuple(support_tokens.shape)}"
+                )
+            base_rho = self._ecot_base_rho_tensor(flat_cost)
+            query_rho = base_rho.expand(num_query)
+            support_rho = base_rho.expand(way_num, shot_num)
+            query_marginal, query_diag = self.token_attention_marginal(
+                query_tokens.to(device=flat_cost.device, dtype=flat_cost.dtype),
+                query_rho,
+            )
+            support_module = (
+                self.token_attention_marginal
+                if self.token_attention_support_marginal is None
+                else self.token_attention_support_marginal
+            )
+            support_marginal, support_diag = support_module(
+                support_tokens.to(
+                    device=flat_cost.device,
+                    dtype=flat_cost.dtype,
+                ),
+                support_rho,
+            )
+            query_prob_shared = query_marginal / query_marginal.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(self.eps)
+            support_prob_shared = support_marginal / support_marginal.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(self.eps)
+            query_prob = query_prob_shared.unsqueeze(1).expand(
+                -1,
+                num_pairs,
+                -1,
+            )
+            support_prob = support_prob_shared.reshape(
+                1,
+                num_pairs,
+                support_len,
+            ).expand(num_query, -1, -1)
+            a_bank = query_prob.unsqueeze(2) * rho_bank.view(
+                1,
+                1,
+                budget_count,
+                1,
+            )
+            b_bank = support_prob.unsqueeze(2) * rho_bank.view(
+                1,
+                1,
+                budget_count,
+                1,
+            )
+            transport_kwargs["a"] = a_bank.reshape(
+                num_query,
+                num_pairs * budget_count,
+                query_len,
+            )
+            transport_kwargs["b"] = b_bank.reshape(
+                num_query,
+                num_pairs * budget_count,
+                support_len,
+            )
+            tam_payload = {
+                "token_marginal_query_weight": query_prob_shared.detach(),
+                "token_marginal_support_weight": support_prob.reshape(
+                    num_query,
+                    way_num,
+                    shot_num,
+                    support_len,
+                ).detach(),
+                "token_marginal/enabled": flat_cost.new_tensor(1.0),
+                "token_marginal/share_qk": flat_cost.new_tensor(
+                    float(self.tam_share_qk)
+                ),
+                "token_marginal/detach_weights": flat_cost.new_tensor(
+                    float(self.tam_detach_weights)
+                ),
+            }
+            for key, value in query_diag.items():
+                suffix = key.removeprefix("token_marginal/")
+                tam_payload[f"token_marginal/query_{suffix}"] = value
+            for key, value in support_diag.items():
+                suffix = key.removeprefix("token_marginal/")
+                tam_payload[f"token_marginal/support_{suffix}"] = value
+            for suffix in (
+                "entropy",
+                "normalized_entropy",
+                "max_weight",
+                "min_weight",
+                "l1_from_uniform",
+                "logit_std",
+                "mass_error",
+                "scorer_norm",
+            ):
+                tam_payload[f"token_marginal/{suffix}"] = 0.5 * (
+                    tam_payload[f"token_marginal/query_{suffix}"]
+                    + tam_payload[f"token_marginal/support_{suffix}"]
+                )
+            tam_payload["token_marginal/temperature"] = 0.5 * (
+                tam_payload["token_marginal/query_temperature"]
+                + tam_payload["token_marginal/support_temperature"]
+            )
+            tam_payload["token_marginal/uniform_floor"] = flat_cost.new_tensor(
+                self.tam_uniform_floor
+            )
+        elif self.mea_marginal is not None:
             if query_weight is not None or support_weight is not None:
                 raise ValueError("MEA marginal cannot be combined with explicit query/support weights")
             query_marginal, support_marginal, mea_aux = self.mea_marginal(
@@ -4301,6 +4505,35 @@ class HROTFSL(BaseConv64FewShotModel):
         payload.update(ccdm_payload)
         payload.update(egsm_payload)
         payload.update(ccem_payload)
+        if tam_payload:
+            base_target_query = target_query_bank[..., base_idx, :]
+            base_target_support = target_support_bank[..., base_idx, :]
+            base_plan = plan_bank[..., base_idx, :, :]
+            query_l1 = (
+                base_plan.sum(dim=-1) - base_target_query
+            ).abs().sum(dim=-1)
+            support_l1 = (
+                base_plan.sum(dim=-2) - base_target_support
+            ).abs().sum(dim=-1)
+            retained_fraction = shot_mass_bank[..., base_idx] / base_rho.clamp_min(
+                self.eps
+            )
+            tam_payload.update(
+                {
+                    "token_marginal/query_l1_drift": query_l1.mean().detach(),
+                    "token_marginal/support_l1_drift": support_l1.mean().detach(),
+                    "token_marginal/l1_drift": (
+                        0.5 * (query_l1.mean() + support_l1.mean())
+                    ).detach(),
+                    "token_marginal/transported_mass_fraction": (
+                        retained_fraction.mean().detach()
+                    ),
+                    "token_marginal/transported_mass_fraction_min": (
+                        retained_fraction.amin().detach()
+                    ),
+                }
+            )
+            payload.update(tam_payload)
         payload.update(cp_payload)
         if noise_query_mass_bank is not None:
             payload.update(
@@ -6273,6 +6506,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_ccem_query_pi",
             "ecot_ccem_query_reliability",
             "ecot_ccem_support_pi",
+            "token_marginal_query_weight",
+            "token_marginal_support_weight",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -6336,6 +6571,14 @@ class HROTFSL(BaseConv64FewShotModel):
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
+        for key in sorted(
+            key
+            for key in batch_outputs[0]
+            if str(key).startswith("token_marginal/")
+        ):
+            values = [item[key] for item in batch_outputs if key in item]
+            if values and all(torch.is_tensor(value) for value in values):
+                stacked[key] = torch.stack(values).mean()
         for key in (
             "egsm_kappa",
             "egsm_rho_adaptive",

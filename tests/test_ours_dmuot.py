@@ -10,8 +10,9 @@ import torch.nn.functional as F
 from net.model_factory import build_model_from_args
 from net.modules.ours_final_failure_probe import OursFinalFailureProbe
 from net.modules.rival_conditional_ground_cost import RivalConditionalGroundCost
-from net.ours import OursM2
+from net.ours import OursFinalM2, OursM2
 from run_all_experiments import (
+    build_ours_final_ablation_variants,
     build_ours_final_failure_probe_variants,
     build_ours_final_objective_score_variants,
     build_ours_final_rival_cost_variants,
@@ -44,6 +45,52 @@ def _episode(shot=1):
     query = torch.randn(1, 2, 3, 64, 64)
     support = torch.randn(1, 2, shot, 3, 64, 64)
     return query, support
+
+
+def test_ours_final_factory_permanently_excludes_egsm():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+    )
+
+    model = build_model_from_args(
+        SimpleNamespace(model="ours_final", ours_ablation="full", **common)
+    )
+
+    assert isinstance(model, OursFinalM2)
+    assert not model.uses_ecot_egsm_marginal
+    assert model.egsm_marginal is None
+    assert not any(key.startswith("egsm_marginal.") for key in model.state_dict())
+
+    with pytest.raises(ValueError, match="EGSM has been removed from Ours-Final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours_final",
+                ours_ablation="full",
+                hrot_ecot_enable_egsm="true",
+                **common,
+            )
+        )
+
+    with pytest.raises(ValueError, match="ours_ablation='no_egsm' is unavailable"):
+        build_model_from_args(
+            SimpleNamespace(model="ours_final", ours_ablation="no_egsm", **common)
+        )
+
+
+def test_ours_final_runner_no_longer_passes_egsm_flags():
+    variants = build_ours_final_ablation_variants()
+
+    assert variants
+    assert all(
+        not any("egsm" in str(arg).lower() for arg in variant["extra_args"])
+        for variant in variants
+    )
 
 
 def test_token_g_none_matches_ours_final_baseline_logits():

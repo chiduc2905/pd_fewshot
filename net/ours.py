@@ -4,8 +4,8 @@ The full design is intentionally treated as one coherent model:
 J-ECOT-M2/SB-ECOT with UOT fixed to the paper-facing defaults.  Ours
 ``full`` enables Episode-Gated Shrinkage Marginals (EGSM) and turns off
 MEA/CCDM/CRS for the ECOT token priors.
-The ``ours_final`` registry entry reuses this class with factory-level defaults
-for the final paper setup: EGSM off and threshold-mass scoring on.
+The ``ours_final`` registry entry uses a locked subclass that excludes EGSM
+from the final paper setup and keeps threshold-mass scoring on.
 Contribution ablations swap only high-level design choices while leaving the
 full model path untouched.  The ``gap`` control uses global-average-pooled
 tokens for the cost while keeping the same EGSM + UOT stack as ``full``.
@@ -532,6 +532,9 @@ class OursM2(JECOTM2):
         pot_guide_s_max = float(kwargs.pop("pot_guide_s_max", 0.8))
         pot_guide_epsilon = float(kwargs.pop("pot_guide_epsilon", 0.05))
         pot_guide_max_iter = int(kwargs.pop("pot_guide_max_iter", 50))
+        enable_token_attention_marginal = _bool_config(
+            kwargs.get("enable_token_attention_marginal", False)
+        )
         if not 0.0 <= float(dm_alpha) <= 1.0:
             raise ValueError("dm_alpha must be in [0, 1]")
         if int(dm_debug_max_episodes) < 0:
@@ -650,6 +653,10 @@ class OursM2(JECOTM2):
             kwargs["ecot_enable_egsm"] = False
             kwargs["ecot_m2_ablate_threshold_mass"] = False
             kwargs["ecot_m2_cost_per_mass_score"] = False
+        if enable_token_attention_marginal:
+            kwargs["ecot_enable_egsm"] = False
+            kwargs["ecot_m2_ablate_threshold_mass"] = False
+            kwargs["ecot_m2_cost_per_mass_score"] = False
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
         kwargs["ecot_m2_score_mode"] = self.ours_final_score_mode
         kwargs["ecot_m2_elastic_sigma"] = self.elastic_ot_sigma
@@ -730,6 +737,58 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_reciprocal_verified_uot cannot be combined with enable_verified_uot_score")
             if self.ours_ablation == "gap":
                 raise ValueError("enable_reciprocal_verified_uot is not supported with ours_ablation='gap'")
+        if enable_token_attention_marginal:
+            if self.ours_ablation != "full":
+                raise ValueError(
+                    "enable_token_attention_marginal requires ours_ablation='full'"
+                )
+            if self.ours_final_score_mode != "threshold_mass":
+                raise ValueError(
+                    "enable_token_attention_marginal requires "
+                    "ours_final_score_mode='threshold_mass'"
+                )
+            conflicts = {
+                "ours_final_marginal_mode": self.ours_final_marginal_mode
+                != "uniform",
+                "marginal_kind": self.marginal_kind != "uniform",
+                "token_g_kind": self.token_g_kind != "none",
+                "enable_evidence_marginals": _bool_config(
+                    enable_evidence_marginals
+                ),
+                "enable_evidence_adaptive_relaxation_uot": (
+                    self.enable_evidence_adaptive_relaxation_uot
+                ),
+                "enable_rival_conditional_cost": self.enable_rival_conditional_cost,
+                "enable_rival_aware_evidence_uot": enable_rival_aware_evidence_uot,
+                "enable_hubness_calibrated_uot": enable_hubness_calibrated_uot,
+                "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
+                "enable_residual_aligned_uot": enable_residual_aligned_uot,
+                "enable_verified_uot_score": enable_verified_uot_score,
+                "enable_reciprocal_verified_uot": enable_reciprocal_verified_uot,
+                "enable_discriminative_uot": enable_discriminative_uot,
+                "enable_region_structural_uot": enable_region_structural_uot,
+                "enable_adaptive_region_uot": enable_adaptive_region_uot,
+                "enable_pulse_region_uot": enable_pulse_region_uot,
+                "enable_multiscale_ot": enable_multiscale_ot,
+                "enable_mspta": enable_mspta,
+                "enable_context_enrichment": enable_context_enrichment,
+                "enable_structural_augmentation": enable_structural_augmentation,
+                "enable_label_ot": enable_label_ot,
+                "enable_pot_guide": enable_pot_guide,
+                "use_differential_mode": self.use_differential_mode,
+                "pre_transport_shot_pool": _bool_config(
+                    kwargs.get("pre_transport_shot_pool", False)
+                ),
+            }
+            active_conflicts = [
+                name for name, active in conflicts.items() if active
+            ]
+            if active_conflicts:
+                raise ValueError(
+                    "enable_token_attention_marginal isolates learned token "
+                    "marginals and cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
         if self.enable_evidence_adaptive_relaxation_uot:
             if self.ours_ablation != "full":
                 raise ValueError(
@@ -4921,4 +4980,48 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values).mean()
         return stacked
 
-__all__ = ["OursM2", "apply_ours_design_defaults", "OURS_ABLATIONS", "normalize_ours_ablation"]
+
+class OursFinalM2(OursM2):
+    """Ours-Final entrypoint with EGSM removed from its architecture contract."""
+
+    _REMOVED_EGSM_KWARGS = frozenset(
+        {
+            "ecot_egsm_hidden_dim",
+            "ecot_egsm_candidate_tau_q",
+            "ecot_egsm_candidate_tau_b",
+            "ecot_egsm_kappa_min",
+            "ecot_egsm_kappa_max",
+            "ecot_egsm_rho_delta_max",
+            "ecot_egsm_rho_grad_clip",
+            "ecot_egsm_rho_reg_lambda",
+        }
+    )
+
+    def __init__(self, *args, **kwargs) -> None:
+        if normalize_ours_ablation(kwargs.get("ours_ablation", "full")) == "no_egsm":
+            raise ValueError(
+                "ours_ablation='no_egsm' is unavailable for Ours-Final because "
+                "its token marginals are permanently uniform"
+            )
+        if _bool_config(kwargs.get("ecot_enable_egsm", False)):
+            raise ValueError("EGSM has been removed from Ours-Final")
+        if _bool_config(kwargs.get("ecot_egsm_adaptive_rho", False)):
+            raise ValueError("EGSM adaptive rho has been removed from Ours-Final")
+        removed = sorted(self._REMOVED_EGSM_KWARGS.intersection(kwargs))
+        if removed:
+            raise ValueError(
+                "EGSM configuration has been removed from Ours-Final: "
+                + ", ".join(removed)
+            )
+        kwargs["ecot_enable_egsm"] = False
+        kwargs["ecot_egsm_adaptive_rho"] = False
+        super().__init__(*args, **kwargs)
+
+
+__all__ = [
+    "OursM2",
+    "OursFinalM2",
+    "apply_ours_design_defaults",
+    "OURS_ABLATIONS",
+    "normalize_ours_ablation",
+]

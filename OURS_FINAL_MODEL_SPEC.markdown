@@ -56,7 +56,7 @@ The original Ours-Final path has the following fixed architectural contract:
 | `hrot_ecot_m2_ablate_threshold_mass` | `false` | Keep the `T * mass` term. |
 | `hrot_ecot_m2_cost_per_mass_score` | `false` | Use threshold-mass score, not cost-per-mass. |
 | `hrot_ecot_m2_mass_score_mode` | `standard` | Score each support shot with its own transported mass. |
-| `hrot_ecot_enable_egsm` | `false` | Uniform fixed-budget token marginals. |
+| token marginals | uniform | Fixed by the architecture; EGSM is not available on `ours_final`. |
 | `hrot_ecot_enable_tau_shot` | `true` | Episode-calibrated support-shot pooling. |
 | `hrot_ecot_tau_shot_min/max` | `0.5 / 2.0` | Bounds for shot-pooling temperature. |
 | `hrot_score_scale` | `16.0` | Multiplier applied to shot evidence. |
@@ -66,6 +66,11 @@ The original Ours-Final path has the following fixed architectural contract:
 | `hrot_sinkhorn_iterations` | `60` | Sinkhorn iteration cap. |
 | `hrot_ot_backend` | `native` | Native log-domain OT solver. |
 | `hrot_ground_cost` | `auto` | Euclidean cost over normalized projected tokens. |
+
+Passing `--hrot_ecot_enable_egsm true` or enabling EGSM adaptive rho with an
+Ours-Final model is rejected. EGSM remains available only to the separate
+`ours` and `ours_cpm` model families. The redundant
+`--ours_ablation no_egsm` selector is also rejected for Ours-Final.
 
 The learned evidence threshold is a positive scalar:
 

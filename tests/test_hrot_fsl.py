@@ -13,6 +13,7 @@ from net.ec_mrot import ECMROT
 from net.hrot_fsl import HROTFSL, _compute_cross_shot_support_marginals, compute_fisher_weights, compute_mdr_loss
 from net.hyperbolic.poincare_ops import frechet_mean_poincare, get_ball, hyperbolic_distance_matrix, safe_project_to_ball
 from net.model_factory import build_model_from_args
+from net.ours import OursFinalM2
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass
 from net.modules.mutual_evidence_attention import MutualEvidenceAttentionMarginal
@@ -350,7 +351,7 @@ def test_ours_model_factory_exposes_full_design_and_contribution_ablation_contro
     assert cpm_like.ecot_m2_cost_per_mass_detach_mass
 
 
-def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
+def test_ours_final_model_factory_excludes_egsm_and_keeps_mass_on():
     base_args = dict(
         device="cpu",
         image_size=64,
@@ -362,6 +363,7 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     )
 
     full = build_model_from_args(SimpleNamespace(model="ours_final", ours_ablation="full", **base_args))
+    assert isinstance(full, OursFinalM2)
     assert full.variant == "J_ECOT_M2"
     assert full.ours_ablation == "full"
     assert not full.pre_transport_shot_pool
@@ -395,18 +397,25 @@ def test_ours_final_model_factory_defaults_to_mass_on_and_egsm_off():
     assert mass_off.ecot_m2_ablate_threshold_mass
     assert not mass_off.uses_ecot_egsm_marginal
 
-    egsm_on = build_model_from_args(
-        SimpleNamespace(
-            model="ours_final",
-            ours_ablation="full",
-            hrot_ecot_enable_egsm="true",
-            **base_args,
+    with pytest.raises(ValueError, match="EGSM has been removed from Ours-Final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours_final",
+                ours_ablation="full",
+                hrot_ecot_enable_egsm="true",
+                **base_args,
+            )
         )
-    )
-    assert not egsm_on.ecot_m2_ablate_threshold_mass
-    assert egsm_on.uses_ecot_egsm_marginal
-    assert egsm_on.egsm_marginal is not None
-    assert egsm_on.egsm_marginal.kappa_max == 0.35
+
+    with pytest.raises(ValueError, match="EGSM adaptive rho has been removed"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours_final",
+                ours_ablation="full",
+                hrot_ecot_egsm_adaptive_rho="true",
+                **base_args,
+            )
+        )
 
     class_pooled = build_model_from_args(
         SimpleNamespace(

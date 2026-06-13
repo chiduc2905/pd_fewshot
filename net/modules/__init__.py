@@ -1,6 +1,7 @@
 """Helper modules for pulse_fewshot consensus-slot models."""
 
 from .crs_marginal import CrossReferencedSelectiveMarginal, SimpleBidirectionalScan
+from .token_attention_marginal import TokenAttentionMarginal
 from .cata import CATA
 from .hierarchical_consensus_slot_mamba import AttentiveTokenPool, IntraImageConsensusMambaEncoder
 from .hierarchical_reliability_consensus import (
