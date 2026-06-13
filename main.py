@@ -577,6 +577,20 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_dustbin_contrastive_score",
+        frozenset(
+            {
+                "enable_dustbin_contrastive_score",
+                "dcr_beta",
+                "dcr_tau",
+                "dcr_alpha",
+                "dcr_margin",
+                "dcr_min_gate",
+                "dcr_detach_gate",
+            }
+        ),
+    ),
+    (
         "enable_ours_final_failure_probe",
         frozenset(
             {
@@ -2653,6 +2667,30 @@ def get_args():
     )
     parser.add_argument("--elastic_ot_sigma", type=float, default=1.0)
     parser.add_argument("--dustbin_score_init", type=float, default=0.0)
+    parser.add_argument(
+        "--enable_dustbin_contrastive_score",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: keep the original threshold-mass UOT plan, but "
+            "subtract non-specific positive T-C evidence using a dustbin-style "
+            "utility gate and class-rival contrast."
+        ),
+    )
+    parser.add_argument("--dcr_beta", type=float, default=0.50)
+    parser.add_argument("--dcr_tau", type=float, default=0.25)
+    parser.add_argument("--dcr_alpha", type=float, default=0.0)
+    parser.add_argument("--dcr_margin", type=float, default=0.0)
+    parser.add_argument("--dcr_min_gate", type=float, default=0.05)
+    parser.add_argument(
+        "--dcr_detach_gate",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Detach the DCR gate so gradients follow the original UOT evidence terms.",
+    )
     parser.add_argument(
         "--enable_elastic_ot_probe",
         nargs="?",
@@ -5105,6 +5143,13 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "elastic_ot_sigma",
             "enable_elastic_ot_probe",
             "dustbin_score_init",
+            "enable_dustbin_contrastive_score",
+            "dcr_beta",
+            "dcr_tau",
+            "dcr_alpha",
+            "dcr_margin",
+            "dcr_min_gate",
+            "dcr_detach_gate",
             "enable_ours_final_failure_probe",
             "ours_probe_common_margin",
             "enable_rival_conditional_cost",
@@ -5522,6 +5567,9 @@ _DUSTBIN_OT_DEBUG_PREFIXES = (
     "dustbin_query_dustbin",
     "dustbin_support_dustbin",
 )
+_DCR_DEBUG_PREFIXES = (
+    "dcr",
+)
 
 
 def is_uot_energy_debug_metric(key: str) -> bool:
@@ -5567,6 +5615,20 @@ def dustbin_ot_debug_enabled(args) -> bool:
 
 def is_dustbin_ot_debug_metric(key: str) -> bool:
     return str(key).startswith(_DUSTBIN_OT_DEBUG_PREFIXES)
+
+
+def dcr_debug_enabled(args) -> bool:
+    return (
+        str(getattr(args, "model", "")).strip().lower() == "ours_final"
+        and _bool_flag(
+            getattr(args, "enable_dustbin_contrastive_score", "false"),
+            default=False,
+        )
+    )
+
+
+def is_dcr_debug_metric(key: str) -> bool:
+    return str(key).startswith(_DCR_DEBUG_PREFIXES)
 
 
 def write_elastic_ot_debug_report(
@@ -5771,6 +5833,127 @@ def write_dustbin_ot_debug_report(
         handle.write("Acceptance signal: true class should have higher accepted real mass/evidence\n")
         handle.write("-" * 64 + "\n")
         handle.write(f"Active Dustbin OT Accuracy: {float(test_diag.get('pred_acc', accuracy)):.6f}\n")
+        handle.write(f"Verdict: {verdict}\n")
+        handle.write(f"Reason: {verdict_reason}\n")
+        handle.write("-" * 64 + "\n")
+        for key in debug_keys:
+            value = test_diag[key]
+            if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+                handle.write(f"{key}: {float(value):.6f}\n")
+    return path
+
+
+def write_dcr_debug_report(
+    args,
+    test_diag,
+    *,
+    accuracy,
+    current_test_name=None,
+):
+    if not dcr_debug_enabled(args):
+        return None
+
+    samples_stem = (
+        f"{args.training_samples}samples"
+        if getattr(args, "training_samples", None)
+        else "allsamples"
+    )
+    experiment_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    tag_suffix = f"_{sanitize_result_tag(experiment_tag)}" if experiment_tag else ""
+    protocol_suffix = get_test_protocol_suffix(args)
+    path = os.path.join(
+        args.path_results,
+        (
+            f"debug_dcr_{args.dataset_name}_{args.model}_{samples_stem}_"
+            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt"
+        ),
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    removed_gap = test_diag.get("dcr_removed_positive_distance_gap")
+    logit_delta = test_diag.get("dcr/shot_logit_delta_abs")
+    accuracy_delta = test_diag.get("dcr_accuracy_delta")
+    fix_rate = test_diag.get("dcr_fix_rate")
+    harm_rate = test_diag.get("dcr_harm_rate")
+    if logit_delta is None:
+        verdict = "INCOMPLETE"
+        verdict_reason = "DCR score-delta diagnostics are missing."
+    elif float(logit_delta) <= 1e-8:
+        verdict = "INACTIVE"
+        verdict_reason = "DCR produced negligible score changes."
+    elif (
+        removed_gap is not None
+        and float(removed_gap) > 0.0
+        and accuracy_delta is not None
+        and float(accuracy_delta) > 0.0
+        and fix_rate is not None
+        and harm_rate is not None
+        and float(fix_rate) > float(harm_rate)
+    ):
+        verdict = "SUPPORTED"
+        verdict_reason = (
+            "DCR removes more non-specific evidence from best negatives and "
+            "fixes more predictions than it harms."
+        )
+    elif removed_gap is not None and float(removed_gap) > 0.0:
+        verdict = "SUPPORTED_DIAGNOSTIC"
+        verdict_reason = (
+            "Best negative classes lose more non-specific positive evidence, "
+            "but prediction benefit is not yet positive."
+        )
+    elif removed_gap is None:
+        verdict = "INCOMPLETE"
+        verdict_reason = "Class-wise removed-positive gap diagnostic is missing."
+    else:
+        verdict = "INCONCLUSIVE"
+        verdict_reason = "DCR is active, but removed-positive evidence is not higher for best negatives."
+
+    debug_keys = [
+        key
+        for key in sorted(test_diag)
+        if is_dcr_debug_metric(key)
+        or key
+        in {
+            "pred_acc",
+            "logit_margin",
+            "wrong_logit_margin",
+            "correct_logit_margin",
+            "transport_mass_true",
+            "transport_mass_best_negative",
+            "transport_mass_gap",
+        }
+    ]
+    with open(path, "w") as handle:
+        handle.write("DUSTBIN-CONTRASTIVE RESIDUAL DEBUG REPORT\n")
+        handle.write("=" * 64 + "\n")
+        handle.write(f"Model: {args.model}\n")
+        handle.write(f"Dataset: {args.dataset_name}\n")
+        handle.write(f"Training Samples: {getattr(args, 'training_samples', None) or 'All'}\n")
+        handle.write(f"Shot: {args.shot_num}\n")
+        handle.write(f"Training Seed: {getattr(args, 'seed', 'unknown')}\n")
+        handle.write(f"Final Test Seed: {getattr(args, 'final_test_seed', 'unknown')}\n")
+        handle.write(
+            "Test Protocol: "
+            f"{getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        handle.write(f"Experiment Tag: {experiment_tag or 'none'}\n")
+        handle.write("Objective: keep UOT plan; subtract non-specific positive T-C evidence\n")
+        handle.write("Acceptance signal: best negatives should lose more positive evidence than true classes\n")
+        handle.write("-" * 64 + "\n")
+        handle.write(f"Active DCR Accuracy: {float(test_diag.get('pred_acc', accuracy)):.6f}\n")
+        if test_diag.get("dcr_unadjusted_pred_acc") is not None:
+            handle.write(
+                "Unadjusted UOT Accuracy: "
+                f"{float(test_diag['dcr_unadjusted_pred_acc']):.6f}\n"
+            )
+        if accuracy_delta is not None:
+            handle.write(f"Accuracy Delta: {float(accuracy_delta):+.6f}\n")
+        if fix_rate is not None:
+            handle.write(f"Fix Rate: {float(fix_rate):.6f}\n")
+        if harm_rate is not None:
+            handle.write(f"Harm Rate: {float(harm_rate):.6f}\n")
         handle.write(f"Verdict: {verdict}\n")
         handle.write(f"Reason: {verdict_reason}\n")
         handle.write("-" * 64 + "\n")
@@ -6445,6 +6628,79 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     ):
         metrics.update(summarize_class_score_tensor(dustbin_score, targets, prefix="dustbin_score"))
 
+    dcr_logits = scores.get("dcr_logits")
+    if torch.is_tensor(dcr_logits) and dcr_logits.dim() == 2 and dcr_logits.shape[0] == targets.shape[0]:
+        metrics.update(summarize_class_score_tensor(dcr_logits, targets, prefix="dcr"))
+
+    dcr_unadjusted_logits = scores.get("dcr_unadjusted_logits")
+    if (
+        torch.is_tensor(dcr_unadjusted_logits)
+        and dcr_unadjusted_logits.dim() == 2
+        and dcr_unadjusted_logits.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_score_tensor(
+                dcr_unadjusted_logits,
+                targets,
+                prefix="dcr_unadjusted",
+            )
+        )
+        active_pred = logits.argmax(dim=1)
+        unadjusted_pred = dcr_unadjusted_logits.argmax(dim=1)
+        active_correct = active_pred.eq(targets)
+        unadjusted_correct = unadjusted_pred.eq(targets)
+        metrics["dcr_prediction_agreement"] = _scalar_metric(
+            active_pred.eq(unadjusted_pred).float()
+        )
+        metrics["dcr_prediction_change_rate"] = _scalar_metric(
+            active_pred.ne(unadjusted_pred).float()
+        )
+        metrics["dcr_fix_rate"] = _scalar_metric(
+            ((~unadjusted_correct) & active_correct).float()
+        )
+        metrics["dcr_harm_rate"] = _scalar_metric(
+            (unadjusted_correct & (~active_correct)).float()
+        )
+        metrics["dcr_accuracy_delta"] = _scalar_metric(
+            active_correct.float() - unadjusted_correct.float()
+        )
+
+    dcr_removed_positive = scores.get("dcr_removed_positive")
+    if (
+        torch.is_tensor(dcr_removed_positive)
+        and dcr_removed_positive.dim() == 2
+        and dcr_removed_positive.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_distance_tensor(
+                dcr_removed_positive,
+                targets,
+                prefix="dcr_removed_positive",
+            )
+        )
+
+    dcr_removed_positive_share = scores.get("dcr_removed_positive_share")
+    if (
+        torch.is_tensor(dcr_removed_positive_share)
+        and dcr_removed_positive_share.dim() == 2
+        and dcr_removed_positive_share.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_distance_tensor(
+                dcr_removed_positive_share,
+                targets,
+                prefix="dcr_removed_positive_share",
+            )
+        )
+
+    dcr_retained_positive = scores.get("dcr_retained_positive")
+    if (
+        torch.is_tensor(dcr_retained_positive)
+        and dcr_retained_positive.dim() == 2
+        and dcr_retained_positive.shape[0] == targets.shape[0]
+    ):
+        metrics.update(summarize_budget_tensor(dcr_retained_positive, targets, prefix="dcr_retained_positive"))
+
     weighted_unmatched_mass = scores.get("weighted_unmatched_mass")
     if (
         torch.is_tensor(weighted_unmatched_mass)
@@ -6991,6 +7247,24 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "dustbin_ot/column_residual",
         "dustbin_ot/mass_residual",
         "dustbin_ot/score_identity_error",
+        "dcr/enabled",
+        "dcr/beta",
+        "dcr/tau",
+        "dcr/alpha",
+        "dcr/margin",
+        "dcr/min_gate",
+        "dcr/detach_gate",
+        "dcr/gate_mean",
+        "dcr/dustbin_gate_mean",
+        "dcr/specificity_mean",
+        "dcr/positive_mass_fraction",
+        "dcr/removed_positive_share",
+        "dcr/removed_positive_mean",
+        "dcr/retained_positive_mean",
+        "dcr/raw_positive_mean",
+        "dcr/shot_score_delta",
+        "dcr/shot_logit_delta",
+        "dcr/shot_logit_delta_abs",
         "rc_cost/enabled",
         "rc_cost/penalty_weight",
         "rc_cost/temperature",
@@ -7542,6 +7816,31 @@ def format_diagnostic_summary(metrics):
         "dustbin_support_dustbin_fraction_true",
         "dustbin_support_dustbin_fraction_best_negative",
         "dustbin_support_dustbin_fraction_gap",
+        "dcr_true_score",
+        "dcr_best_negative_score",
+        "dcr_score_gap",
+        "dcr_unadjusted_true_score",
+        "dcr_unadjusted_best_negative_score",
+        "dcr_unadjusted_score_gap",
+        "dcr_unadjusted_pred_acc",
+        "dcr_prediction_agreement",
+        "dcr_prediction_change_rate",
+        "dcr_fix_rate",
+        "dcr_harm_rate",
+        "dcr_accuracy_delta",
+        "dcr_removed_positive_true_distance",
+        "dcr_removed_positive_best_negative_distance",
+        "dcr_removed_positive_distance_gap",
+        "dcr_removed_positive_share_true_distance",
+        "dcr_removed_positive_share_best_negative_distance",
+        "dcr_removed_positive_share_distance_gap",
+        "dcr_retained_positive_true",
+        "dcr_retained_positive_best_negative",
+        "dcr_retained_positive_gap",
+        "dcr/gate_mean",
+        "dcr/specificity_mean",
+        "dcr/removed_positive_share",
+        "dcr/shot_logit_delta_abs",
         "m2_mean_true_mass",
         "m2_mean_best_wrong_mass",
         "m2_mean_true_cost",
@@ -8311,6 +8610,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         or uot_energy_debug_enabled(args)
         or elastic_ot_debug_enabled(args)
         or dustbin_ot_debug_enabled(args)
+        or dcr_debug_enabled(args)
     )
     ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
@@ -9005,6 +9305,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     )
     if dustbin_ot_debug_path is not None:
         print(f"Dustbin OT debug report saved to {dustbin_ot_debug_path}")
+    dcr_debug_path = write_dcr_debug_report(
+        args,
+        test_diag,
+        accuracy=acc_micro,
+        current_test_name=current_test_name,
+    )
+    if dcr_debug_path is not None:
+        print(f"DCR debug report saved to {dcr_debug_path}")
 
     txt_path = os.path.join(
         args.path_results,
@@ -9057,6 +9365,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 if elastic_ot_debug_enabled(args) and is_elastic_ot_debug_metric(key):
                     continue
                 if dustbin_ot_debug_enabled(args) and is_dustbin_ot_debug_metric(key):
+                    continue
+                if dcr_debug_enabled(args) and is_dcr_debug_metric(key):
                     continue
                 value = test_diag[key]
                 if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):

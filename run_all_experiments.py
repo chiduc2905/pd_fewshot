@@ -394,7 +394,7 @@ def get_args():
             "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls; "
             "score_marginal=original uniform baseline plus Ours-Final score-aligned marginal sweep; "
             "failure_probe=uniform diagnostic baseline versus fixed/adaptive utility-contrastive marginals; "
-            "objective_score=original UOT, KL-UOT energy, adaptive-mass Elastic OT, and Dustbin OT; "
+            "objective_score=original UOT, KL-UOT energy, adaptive-mass Elastic OT, Dustbin OT, and DCR; "
             "rival_cost=original Ours-Final versus rival-conditional ground cost only; "
             "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only."
         ),
@@ -419,7 +419,7 @@ def get_args():
             "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
             "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
             "probe_uniform, probe_fixed, probe_adaptive, score_threshold, score_uot_energy, "
-            "score_elastic_ot, score_dustbin_ot, "
+            "score_elastic_ot, score_dustbin_ot, score_dcr, "
             "rc_cost_baseline, rc_cost, rc_edge, "
             "hcuot, hcuot_cost_only, hcuot_marginal_only. "
             "Default all keeps the suite's normal variants."
@@ -1808,6 +1808,23 @@ def build_ours_final_objective_score_variants():
                 "with objective-consistent T*M-C score"
             ),
             "extra_args": dustbin_base,
+        },
+        {
+            "tag": "ours_final_score_dcr",
+            "checkpoint_tag": "score_dcr",
+            "label": (
+                "Ours-Final DCR: original UOT plan plus dustbin-contrastive "
+                "residual suppression of non-specific positive evidence"
+            ),
+            "extra_args": threshold_base
+            + [
+                "--enable_dustbin_contrastive_score",
+                "true",
+                "--dcr_beta",
+                "0.50",
+                "--dcr_tau",
+                "0.25",
+            ],
         },
     ]
 
@@ -3283,6 +3300,11 @@ def parse_ours_final_variant_filter(variants_str):
         "dustbin_ot": "ours_final_score_dustbin_ot",
         "dot": "ours_final_score_dustbin_ot",
         "ours_final_score_dustbin_ot": "ours_final_score_dustbin_ot",
+        "score_dcr": "ours_final_score_dcr",
+        "dcr": "ours_final_score_dcr",
+        "dustbin_contrastive": "ours_final_score_dcr",
+        "dustbin_contrastive_residual": "ours_final_score_dcr",
+        "ours_final_score_dcr": "ours_final_score_dcr",
         "rc_cost_baseline": "ours_final_rc_cost_baseline",
         "rival_cost_baseline": "ours_final_rc_cost_baseline",
         "ours_final_rc_cost_baseline": "ours_final_rc_cost_baseline",
@@ -3340,7 +3362,7 @@ def parse_ours_final_variant_filter(variants_str):
                 "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
                 "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
                 "probe_adaptive, score_threshold, score_uot_energy, score_elastic_ot, "
-                "score_dustbin_ot, "
+                "score_dustbin_ot, score_dcr, "
                 "rc_cost_baseline, rc_cost, rc_edge, hcuot, hcuot_cost_only, "
                 "hcuot_marginal_only, or exact tags."
             )

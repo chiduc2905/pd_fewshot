@@ -15,6 +15,8 @@ from run_all_experiments import (
     build_ours_final_failure_probe_variants,
     build_ours_final_objective_score_variants,
     build_ours_final_rival_cost_variants,
+    filter_ours_final_variants,
+    parse_ours_final_variant_filter,
 )
 
 
@@ -1191,20 +1193,37 @@ def test_objective_score_runner_isolates_scoring_change():
         "ours_final_score_threshold_mass",
         "ours_final_score_uot_energy",
         "ours_final_score_elastic_ot",
+        "ours_final_score_dustbin_ot",
+        "ours_final_score_dcr",
     ]
     assert variants[0]["extra_args"][-2:] == ["--ours_probe_common_margin", "0.10"]
     assert variants[0]["extra_args"].count("--ours_final_score_mode") == 1
     assert variants[1]["extra_args"].count("--ours_final_score_mode") == 1
     assert variants[2]["extra_args"].count("--ours_final_score_mode") == 1
+    assert variants[3]["extra_args"].count("--ours_final_score_mode") == 1
+    assert variants[4]["extra_args"].count("--ours_final_score_mode") == 1
     assert variants[1]["extra_args"][
         variants[1]["extra_args"].index("--ours_final_score_mode") + 1
     ] == "uot_energy"
     assert variants[2]["extra_args"][
         variants[2]["extra_args"].index("--ours_final_score_mode") + 1
     ] == "elastic_ot"
+    assert variants[3]["extra_args"][
+        variants[3]["extra_args"].index("--ours_final_score_mode") + 1
+    ] == "dustbin_ot"
+    assert variants[4]["extra_args"][
+        variants[4]["extra_args"].index("--ours_final_score_mode") + 1
+    ] == "threshold_mass"
     assert "--enable_elastic_ot_probe" not in variants[2]["extra_args"]
+    assert "--enable_dustbin_contrastive_score" in variants[4]["extra_args"]
     assert "--ours_final_marginal_mode" not in variants[1]["extra_args"]
     assert "--enable_rival_conditional_cost" not in variants[1]["extra_args"]
+
+    selected = filter_ours_final_variants(
+        variants,
+        parse_ours_final_variant_filter("score_dcr"),
+    )
+    assert [variant["tag"] for variant in selected] == ["ours_final_score_dcr"]
 
 
 def test_elastic_ot_integrates_adaptive_mass_objective_and_uniform_probe():
@@ -1235,6 +1254,86 @@ def test_elastic_ot_rejects_competing_marginal_reweighting():
         _tiny_ours_final(
             ours_final_score_mode="elastic_ot",
             ours_final_marginal_mode="score_aligned",
+        )
+
+
+def test_dcr_integrates_as_residual_score_without_replacing_plan():
+    torch.manual_seed(5224)
+    baseline = _tiny_ours_final()
+    model = _tiny_ours_final(
+        enable_dustbin_contrastive_score=True,
+        dcr_beta=0.5,
+        dcr_tau=0.25,
+    )
+    model.load_state_dict(baseline.state_dict(), strict=False)
+    baseline.eval()
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        baseline_outputs = baseline(query, support, return_aux=True)
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == baseline_outputs["logits"].shape
+    assert outputs["transport_plan"].shape == baseline_outputs["transport_plan"].shape
+    assert torch.allclose(
+        outputs["transport_plan"],
+        baseline_outputs["transport_plan"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert outputs["dcr/enabled"].item() == pytest.approx(1.0)
+    assert torch.isfinite(outputs["dcr/shot_logit_delta_abs"])
+    assert "dcr_removed_positive" in outputs
+
+
+def test_dcr_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_dustbin_contrastive_score="true",
+        dcr_beta=0.45,
+        dcr_tau=0.20,
+        dcr_alpha=0.05,
+        dcr_margin=0.01,
+        dcr_min_gate=0.10,
+        dcr_detach_gate="true",
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert ours_final.enable_dustbin_contrastive_score
+    assert hasattr(ours_final, "dustbin_contrastive_residual_score")
+    assert ours_final.dcr_beta == pytest.approx(0.45)
+    assert ours_final.dcr_tau == pytest.approx(0.20)
+    assert ours_final.dcr_alpha == pytest.approx(0.05)
+    assert ours_final.dcr_margin == pytest.approx(0.01)
+    assert ours_final.dcr_min_gate == pytest.approx(0.10)
+
+    with pytest.raises(ValueError, match="--enable_dustbin_contrastive_score is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
+def test_dcr_rejects_non_threshold_mass_score_modes():
+    with pytest.raises(ValueError, match="residual correction"):
+        _tiny_ours_final(
+            ours_final_score_mode="dustbin_ot",
+            enable_dustbin_contrastive_score=True,
         )
 
 

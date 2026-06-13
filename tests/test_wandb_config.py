@@ -3,12 +3,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import torch
+
 from main import (
     accumulate_diagnostics,
     build_wandb_init_config,
+    dcr_debug_enabled,
     is_elastic_ot_debug_metric,
     finalize_diagnostics,
+    is_dcr_debug_metric,
     is_uot_energy_debug_metric,
+    summarize_score_diagnostics,
+    write_dcr_debug_report,
     write_elastic_ot_debug_report,
     write_uot_energy_debug_report,
 )
@@ -29,8 +35,8 @@ def test_diagnostic_metrics_use_per_key_denominators():
     assert result["probe"] == 1.0
 
 
-def test_uot_energy_debug_report_is_separate_and_seeded():
-    output_dir = Path(".pytest_tmp") / f"uot_energy_debug_{uuid4().hex}"
+def test_uot_energy_debug_report_is_separate_and_seeded(tmp_path):
+    output_dir = tmp_path / f"uot_energy_debug_{uuid4().hex}"
     output_dir.mkdir(parents=True)
     args = SimpleNamespace(
         model="ours_final",
@@ -77,8 +83,8 @@ def test_uot_energy_debug_report_is_separate_and_seeded():
         output_dir.rmdir()
 
 
-def test_elastic_ot_debug_report_compares_same_checkpoint_uniform_uot():
-    output_dir = Path(".pytest_tmp") / f"elastic_ot_debug_{uuid4().hex}"
+def test_elastic_ot_debug_report_compares_same_checkpoint_uniform_uot(tmp_path):
+    output_dir = tmp_path / f"elastic_ot_debug_{uuid4().hex}"
     output_dir.mkdir(parents=True)
     args = SimpleNamespace(
         model="ours_final",
@@ -124,6 +130,85 @@ def test_elastic_ot_debug_report_compares_same_checkpoint_uniform_uot():
         for file_path in output_dir.iterdir():
             file_path.unlink()
         output_dir.rmdir()
+
+
+def test_dcr_debug_report_logs_residual_evidence_gap(tmp_path):
+    output_dir = tmp_path / f"dcr_debug_{uuid4().hex}"
+    output_dir.mkdir(parents=True)
+    args = SimpleNamespace(
+        model="ours_final",
+        dataset_name="knee_aug_split",
+        training_samples=60,
+        shot_num=1,
+        seed=42,
+        final_test_seed=42,
+        test_protocol="clean",
+        effective_test_protocol="clean",
+        experiment_tag="seed42_ours_final_score_dcr",
+        path_results=str(output_dir),
+        ours_final_score_mode="threshold_mass",
+        enable_dustbin_contrastive_score="true",
+    )
+    diagnostics = {
+        "pred_acc": 0.81,
+        "dcr_unadjusted_pred_acc": 0.78,
+        "dcr_accuracy_delta": 0.03,
+        "dcr_fix_rate": 0.05,
+        "dcr_harm_rate": 0.02,
+        "dcr/shot_logit_delta_abs": 0.03,
+        "dcr_removed_positive_distance_gap": 0.12,
+        "dcr/removed_positive_share": 0.22,
+    }
+
+    try:
+        path = write_dcr_debug_report(
+            args,
+            diagnostics,
+            accuracy=0.81,
+        )
+
+        assert path is not None
+        assert "seed42" in path
+        text = Path(path).read_text()
+        assert "Verdict: SUPPORTED" in text
+        assert "Accuracy Delta: +0.030000" in text
+        assert "Fix Rate: 0.050000" in text
+        assert "Harm Rate: 0.020000" in text
+        assert "dcr_removed_positive_distance_gap: 0.120000" in text
+        assert dcr_debug_enabled(args)
+        assert is_dcr_debug_metric("dcr/removed_positive_share")
+        assert is_dcr_debug_metric("dcr_removed_positive_distance_gap")
+        assert not is_dcr_debug_metric("pred_acc")
+    finally:
+        for file_path in output_dir.iterdir():
+            file_path.unlink()
+        output_dir.rmdir()
+
+
+def test_dcr_prediction_comparison_metrics_use_same_examples():
+    targets = torch.tensor([0, 0, 1, 1])
+    unadjusted = torch.tensor(
+        [[0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [1.0, 0.0]]
+    )
+    active = torch.tensor(
+        [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+    )
+
+    metrics = summarize_score_diagnostics(
+        {
+            "dcr_logits": active,
+            "dcr_unadjusted_logits": unadjusted,
+        },
+        active,
+        targets,
+    )
+
+    assert metrics["dcr_unadjusted_pred_acc"] == 0.25
+    assert metrics["dcr_pred_acc"] == 0.50
+    assert metrics["dcr_fix_rate"] == 0.50
+    assert metrics["dcr_harm_rate"] == 0.25
+    assert metrics["dcr_prediction_change_rate"] == 0.75
+    assert metrics["dcr_accuracy_delta"] == 0.25
 
 
 def test_ours_final_wandb_config_hides_other_model_flags_and_keeps_global_residual():

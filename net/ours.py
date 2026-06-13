@@ -25,6 +25,7 @@ from net.hrot_fsl import HROTFSLResult, _compute_cross_shot_support_marginals, _
 from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.adaptive_region_uot import AdaptiveRegionUOTGuidance
 from net.modules.cost_evidence_marginals import CostEvidenceMarginals, _normalize_evidence_mode
+from net.modules.dustbin_contrastive_residual import DustbinContrastiveResidualScore
 from net.modules.hubness_calibrated_uot import HubnessCalibratedUOT
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.mspta import MSPTATokenizer
@@ -353,6 +354,13 @@ class OursM2(JECOTM2):
         elastic_ot_sigma: float = 1.0,
         enable_elastic_ot_probe: bool = False,
         dustbin_score_init: float = 0.0,
+        enable_dustbin_contrastive_score: bool = False,
+        dcr_beta: float = 0.50,
+        dcr_tau: float = 0.25,
+        dcr_alpha: float = 0.0,
+        dcr_margin: float = 0.0,
+        dcr_min_gate: float = 0.05,
+        dcr_detach_gate: bool = True,
         enable_ours_final_failure_probe: bool = False,
         ours_probe_common_margin: float = 0.10,
         enable_rival_conditional_cost: bool = False,
@@ -547,6 +555,23 @@ class OursM2(JECOTM2):
         self.elastic_ot_sigma = float(elastic_ot_sigma)
         self.enable_elastic_ot_probe = _bool_config(enable_elastic_ot_probe)
         self.dustbin_score_init = float(dustbin_score_init)
+        self.enable_dustbin_contrastive_score = _bool_config(
+            enable_dustbin_contrastive_score
+        )
+        self.dcr_beta = float(dcr_beta)
+        self.dcr_tau = float(dcr_tau)
+        self.dcr_alpha = float(dcr_alpha)
+        self.dcr_margin = float(dcr_margin)
+        self.dcr_min_gate = float(dcr_min_gate)
+        self.dcr_detach_gate = _bool_config(dcr_detach_gate)
+        if (
+            self.enable_dustbin_contrastive_score
+            and self.ours_final_score_mode != "threshold_mass"
+        ):
+            raise ValueError(
+                "enable_dustbin_contrastive_score is a residual correction for "
+                "ours_final_score_mode='threshold_mass'"
+            )
         if (
             self.ours_final_score_mode in {"elastic_ot", "dustbin_ot"}
             and self.ours_final_marginal_mode != "uniform"
@@ -826,6 +851,16 @@ class OursM2(JECOTM2):
         if self.enable_ours_final_failure_probe:
             self.ours_final_failure_probe = OursFinalFailureProbe(
                 common_margin=self.ours_probe_common_margin,
+                eps=self.eps,
+            )
+        if self.enable_dustbin_contrastive_score:
+            self.dustbin_contrastive_residual_score = DustbinContrastiveResidualScore(
+                beta=self.dcr_beta,
+                tau=self.dcr_tau,
+                alpha=self.dcr_alpha,
+                margin=self.dcr_margin,
+                min_gate=self.dcr_min_gate,
+                detach_gate=self.dcr_detach_gate,
                 eps=self.eps,
             )
         if self.enable_rival_conditional_cost:
@@ -3220,6 +3255,107 @@ class OursM2(JECOTM2):
         payload.update(rvuot_payload)
         return payload
 
+    def _apply_dustbin_contrastive_residual_score(
+        self,
+        payload: dict[str, torch.Tensor],
+        *,
+        flat_cost: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> dict[str, torch.Tensor]:
+        if not getattr(self, "enable_dustbin_contrastive_score", False):
+            return payload
+        transport_plan = payload.get("transport_plan")
+        if not torch.is_tensor(transport_plan):
+            return payload
+        if flat_cost.dim() != 4:
+            raise ValueError(f"flat_cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(flat_cost.shape)}")
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if num_pairs != int(way_num) * int(shot_num):
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match way*shot={way_num * shot_num}")
+        if tuple(transport_plan.shape) != (num_query, int(way_num), int(shot_num), query_len, support_len):
+            raise ValueError(
+                "transport_plan must have shape (Nq, Way, Shot, Lq, Ls), "
+                f"got {tuple(transport_plan.shape)}"
+            )
+
+        threshold = payload.get("ecot_threshold")
+        if not torch.is_tensor(threshold):
+            threshold = self.transport_cost_threshold
+        cost_view = flat_cost.reshape(num_query, int(way_num), int(shot_num), query_len, support_len)
+        calibrated_unscaled, dcr_payload = self.dustbin_contrastive_residual_score(
+            cost=cost_view,
+            plan=transport_plan.to(device=flat_cost.device, dtype=flat_cost.dtype),
+            threshold=threshold,
+        )
+        calibrated_shot_logits = self.score_scale * calibrated_unscaled
+        old_shot_logits = payload.get("shot_logits")
+        if torch.is_tensor(old_shot_logits):
+            payload["dcr_unadjusted_shot_logits"] = old_shot_logits.detach()
+            dcr_payload["dcr/shot_logit_delta"] = (
+                calibrated_shot_logits.detach() - old_shot_logits.detach()
+            ).mean()
+            dcr_payload["dcr/shot_logit_delta_abs"] = (
+                calibrated_shot_logits.detach() - old_shot_logits.detach()
+            ).abs().mean()
+
+        shot_cost = payload.get("shot_transport_cost")
+        shot_mass = payload.get("shot_transported_mass")
+        if not torch.is_tensor(shot_cost) or not torch.is_tensor(shot_mass):
+            raise RuntimeError("DCR score requires shot_transport_cost and shot_transported_mass")
+        tau_shot = payload.get("ecot_tau_shot")
+        if torch.is_tensor(tau_shot):
+            scaled = calibrated_shot_logits / tau_shot.clamp_min(float(self.eps))
+            if calibrated_shot_logits.shape[-1] == 1:
+                shot_pool_weights = torch.ones_like(calibrated_shot_logits)
+                logits = calibrated_shot_logits.squeeze(-1)
+            else:
+                shot_pool_weights = torch.softmax(scaled, dim=-1)
+                logits = tau_shot * (
+                    torch.logsumexp(scaled, dim=-1) - math.log(float(calibrated_shot_logits.shape[-1]))
+                )
+            transport_cost = (shot_pool_weights * shot_cost).sum(dim=-1)
+            transport_mass = (shot_pool_weights * shot_mass).sum(dim=-1)
+        else:
+            logits, transport_cost, transport_mass, shot_pool_weights = self._pool_j_shot_scores(
+                calibrated_shot_logits,
+                shot_cost,
+                shot_mass,
+            )
+
+        old_logits = payload.get("logits")
+        if torch.is_tensor(old_logits):
+            payload["dcr_unadjusted_logits"] = old_logits.detach()
+        removed_shot = dcr_payload.get("dcr_removed_positive_shot")
+        retained_shot = dcr_payload.get("dcr_retained_positive_shot")
+        removed_share_shot = dcr_payload.get("dcr_removed_positive_share_shot")
+        if torch.is_tensor(removed_shot):
+            dcr_payload["dcr_removed_positive"] = (shot_pool_weights * removed_shot).sum(dim=-1)
+        if torch.is_tensor(retained_shot):
+            dcr_payload["dcr_retained_positive"] = (shot_pool_weights * retained_shot).sum(dim=-1)
+        if torch.is_tensor(removed_share_shot):
+            dcr_payload["dcr_removed_positive_share"] = (shot_pool_weights * removed_share_shot).sum(dim=-1)
+
+        payload["shot_logits"] = calibrated_shot_logits
+        payload["logits"] = logits
+        payload["class_scores"] = logits
+        payload["transport_cost"] = transport_cost
+        payload["transported_mass"] = transport_mass
+        payload["shot_pool_weights"] = shot_pool_weights
+        payload["dcr_logits"] = logits.detach()
+        if torch.is_tensor(payload.get("ecot_base_score")):
+            payload["dcr_unadjusted_ecot_base_score"] = payload["ecot_base_score"].detach()
+            payload["ecot_base_score"] = calibrated_shot_logits
+        if torch.is_tensor(payload.get("ecot_score")):
+            payload["dcr_unadjusted_ecot_score"] = payload["ecot_score"].detach()
+            payload["ecot_score"] = calibrated_shot_logits
+        budget_scores = payload.get("ecot_budget_scores")
+        if torch.is_tensor(budget_scores) and budget_scores.shape[-1] == 1:
+            payload["dcr_unadjusted_ecot_budget_scores"] = budget_scores.detach()
+            payload["ecot_budget_scores"] = calibrated_shot_logits.unsqueeze(-1)
+        payload.update(dcr_payload)
+        return payload
+
     def _mspta_weights_for_ecot(
         self,
         flat_cost: torch.Tensor,
@@ -3696,6 +3832,12 @@ class OursM2(JECOTM2):
             way_num=way_num,
             shot_num=shot_num,
             spatial_hw=spatial_hw,
+        )
+        payload = self._apply_dustbin_contrastive_residual_score(
+            payload,
+            flat_cost=cost_for_transport,
+            way_num=way_num,
+            shot_num=shot_num,
         )
         if torch.is_tensor(payload.get("transport_plan")):
             payload.update(

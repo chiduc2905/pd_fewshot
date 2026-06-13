@@ -400,6 +400,13 @@ def validate_dmuot_scope(args) -> None:
             "--enable_elastic_ot_probe is supported only with --model ours_final"
         )
     if _bool_flag(
+        getattr(args, "enable_dustbin_contrastive_score", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_dustbin_contrastive_score is supported only with --model ours_final"
+        )
+    if _bool_flag(
         getattr(args, "enable_rival_conditional_cost", False),
         default=False,
     ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
@@ -2920,6 +2927,19 @@ def build_model_from_args(args):
                             ),
                             "dustbin_score_init": float(
                                 getattr(args, "dustbin_score_init", 0.0)
+                            ),
+                            "enable_dustbin_contrastive_score": _bool_flag(
+                                getattr(args, "enable_dustbin_contrastive_score", "false"),
+                                default=False,
+                            ),
+                            "dcr_beta": float(getattr(args, "dcr_beta", 0.50)),
+                            "dcr_tau": float(getattr(args, "dcr_tau", 0.25)),
+                            "dcr_alpha": float(getattr(args, "dcr_alpha", 0.0)),
+                            "dcr_margin": float(getattr(args, "dcr_margin", 0.0)),
+                            "dcr_min_gate": float(getattr(args, "dcr_min_gate", 0.05)),
+                            "dcr_detach_gate": _bool_flag(
+                                getattr(args, "dcr_detach_gate", "true"),
+                                default=True,
                             ),
                             "enable_ours_final_failure_probe": _bool_flag(
                                 getattr(args, "enable_ours_final_failure_probe", "false"),
