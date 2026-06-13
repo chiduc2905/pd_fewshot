@@ -581,6 +581,7 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "enable_rival_conditional_cost",
                 "rc_cost_weight",
                 "rc_cost_temperature",
+                "rc_cost_mode",
             }
         ),
     ),
@@ -2649,6 +2650,12 @@ def get_args():
     )
     parser.add_argument("--rc_cost_weight", type=float, default=0.50)
     parser.add_argument("--rc_cost_temperature", type=float, default=0.25)
+    parser.add_argument(
+        "--rc_cost_mode",
+        type=str,
+        default="class_nll",
+        choices=["class_nll", "edge_advantage"],
+    )
     parser.add_argument(
         "--enable_rival_aware_evidence_uot",
         nargs="?",
@@ -5049,6 +5056,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_rival_conditional_cost",
             "rc_cost_weight",
             "rc_cost_temperature",
+            "rc_cost_mode",
             "enable_rival_aware_evidence_uot",
             "rae_uot_tau",
             "rae_uot_marginal_mix",
@@ -6419,10 +6427,13 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "rc_cost/enabled",
         "rc_cost/penalty_weight",
         "rc_cost/temperature",
+        "rc_cost/mode_id",
         "rc_cost/class_entropy",
         "rc_cost/class_probability_peak",
         "rc_cost/common_query_share",
         "rc_cost/penalty_mean",
+        "rc_cost/adjustment_abs_mean",
+        "rc_cost/negative_adjustment_share",
         "rc_cost/penalty_to_cost_ratio",
         "rae_uot/enabled",
         "rae_uot/tau",

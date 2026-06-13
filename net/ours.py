@@ -32,7 +32,10 @@ from net.modules.pulse_region_guidance import PulseRegionGuidance, normalize_sal
 from net.modules.ours_final_failure_probe import OursFinalFailureProbe
 from net.modules.reciprocal_verified_transport import ReciprocalVerifiedTransport
 from net.modules.region_structural_uot import RegionStructuralUOTGuidance
-from net.modules.rival_conditional_ground_cost import RivalConditionalGroundCost
+from net.modules.rival_conditional_ground_cost import (
+    RivalConditionalGroundCost,
+    normalize_rival_cost_mode,
+)
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.modules.utility_contrastive_marginals import UtilityContrastiveMarginals
@@ -350,6 +353,7 @@ class OursM2(JECOTM2):
         enable_rival_conditional_cost: bool = False,
         rc_cost_weight: float = 0.50,
         rc_cost_temperature: float = 0.25,
+        rc_cost_mode: str = "class_nll",
         enable_evidence_marginals: bool = False,
         evidence_tau: float = 0.1,
         evidence_tau_marginal: float = 1.0,
@@ -530,6 +534,7 @@ class OursM2(JECOTM2):
         )
         self.rc_cost_weight = float(rc_cost_weight)
         self.rc_cost_temperature = float(rc_cost_temperature)
+        self.rc_cost_mode = normalize_rival_cost_mode(rc_cost_mode)
         if self.lambda_cost < 0.0:
             raise ValueError("lambda_cost must be non-negative")
         if self.lambda_cost > 0.0 and self.token_g_kind == "none":
@@ -788,6 +793,7 @@ class OursM2(JECOTM2):
             self.rival_conditional_ground_cost = RivalConditionalGroundCost(
                 penalty_weight=self.rc_cost_weight,
                 temperature=self.rc_cost_temperature,
+                mode=self.rc_cost_mode,
                 eps=self.eps,
             )
         self.enable_pulse_region_uot = bool(enable_pulse_region_uot)
@@ -4366,7 +4372,9 @@ class OursM2(JECOTM2):
             "ours_probe_threshold_x4_score",
             "rc_cost_class_probability",
             "rc_cost_penalty",
+            "rc_cost_adjustment",
             "rc_cost_class_energy",
+            "rc_cost_edge_advantage",
             "rc_cost_guided_cost_matrix",
             "hcuot_pair_specificity",
             "hcuot_query_weight",

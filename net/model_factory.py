@@ -2922,6 +2922,9 @@ def build_model_from_args(args):
                             "rc_cost_temperature": float(
                                 getattr(args, "rc_cost_temperature", 0.25)
                             ),
+                            "rc_cost_mode": str(
+                                getattr(args, "rc_cost_mode", "class_nll")
+                            ),
                         }
                         if is_ours_final_model
                         else {}

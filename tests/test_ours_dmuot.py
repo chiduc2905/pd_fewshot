@@ -1184,6 +1184,34 @@ def test_rival_conditional_cost_has_finite_ground_cost_gradient():
     assert cost.grad.abs().sum() > 0
 
 
+def test_edge_rival_cost_preserves_common_edges_and_separates_specific_edges():
+    module = RivalConditionalGroundCost(
+        penalty_weight=0.25,
+        temperature=0.25,
+        mode="edge_advantage",
+    )
+    cost = torch.tensor(
+        [
+            [
+                [[0.10, 0.10], [0.10, 0.20]],
+                [[0.10, 0.10], [0.90, 1.00]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+
+    guided, payload = module(cost, way_num=2, shot_num=1)
+    adjustment = payload["rc_cost_adjustment"].reshape_as(cost)
+    episode_scale = cost.std(unbiased=False)
+
+    torch.testing.assert_close(guided[0, :, 0], cost[0, :, 0], atol=1e-6, rtol=0.0)
+    assert guided[0, 0, 1, 0] < cost[0, 0, 1, 0]
+    assert guided[0, 1, 1, 0] > cost[0, 1, 1, 0]
+    assert adjustment.abs().amax() <= 0.25 * episode_scale + 1e-6
+    assert payload["rc_cost/mode_id"].item() == pytest.approx(1.0)
+    assert payload["rc_cost/penalty_mean"].abs() < 1e-6
+
+
 def test_rival_conditional_cost_zero_weight_preserves_model_logits():
     torch.manual_seed(5222)
     baseline = _tiny_ours_final()
@@ -1246,11 +1274,13 @@ def test_rival_conditional_cost_runner_isolates_one_architecture_change():
     assert [variant["tag"] for variant in variants] == [
         "ours_final_rc_cost_baseline",
         "ours_final_rc_cost",
+        "ours_final_rc_edge",
     ]
     assert "--enable_rival_conditional_cost" not in variants[0]["extra_args"]
     assert "--enable_rival_conditional_cost" in variants[1]["extra_args"]
     assert "--ours_final_marginal_mode" not in variants[1]["extra_args"]
     assert "--enable_global_residual_score" not in variants[1]["extra_args"]
+    assert variants[2]["extra_args"][-1] == "edge_advantage"
 
 
 def test_rival_conditional_cost_factory_flags_are_ours_final_only():
@@ -1265,6 +1295,7 @@ def test_rival_conditional_cost_factory_flags_are_ours_final_only():
         enable_rival_conditional_cost="true",
         rc_cost_weight=0.4,
         rc_cost_temperature=0.3,
+        rc_cost_mode="edge_advantage",
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -1277,6 +1308,7 @@ def test_rival_conditional_cost_factory_flags_are_ours_final_only():
     assert ours_final.enable_rival_conditional_cost
     assert ours_final.rc_cost_weight == pytest.approx(0.4)
     assert ours_final.rc_cost_temperature == pytest.approx(0.3)
+    assert ours_final.rc_cost_mode == "edge_advantage"
     assert hasattr(ours_final, "rival_conditional_ground_cost")
 
     with pytest.raises(

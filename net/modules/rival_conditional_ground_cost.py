@@ -8,6 +8,27 @@ import torch
 from torch import nn
 
 
+RIVAL_COST_MODES = frozenset({"class_nll", "edge_advantage"})
+
+
+def normalize_rival_cost_mode(value: str | None) -> str:
+    name = str(value or "class_nll").strip().lower().replace("-", "_")
+    aliases = {
+        "nll": "class_nll",
+        "query_class": "class_nll",
+        "edge": "edge_advantage",
+        "signed_edge": "edge_advantage",
+        "centered_edge": "edge_advantage",
+    }
+    name = aliases.get(name, name)
+    if name not in RIVAL_COST_MODES:
+        raise ValueError(
+            f"Unsupported rival cost mode: {value}. "
+            f"Expected one of {sorted(RIVAL_COST_MODES)}"
+        )
+    return name
+
+
 class RivalConditionalGroundCost(nn.Module):
     """Penalize locally cheap matches that are not specific to one class.
 
@@ -22,6 +43,7 @@ class RivalConditionalGroundCost(nn.Module):
         *,
         penalty_weight: float = 0.50,
         temperature: float = 0.25,
+        mode: str = "class_nll",
         eps: float = 1e-8,
     ) -> None:
         super().__init__()
@@ -33,6 +55,7 @@ class RivalConditionalGroundCost(nn.Module):
             raise ValueError("eps must be positive")
         self.penalty_weight = float(penalty_weight)
         self.temperature = float(temperature)
+        self.mode = normalize_rival_cost_mode(mode)
         self.eps = float(eps)
 
     def forward(
@@ -72,6 +95,13 @@ class RivalConditionalGroundCost(nn.Module):
                 uniform_probability,
                 zero_penalty,
                 flat_cost.new_zeros(num_query, way_num, query_len),
+                edge_advantage=flat_cost.new_zeros(
+                    num_query,
+                    way_num,
+                    shot_num,
+                    query_len,
+                    support_len,
+                ),
             )
 
         cost = flat_cost.reshape(
@@ -109,26 +139,65 @@ class RivalConditionalGroundCost(nn.Module):
             dim=1,
         )
         class_probability = log_class_probability.exp()
-        penalty = (
-            self.penalty_weight
-            * episode_scale.reshape(num_query, 1, 1)
-            * (-log_class_probability)
-        )
-        guided_cost = cost + penalty[:, :, None, :, None]
+        edge_advantage = flat_cost.new_zeros(cost.shape)
+        if self.mode == "class_nll":
+            adjustment = (
+                self.penalty_weight
+                * episode_scale.reshape(num_query, 1, 1)
+                * (-log_class_probability)
+            )
+            guided_cost = cost + adjustment[:, :, None, :, None]
+        else:
+            scale = episode_scale.reshape(num_query, 1, 1, 1, 1)
+            temperature = (scale * self.temperature).clamp_min(self.eps)
+            adjustments = []
+            advantages = []
+            all_classes = torch.arange(way_num, device=flat_cost.device)
+            for class_idx in range(way_num):
+                rival_cost = cost[:, all_classes != class_idx]
+                rival_cost = rival_cost.permute(0, 3, 1, 2, 4).reshape(
+                    num_query,
+                    query_len,
+                    -1,
+                )
+                rival_count = max(int(rival_cost.shape[-1]), 1)
+                rival_reference = -temperature[:, 0, 0, :, 0] * (
+                    torch.logsumexp(
+                        -rival_cost / temperature[:, 0, 0, :, :],
+                        dim=-1,
+                    )
+                    - math.log(float(rival_count))
+                )
+                advantage = (
+                    rival_reference[:, None, :, None] - cost[:, class_idx]
+                )
+                signed_shift = (
+                    -self.penalty_weight
+                    * scale[:, 0]
+                    * torch.tanh(advantage / temperature[:, 0])
+                )
+                advantages.append(advantage)
+                adjustments.append(signed_shift)
+            edge_advantage = torch.stack(advantages, dim=1)
+            edge_adjustment = torch.stack(adjustments, dim=1)
+            guided_cost = (cost + edge_adjustment).clamp_min(0.0)
+            adjustment = edge_adjustment
         guided_cost = guided_cost.reshape_as(flat_cost)
         return guided_cost, self._payload(
             flat_cost,
             class_probability,
-            penalty,
+            adjustment,
             class_energy,
+            edge_advantage=edge_advantage,
         )
 
     def _payload(
         self,
         flat_cost: torch.Tensor,
         class_probability: torch.Tensor,
-        penalty: torch.Tensor,
+        adjustment: torch.Tensor,
         class_energy: torch.Tensor,
+        edge_advantage: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         way_num = int(class_probability.shape[1])
         entropy = -(
@@ -137,24 +206,40 @@ class RivalConditionalGroundCost(nn.Module):
         ).sum(dim=1)
         normalized_entropy = entropy / math.log(float(way_num))
         peak = class_probability.amax(dim=1)
+        if edge_advantage is None:
+            edge_advantage = flat_cost.new_zeros(())
+        adjustment_abs_mean = adjustment.abs().mean()
         return {
             "rc_cost_class_probability": class_probability.detach(),
-            "rc_cost_penalty": penalty.detach(),
+            "rc_cost_penalty": adjustment.detach(),
+            "rc_cost_adjustment": adjustment.detach(),
             "rc_cost_class_energy": class_energy.detach(),
+            "rc_cost_edge_advantage": edge_advantage.detach(),
             "rc_cost/enabled": flat_cost.new_tensor(1.0),
             "rc_cost/penalty_weight": flat_cost.new_tensor(self.penalty_weight),
             "rc_cost/temperature": flat_cost.new_tensor(self.temperature),
+            "rc_cost/mode_id": flat_cost.new_tensor(
+                0.0 if self.mode == "class_nll" else 1.0
+            ),
             "rc_cost/class_entropy": normalized_entropy.mean().detach(),
             "rc_cost/class_probability_peak": peak.mean().detach(),
             "rc_cost/common_query_share": (
                 normalized_entropy > 0.90
             ).to(flat_cost.dtype).mean().detach(),
-            "rc_cost/penalty_mean": penalty.mean().detach(),
+            "rc_cost/penalty_mean": adjustment.mean().detach(),
+            "rc_cost/adjustment_abs_mean": adjustment_abs_mean.detach(),
+            "rc_cost/negative_adjustment_share": (
+                adjustment < 0.0
+            ).to(flat_cost.dtype).mean().detach(),
             "rc_cost/penalty_to_cost_ratio": (
-                penalty.mean()
+                adjustment_abs_mean
                 / flat_cost.detach().abs().mean().clamp_min(self.eps)
             ).detach(),
         }
 
 
-__all__ = ["RivalConditionalGroundCost"]
+__all__ = [
+    "RIVAL_COST_MODES",
+    "RivalConditionalGroundCost",
+    "normalize_rival_cost_mode",
+]

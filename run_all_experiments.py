@@ -416,7 +416,7 @@ def get_args():
             "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
             "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
             "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
-            "probe_uniform, probe_fixed, probe_adaptive, rc_cost_baseline, rc_cost, "
+            "probe_uniform, probe_fixed, probe_adaptive, rc_cost_baseline, rc_cost, rc_edge, "
             "hcuot, hcuot_cost_only, hcuot_marginal_only. "
             "Default all keeps the suite's normal variants."
         ),
@@ -1788,6 +1788,25 @@ def build_ours_final_rival_cost_variants():
                 "0.50",
                 "--rc_cost_temperature",
                 "0.25",
+                "--rc_cost_mode",
+                "class_nll",
+            ],
+        },
+        {
+            "tag": "ours_final_rc_edge",
+            "checkpoint_tag": "rc_edge",
+            "label": "Ours-Final with bounded edge-level rival advantage cost",
+            "extra_args": base
+            + probe
+            + [
+                "--enable_rival_conditional_cost",
+                "true",
+                "--rc_cost_weight",
+                "0.25",
+                "--rc_cost_temperature",
+                "0.25",
+                "--rc_cost_mode",
+                "edge_advantage",
             ],
         },
     ]
@@ -3200,6 +3219,9 @@ def parse_ours_final_variant_filter(variants_str):
         "rc_cost": "ours_final_rc_cost",
         "rival_cost": "ours_final_rc_cost",
         "ours_final_rc_cost": "ours_final_rc_cost",
+        "rc_edge": "ours_final_rc_edge",
+        "edge_advantage": "ours_final_rc_edge",
+        "ours_final_rc_edge": "ours_final_rc_edge",
         "hcuot": "ours_final_hcuot_global_res",
         "hcuot_full": "ours_final_hcuot_global_res",
         "ours_final_hcuot_global_res": "ours_final_hcuot_global_res",
@@ -3247,7 +3269,7 @@ def parse_ours_final_variant_filter(variants_str):
                 "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
                 "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
                 "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
-                "probe_adaptive, rc_cost_baseline, rc_cost, hcuot, hcuot_cost_only, "
+                "probe_adaptive, rc_cost_baseline, rc_cost, rc_edge, hcuot, hcuot_cost_only, "
                 "hcuot_marginal_only, or exact tags."
             )
         if tag not in parsed:
