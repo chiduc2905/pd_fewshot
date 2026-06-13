@@ -393,6 +393,13 @@ def validate_dmuot_scope(args) -> None:
             "--enable_ours_final_failure_probe is supported only with --model ours_final"
         )
     if _bool_flag(
+        getattr(args, "enable_elastic_ot_probe", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_elastic_ot_probe is supported only with --model ours_final"
+        )
+    if _bool_flag(
         getattr(args, "enable_rival_conditional_cost", False),
         default=False,
     ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
@@ -2903,6 +2910,13 @@ def build_model_from_args(args):
                             ),
                             "ours_final_score_mode": str(
                                 getattr(args, "ours_final_score_mode", "threshold_mass")
+                            ),
+                            "elastic_ot_sigma": float(
+                                getattr(args, "elastic_ot_sigma", 1.0)
+                            ),
+                            "enable_elastic_ot_probe": _bool_flag(
+                                getattr(args, "enable_elastic_ot_probe", "false"),
+                                default=False,
                             ),
                             "enable_ours_final_failure_probe": _bool_flag(
                                 getattr(args, "enable_ours_final_failure_probe", "false"),

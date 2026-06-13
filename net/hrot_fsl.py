@@ -19,6 +19,7 @@ from net.hyperbolic.poincare_ops import (
     safe_project_to_ball,
 )
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
+from net.modules.elastic_ot import elastic_capacity_residuals, sinkhorn_elastic_log
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.ccdm_marginal import CrossClassDiscriminativeMarginal
 from net.modules.egsm_marginal import EpisodeGatedShrinkageMarginal
@@ -492,6 +493,8 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_m2_pst_hidden: int = 32,
         ecot_m2_ablate_threshold_mass: bool = True,
         ecot_m2_score_mode: str = "threshold_mass",
+        ecot_m2_elastic_sigma: float = 1.0,
+        ecot_m2_elastic_probe: bool = False,
         ecot_m2_cost_per_mass_score: bool = False,
         ecot_m2_cost_per_mass_alpha: float = 1.0,
         ecot_m2_cost_per_mass_detach_mass: bool = True,
@@ -969,9 +972,15 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_m2_pst_hidden = int(ecot_m2_pst_hidden)
         self.ecot_m2_ablate_threshold_mass = bool(ecot_m2_ablate_threshold_mass) and variant == "J_ECOT_M2"
         score_mode = str(ecot_m2_score_mode).strip().lower().replace("-", "_")
-        if score_mode not in {"threshold_mass", "uot_energy"}:
-            raise ValueError("ecot_m2_score_mode must be 'threshold_mass' or 'uot_energy'")
+        if score_mode not in {"threshold_mass", "uot_energy", "elastic_ot"}:
+            raise ValueError(
+                "ecot_m2_score_mode must be 'threshold_mass', 'uot_energy', or 'elastic_ot'"
+            )
         self.ecot_m2_score_mode = score_mode if variant == "J_ECOT_M2" else "threshold_mass"
+        self.ecot_m2_elastic_sigma = float(ecot_m2_elastic_sigma)
+        self.ecot_m2_elastic_probe = bool(ecot_m2_elastic_probe) and variant == "J_ECOT_M2"
+        if self.ecot_m2_elastic_sigma <= 0.0:
+            raise ValueError("ecot_m2_elastic_sigma must be positive")
         self.ecot_m2_cost_per_mass_score = bool(ecot_m2_cost_per_mass_score) and variant == "J_ECOT_M2"
         self.ecot_m2_cost_per_mass_alpha = float(ecot_m2_cost_per_mass_alpha)
         if self.ecot_m2_score_mode == "uot_energy":
@@ -983,6 +992,37 @@ class HROTFSL(BaseConv64FewShotModel):
                 raise ValueError(
                     "ecot_m2_score_mode='uot_energy' cannot be combined with cost-only "
                     "or cost-per-mass scoring"
+                )
+        if self.ecot_m2_score_mode == "elastic_ot":
+            elastic_conflicts = {
+                "ecot_m2_ablate_threshold_mass": self.ecot_m2_ablate_threshold_mass,
+                "ecot_m2_cost_per_mass_score": self.ecot_m2_cost_per_mass_score,
+                "ecot_enable_threshold_offset": bool(ecot_enable_threshold_offset),
+                "ecot_m2_per_shot_threshold": bool(ecot_m2_per_shot_threshold),
+                "ecot_enable_noise_sink": bool(ecot_enable_noise_sink),
+                "ecot_m2_use_aqm": bool(ecot_m2_use_aqm),
+                "ecot_m2_use_swts": bool(ecot_m2_use_swts),
+                "ecot_m2_mass_score_mode": (
+                    str(ecot_m2_mass_score_mode).strip().lower().replace("-", "_")
+                    != "standard"
+                ),
+                "ecot_m2_mass_reward_beta": abs(float(ecot_m2_mass_reward_beta) - 1.0) > 1e-8,
+                "ecot_m2_mass_reward_shot_scaling": (
+                    str(ecot_m2_mass_reward_shot_scaling).strip().lower().replace("-", "_")
+                    != "none"
+                ),
+                "ecot_enable_crs_marginal": bool(ecot_enable_crs_marginal),
+                "ecot_enable_mea_marginal": bool(ecot_enable_mea_marginal),
+                "ecot_enable_ccdm_marginal": bool(ecot_enable_ccdm_marginal),
+                "ecot_enable_egsm": bool(ecot_enable_egsm),
+                "ecot_enable_ccem_marginal": bool(ecot_enable_ccem_marginal),
+            }
+            active_conflicts = [name for name, active in elastic_conflicts.items() if active]
+            if active_conflicts:
+                raise ValueError(
+                    "ecot_m2_score_mode='elastic_ot' defines the complete transport-score "
+                    "objective and cannot be combined with: "
+                    + ", ".join(active_conflicts)
                 )
         if self.ecot_m2_ablate_threshold_mass and self.ecot_m2_cost_per_mass_score:
             raise ValueError(
@@ -3325,10 +3365,51 @@ class HROTFSL(BaseConv64FewShotModel):
                 lam=self.mncr_lam,
             )
 
+        threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
         noise_query_mass = None
         noise_support_mass = None
         noise_self_mass = None
-        if self.uses_ecot_noise_sink:
+        elastic_probe_cost_out = None
+        elastic_probe_mass_out = None
+        if self.ecot_m2_score_mode == "elastic_ot":
+            if transport_kwargs:
+                raise ValueError(
+                    "elastic_ot uses uniform token capacities and cannot be combined "
+                    "with explicit or learned marginal weights"
+                )
+            elastic_a = flat_cost.new_full(
+                (num_query, num_pairs, budget_count, query_len),
+                1.0 / float(query_len),
+            )
+            elastic_a = (
+                elastic_a * rho_bank.view(1, 1, budget_count, 1)
+            ).reshape(num_query, num_pairs * budget_count, query_len)
+            elastic_b = flat_cost.new_full(
+                (num_query, num_pairs, budget_count, support_len),
+                1.0 / float(support_len),
+            )
+            elastic_b = (
+                elastic_b * rho_bank.view(1, 1, budget_count, 1)
+            ).reshape(num_query, num_pairs * budget_count, support_len)
+            if self.ecot_m2_elastic_probe:
+                _, elastic_probe_cost_out, elastic_probe_mass_out = self._transport_match(
+                    cost_bank,
+                    rho_bank_flat,
+                )
+            plan_bank = sinkhorn_elastic_log(
+                cost_bank - threshold,
+                elastic_a,
+                elastic_b,
+                eps=self.sinkhorn_epsilon,
+                sigma=self.ecot_m2_elastic_sigma,
+                max_iter=self.sinkhorn_iterations,
+                tol=self.sinkhorn_tolerance,
+            )
+            cost_out = compute_transport_cost(plan_bank, cost_bank)
+            mass_out = compute_transported_mass(plan_bank)
+            transport_kwargs["a"] = elastic_a
+            transport_kwargs["b"] = elastic_b
+        elif self.uses_ecot_noise_sink:
             if "a" in transport_kwargs:
                 real_a = transport_kwargs["a"]
             else:
@@ -3508,8 +3589,6 @@ class HROTFSL(BaseConv64FewShotModel):
         if noise_query_mass_bank is not None and self.ecot_noise_sink_score_penalty > 0.0:
             sink_penalty_bank = 0.5 * (noise_query_mass_bank + noise_support_mass_bank)
 
-        threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
-
         swts_pre_score: torch.Tensor | None = None
         swts_w_entropy_mean: torch.Tensor | None = None
         if self.ecot_m2_use_swts:
@@ -3559,6 +3638,11 @@ class HROTFSL(BaseConv64FewShotModel):
         evidence_score_mix = flat_cost.new_tensor(evidence_score_mix_value)
         evidence_score_mode_id = flat_cost.new_tensor(0.0 if evidence_score_mode == "replace" else 1.0)
         use_evidence_score = evidence_mass_bank is not None
+        if self.ecot_m2_score_mode == "elastic_ot" and use_evidence_score:
+            raise ValueError(
+                "elastic_ot cannot be combined with evidence-score replacement; "
+                "its mixed-sign transport cost is the classification objective"
+            )
 
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
             if self.ecot_m2_score_mode == "uot_energy":
@@ -3745,6 +3829,38 @@ class HROTFSL(BaseConv64FewShotModel):
             )
             identity_loss = (shot_logits - base_score).pow(2).mean()
 
+        elastic_probe_logits = None
+        elastic_probe_shot_score = None
+        if elastic_probe_cost_out is not None and elastic_probe_mass_out is not None:
+            probe_cost_bank = elastic_probe_cost_out.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+            )
+            probe_mass_bank = elastic_probe_mass_out.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+            )
+            probe_budget_scores = self.score_scale * (
+                threshold * probe_mass_bank - probe_cost_bank
+            )
+            probe_base_score = probe_budget_scores[..., base_idx]
+            probe_mix_score = (pi_view * probe_budget_scores).sum(dim=-1)
+            elastic_probe_shot_score = (
+                probe_base_score + lambda_ecot * (probe_mix_score - probe_base_score)
+            )
+            probe_cost_diag = (pi_view * probe_cost_bank).sum(dim=-1)
+            probe_mass_diag = (pi_view * probe_mass_bank).sum(dim=-1)
+            elastic_probe_logits, _, _, _, _ = self._pool_ecot_shot_scores(
+                elastic_probe_shot_score,
+                probe_cost_diag,
+                probe_mass_diag,
+                controller_outputs.get("raw_tau_shot"),
+            )
+
         uot_energy_shot_score = (
             -self.score_scale * uot_classification_energy_bank[..., base_idx]
         )
@@ -3815,6 +3931,49 @@ class HROTFSL(BaseConv64FewShotModel):
                 / uot_classification_energy_bank.abs().mean().clamp_min(self.eps)
             ).detach(),
         }
+        if self.ecot_m2_score_mode == "elastic_ot":
+            elastic_objective_bank = shot_cost_bank - threshold * shot_mass_bank
+            elastic_capacity = elastic_capacity_residuals(
+                plan_bank,
+                target_query_bank,
+                target_support_bank,
+            )
+            beneficial_mass = (
+                plan_bank * (D_bank < threshold).to(dtype=plan_bank.dtype)
+            ).sum(dim=(-1, -2))
+            transported_fraction = shot_mass_bank / rho_bank.view(
+                1,
+                1,
+                1,
+                budget_count,
+            ).clamp_min(self.eps)
+            payload.update(
+                {
+                    "elastic_ot_objective_bank": elastic_objective_bank,
+                    "elastic_ot_transported_fraction_bank": transported_fraction,
+                    "elastic_ot/enabled": flat_cost.new_tensor(1.0),
+                    "elastic_ot/transported_fraction": transported_fraction.mean().detach(),
+                    "elastic_ot/unmatched_fraction": (
+                        1.0 - transported_fraction
+                    ).mean().detach(),
+                    "elastic_ot/beneficial_edge_mass_share": (
+                        beneficial_mass / shot_mass_bank.clamp_min(self.eps)
+                    ).mean().detach(),
+                    "elastic_ot/row_capacity_violation": (
+                        elastic_capacity["row_violation"].max().detach()
+                    ),
+                    "elastic_ot/column_capacity_violation": (
+                        elastic_capacity["column_violation"].max().detach()
+                    ),
+                    "elastic_ot/objective": elastic_objective_bank.mean().detach(),
+                    "elastic_ot/score_identity_error": (
+                        budget_scores / float(self.score_scale) + elastic_objective_bank
+                    ).abs().max().detach(),
+                }
+            )
+            if elastic_probe_logits is not None and elastic_probe_shot_score is not None:
+                payload["elastic_probe_uniform_uot_logits"] = elastic_probe_logits
+                payload["elastic_probe_uniform_uot_shot_score"] = elastic_probe_shot_score
         if self.ecot_m2_mass_score_mode == "shot_consensus":
             payload.update(
                 {
@@ -3885,7 +4044,9 @@ class HROTFSL(BaseConv64FewShotModel):
             )
         if tau_shot is not None:
             payload["ecot_tau_shot"] = tau_shot
-        if raw_delta_threshold is not None:
+        if self.ecot_m2_score_mode == "elastic_ot":
+            payload["ecot_threshold"] = threshold
+        elif raw_delta_threshold is not None:
             payload["ecot_threshold"] = threshold
             payload["ecot_raw_delta_threshold"] = raw_delta_threshold.to(
                 device=flat_cost.device,
@@ -5542,6 +5703,10 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_uot_support_kl_bank",
             "ecot_uot_energy_shot_score",
             "ecot_uot_energy_logits",
+            "elastic_ot_objective_bank",
+            "elastic_ot_transported_fraction_bank",
+            "elastic_probe_uniform_uot_logits",
+            "elastic_probe_uniform_uot_shot_score",
             "ecot_m2_mass_for_score_bank",
             "ecot_m2_mass_consensus_bank",
             "evidence_score_mass_bank",
@@ -5584,6 +5749,14 @@ class HROTFSL(BaseConv64FewShotModel):
             "uot_energy/transport_cost",
             "uot_energy/classification_energy",
             "uot_energy/marginal_penalty_share",
+            "elastic_ot/enabled",
+            "elastic_ot/transported_fraction",
+            "elastic_ot/unmatched_fraction",
+            "elastic_ot/beneficial_edge_mass_share",
+            "elastic_ot/row_capacity_violation",
+            "elastic_ot/column_capacity_violation",
+            "elastic_ot/objective",
+            "elastic_ot/score_identity_error",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

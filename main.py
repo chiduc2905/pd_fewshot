@@ -567,7 +567,13 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
     ),
     (
         "ours_final_score_mode",
-        frozenset({"ours_final_score_mode"}),
+        frozenset(
+            {
+                "ours_final_score_mode",
+                "elastic_ot_sigma",
+                "enable_elastic_ot_probe",
+            }
+        ),
     ),
     (
         "enable_ours_final_failure_probe",
@@ -2636,10 +2642,23 @@ def get_args():
         "--ours_final_score_mode",
         type=str,
         default="threshold_mass",
-        choices=["threshold_mass", "uot_energy"],
+        choices=["threshold_mass", "uot_energy", "elastic_ot"],
         help=(
-            "Ours-Final only: threshold_mass preserves T*M-C; uot_energy scores "
-            "the solved plan by transport cost plus both KL marginal penalties."
+            "Ours-Final only: threshold_mass preserves fixed-budget UOT; "
+            "uot_energy scores its KL objective; elastic_ot jointly decides "
+            "where and how much mass to match using the T*M-C objective."
+        ),
+    )
+    parser.add_argument("--elastic_ot_sigma", type=float, default=1.0)
+    parser.add_argument(
+        "--enable_elastic_ot_probe",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final elastic_ot only: also evaluate the original uniform "
+            "fixed-budget UOT on the same cost tensor and checkpoint."
         ),
     )
     parser.add_argument(
@@ -5080,6 +5099,8 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "score_marginal_adaptive_mix",
             "score_marginal_confidence_power",
             "ours_final_score_mode",
+            "elastic_ot_sigma",
+            "enable_elastic_ot_probe",
             "enable_ours_final_failure_probe",
             "ours_probe_common_margin",
             "enable_rival_conditional_cost",
@@ -5486,6 +5507,10 @@ _UOT_ENERGY_DEBUG_PREFIXES = (
     "uot_energy",
     "transport_audit",
 )
+_ELASTIC_OT_DEBUG_PREFIXES = (
+    "elastic_ot",
+    "elastic_probe",
+)
 
 
 def is_uot_energy_debug_metric(key: str) -> bool:
@@ -5501,6 +5526,136 @@ def uot_energy_debug_enabled(args) -> bool:
         .replace("-", "_")
         == "uot_energy"
     )
+
+
+def elastic_ot_debug_enabled(args) -> bool:
+    return (
+        str(getattr(args, "model", "")).strip().lower() == "ours_final"
+        and str(getattr(args, "ours_final_score_mode", "threshold_mass"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        == "elastic_ot"
+    )
+
+
+def is_elastic_ot_debug_metric(key: str) -> bool:
+    return str(key).startswith(_ELASTIC_OT_DEBUG_PREFIXES)
+
+
+def write_elastic_ot_debug_report(
+    args,
+    test_diag,
+    *,
+    accuracy,
+    current_test_name=None,
+):
+    if not elastic_ot_debug_enabled(args):
+        return None
+
+    samples_stem = (
+        f"{args.training_samples}samples"
+        if getattr(args, "training_samples", None)
+        else "allsamples"
+    )
+    experiment_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    tag_suffix = f"_{sanitize_result_tag(experiment_tag)}" if experiment_tag else ""
+    protocol_suffix = get_test_protocol_suffix(args)
+    path = os.path.join(
+        args.path_results,
+        (
+            f"debug_elastic_ot_{args.dataset_name}_{args.model}_{samples_stem}_"
+            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt"
+        ),
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    active_acc = float(test_diag.get("pred_acc", accuracy))
+    probe_acc = test_diag.get("elastic_probe_uniform_uot_pred_acc")
+    delta = None if probe_acc is None else active_acc - float(probe_acc)
+    fix_rate = test_diag.get("elastic_probe_fix_rate")
+    harm_rate = test_diag.get("elastic_probe_harm_rate")
+    identity_error = test_diag.get("elastic_ot/score_identity_error")
+    capacity_error = max(
+        float(test_diag.get("elastic_ot/row_capacity_violation", 0.0)),
+        float(test_diag.get("elastic_ot/column_capacity_violation", 0.0)),
+    )
+    mathematically_valid = (
+        identity_error is not None
+        and float(identity_error) < 1e-5
+        and capacity_error < 1e-5
+    )
+    if delta is None:
+        verdict = "INCOMPLETE"
+        verdict_reason = "Uniform-UOT counterfactual is missing; enable the Elastic OT probe."
+    elif delta > 1e-6 and mathematically_valid:
+        verdict = "SUPPORTED"
+        verdict_reason = "Elastic OT improves accuracy and passes objective/capacity checks."
+    elif delta < -1e-6:
+        verdict = "REGRESSION"
+        verdict_reason = "Elastic OT is less accurate than same-checkpoint uniform UOT."
+    elif not mathematically_valid:
+        verdict = "INVALID"
+        verdict_reason = "Objective identity or capacity constraints failed numerical checks."
+    else:
+        verdict = "INCONCLUSIVE"
+        verdict_reason = "Elastic OT and uniform UOT have identical query accuracy."
+
+    debug_keys = [
+        key
+        for key in sorted(test_diag)
+        if is_elastic_ot_debug_metric(key)
+        or key
+        in {
+            "pred_acc",
+            "logit_margin",
+            "wrong_logit_margin",
+            "correct_logit_margin",
+            "transport_mass_true",
+            "transport_mass_best_negative",
+            "transport_mass_gap",
+        }
+    ]
+    with open(path, "w") as handle:
+        handle.write("ELASTIC OT ADAPTIVE-MASS DEBUG REPORT\n")
+        handle.write("=" * 64 + "\n")
+        handle.write(f"Model: {args.model}\n")
+        handle.write(f"Dataset: {args.dataset_name}\n")
+        handle.write(f"Training Samples: {getattr(args, 'training_samples', None) or 'All'}\n")
+        handle.write(f"Shot: {args.shot_num}\n")
+        handle.write(f"Training Seed: {getattr(args, 'seed', 'unknown')}\n")
+        handle.write(f"Final Test Seed: {getattr(args, 'final_test_seed', 'unknown')}\n")
+        handle.write(
+            "Test Protocol: "
+            f"{getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        handle.write(f"Experiment Tag: {experiment_tag or 'none'}\n")
+        handle.write("Objective: min <P, C-T> with P1<=a and P^T1<=b\n")
+        handle.write("Counterfactual: uniform fixed-budget UOT on the same cost tensor\n")
+        handle.write("-" * 64 + "\n")
+        handle.write(f"Active Elastic OT Accuracy: {active_acc:.6f}\n")
+        handle.write(
+            "Uniform UOT Accuracy: "
+            + ("missing\n" if probe_acc is None else f"{float(probe_acc):.6f}\n")
+        )
+        handle.write(
+            "Accuracy Delta: "
+            + ("missing\n" if delta is None else f"{delta:+.6f}\n")
+        )
+        if fix_rate is not None:
+            handle.write(f"Fix Rate: {float(fix_rate):.6f}\n")
+        if harm_rate is not None:
+            handle.write(f"Harm Rate: {float(harm_rate):.6f}\n")
+        handle.write(f"Verdict: {verdict}\n")
+        handle.write(f"Reason: {verdict_reason}\n")
+        handle.write("-" * 64 + "\n")
+        for key in debug_keys:
+            value = test_diag[key]
+            if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+                handle.write(f"{key}: {float(value):.6f}\n")
+    return path
 
 
 def write_uot_energy_debug_report(
@@ -6135,6 +6290,33 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
             )
         )
 
+    elastic_probe_logits = scores.get("elastic_probe_uniform_uot_logits")
+    if (
+        torch.is_tensor(elastic_probe_logits)
+        and elastic_probe_logits.dim() == 2
+        and elastic_probe_logits.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_score_tensor(
+                elastic_probe_logits,
+                targets,
+                prefix="elastic_probe_uniform_uot",
+            )
+        )
+        active_pred = logits.argmax(dim=1)
+        probe_pred = elastic_probe_logits.argmax(dim=1)
+        active_correct = active_pred.eq(targets)
+        probe_correct = probe_pred.eq(targets)
+        metrics["elastic_probe_prediction_agreement"] = _scalar_metric(
+            active_pred.eq(probe_pred).float().mean()
+        )
+        metrics["elastic_probe_fix_rate"] = _scalar_metric(
+            ((~probe_correct) & active_correct).float().mean()
+        )
+        metrics["elastic_probe_harm_rate"] = _scalar_metric(
+            (probe_correct & (~active_correct)).float().mean()
+        )
+
     component_score_keys = {
         "raw_logits": "raw",
         "score_emd": "emd",
@@ -6609,6 +6791,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "uot_energy/transport_cost",
         "uot_energy/classification_energy",
         "uot_energy/marginal_penalty_share",
+        "elastic_ot/enabled",
+        "elastic_ot/transported_fraction",
+        "elastic_ot/unmatched_fraction",
+        "elastic_ot/beneficial_edge_mass_share",
+        "elastic_ot/row_capacity_violation",
+        "elastic_ot/column_capacity_violation",
+        "elastic_ot/objective",
+        "elastic_ot/score_identity_error",
         "rc_cost/enabled",
         "rc_cost/penalty_weight",
         "rc_cost/temperature",
@@ -7915,6 +8105,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             default=False,
         )
         or uot_energy_debug_enabled(args)
+        or elastic_ot_debug_enabled(args)
     )
     ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
@@ -8593,6 +8784,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     )
     if uot_energy_debug_path is not None:
         print(f"UOT-energy debug report saved to {uot_energy_debug_path}")
+    elastic_ot_debug_path = write_elastic_ot_debug_report(
+        args,
+        test_diag,
+        accuracy=acc_micro,
+        current_test_name=current_test_name,
+    )
+    if elastic_ot_debug_path is not None:
+        print(f"Elastic OT debug report saved to {elastic_ot_debug_path}")
 
     txt_path = os.path.join(
         args.path_results,
@@ -8641,6 +8840,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             handle.write("Test Diagnostics\n")
             for key in sorted(test_diag):
                 if uot_energy_debug_enabled(args) and is_uot_energy_debug_metric(key):
+                    continue
+                if elastic_ot_debug_enabled(args) and is_elastic_ot_debug_metric(key):
                     continue
                 value = test_diag[key]
                 if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):

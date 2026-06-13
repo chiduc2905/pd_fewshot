@@ -350,6 +350,8 @@ class OursM2(JECOTM2):
         score_marginal_adaptive_mix: bool = True,
         score_marginal_confidence_power: float = 1.0,
         ours_final_score_mode: str = "threshold_mass",
+        elastic_ot_sigma: float = 1.0,
+        enable_elastic_ot_probe: bool = False,
         enable_ours_final_failure_probe: bool = False,
         ours_probe_common_margin: float = 0.10,
         enable_rival_conditional_cost: bool = False,
@@ -531,9 +533,24 @@ class OursM2(JECOTM2):
         self.ours_final_score_mode = (
             str(ours_final_score_mode).strip().lower().replace("-", "_")
         )
-        if self.ours_final_score_mode not in {"threshold_mass", "uot_energy"}:
+        if self.ours_final_score_mode not in {
+            "threshold_mass",
+            "uot_energy",
+            "elastic_ot",
+        }:
             raise ValueError(
-                "ours_final_score_mode must be 'threshold_mass' or 'uot_energy'"
+                "ours_final_score_mode must be 'threshold_mass', 'uot_energy', "
+                "or 'elastic_ot'"
+            )
+        self.elastic_ot_sigma = float(elastic_ot_sigma)
+        self.enable_elastic_ot_probe = _bool_config(enable_elastic_ot_probe)
+        if (
+            self.ours_final_score_mode == "elastic_ot"
+            and self.ours_final_marginal_mode != "uniform"
+        ):
+            raise ValueError(
+                "ours_final_score_mode='elastic_ot' cannot be combined with "
+                "ours_final_marginal_mode; uniform values are capacities, not target marginals"
             )
         self.enable_ours_final_failure_probe = _bool_config(
             enable_ours_final_failure_probe
@@ -582,7 +599,9 @@ class OursM2(JECOTM2):
             kwargs["ecot_m2_cost_per_mass_score"] = False
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
         kwargs["ecot_m2_score_mode"] = self.ours_final_score_mode
-        if self.ours_final_score_mode == "uot_energy":
+        kwargs["ecot_m2_elastic_sigma"] = self.elastic_ot_sigma
+        kwargs["ecot_m2_elastic_probe"] = self.enable_elastic_ot_probe
+        if self.ours_final_score_mode in {"uot_energy", "elastic_ot"}:
             kwargs["ecot_m2_ablate_threshold_mass"] = False
             kwargs["ecot_m2_cost_per_mass_score"] = False
         if enable_mspta:

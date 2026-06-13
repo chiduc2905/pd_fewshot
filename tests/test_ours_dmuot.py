@@ -1190,11 +1190,49 @@ def test_objective_score_runner_isolates_scoring_change():
     assert [variant["tag"] for variant in variants] == [
         "ours_final_score_threshold_mass",
         "ours_final_score_uot_energy",
+        "ours_final_score_elastic_ot",
     ]
     assert variants[0]["extra_args"][-2:] == ["--ours_probe_common_margin", "0.10"]
     assert variants[1]["extra_args"][-2:] == ["--ours_final_score_mode", "uot_energy"]
+    assert variants[2]["extra_args"][-4:] == [
+        "--ours_final_score_mode",
+        "elastic_ot",
+        "--enable_elastic_ot_probe",
+        "true",
+    ]
     assert "--ours_final_marginal_mode" not in variants[1]["extra_args"]
     assert "--enable_rival_conditional_cost" not in variants[1]["extra_args"]
+
+
+def test_elastic_ot_integrates_adaptive_mass_objective_and_uniform_probe():
+    torch.manual_seed(5223)
+    model = _tiny_ours_final(
+        ours_final_score_mode="elastic_ot",
+        enable_elastic_ot_probe=True,
+        sinkhorn_iterations=80,
+    )
+    model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["logits"].shape == (2, 2)
+    assert outputs["elastic_probe_uniform_uot_logits"].shape == outputs["logits"].shape
+    assert outputs["elastic_ot/enabled"].item() == pytest.approx(1.0)
+    assert outputs["elastic_ot/transported_fraction"].item() <= 1.0 + 1e-5
+    assert outputs["elastic_ot/row_capacity_violation"].item() < 1e-5
+    assert outputs["elastic_ot/column_capacity_violation"].item() < 1e-5
+    assert outputs["elastic_ot/score_identity_error"].item() < 1e-5
+    assert torch.isfinite(outputs["logits"]).all()
+
+
+def test_elastic_ot_rejects_competing_marginal_reweighting():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _tiny_ours_final(
+            ours_final_score_mode="elastic_ot",
+            ours_final_marginal_mode="score_aligned",
+        )
 
 
 def test_rival_conditional_cost_zero_weight_is_exact_identity():

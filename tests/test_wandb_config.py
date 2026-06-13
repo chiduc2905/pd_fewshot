@@ -6,8 +6,10 @@ from uuid import uuid4
 from main import (
     accumulate_diagnostics,
     build_wandb_init_config,
+    is_elastic_ot_debug_metric,
     finalize_diagnostics,
     is_uot_energy_debug_metric,
+    write_elastic_ot_debug_report,
     write_uot_energy_debug_report,
 )
 
@@ -69,6 +71,55 @@ def test_uot_energy_debug_report_is_separate_and_seeded():
         assert is_uot_energy_debug_metric("uot_energy/query_kl")
         assert is_uot_energy_debug_metric("ours_probe/harm_share")
         assert not is_uot_energy_debug_metric("pred_acc")
+    finally:
+        for file_path in output_dir.iterdir():
+            file_path.unlink()
+        output_dir.rmdir()
+
+
+def test_elastic_ot_debug_report_compares_same_checkpoint_uniform_uot():
+    output_dir = Path(".pytest_tmp") / f"elastic_ot_debug_{uuid4().hex}"
+    output_dir.mkdir(parents=True)
+    args = SimpleNamespace(
+        model="ours_final",
+        dataset_name="knee_aug_split",
+        training_samples=60,
+        shot_num=1,
+        seed=42,
+        final_test_seed=42,
+        test_protocol="clean",
+        effective_test_protocol="clean",
+        experiment_tag="seed42_ours_final_score_elastic_ot",
+        path_results=str(output_dir),
+        ours_final_score_mode="elastic_ot",
+    )
+    diagnostics = {
+        "pred_acc": 0.83,
+        "elastic_probe_uniform_uot_pred_acc": 0.80,
+        "elastic_probe_fix_rate": 0.05,
+        "elastic_probe_harm_rate": 0.02,
+        "elastic_ot/score_identity_error": 1e-8,
+        "elastic_ot/row_capacity_violation": 1e-8,
+        "elastic_ot/column_capacity_violation": 1e-8,
+        "elastic_ot/transported_fraction": 0.31,
+    }
+
+    try:
+        path = write_elastic_ot_debug_report(
+            args,
+            diagnostics,
+            accuracy=0.83,
+        )
+
+        assert path is not None
+        assert "seed42" in path
+        text = Path(path).read_text()
+        assert "Verdict: SUPPORTED" in text
+        assert "Accuracy Delta: +0.030000" in text
+        assert "Fix Rate: 0.050000" in text
+        assert is_elastic_ot_debug_metric("elastic_ot/transported_fraction")
+        assert is_elastic_ot_debug_metric("elastic_probe_fix_rate")
+        assert not is_elastic_ot_debug_metric("pred_acc")
     finally:
         for file_path in output_dir.iterdir():
             file_path.unlink()

@@ -394,7 +394,7 @@ def get_args():
             "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls; "
             "score_marginal=original uniform baseline plus Ours-Final score-aligned marginal sweep; "
             "failure_probe=uniform diagnostic baseline versus fixed/adaptive utility-contrastive marginals; "
-            "objective_score=original T*M-C versus objective-consistent KL-UOT energy; "
+            "objective_score=original UOT, KL-UOT energy, and adaptive-mass Elastic OT; "
             "rival_cost=original Ours-Final versus rival-conditional ground cost only; "
             "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only."
         ),
@@ -419,6 +419,7 @@ def get_args():
             "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
             "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
             "probe_uniform, probe_fixed, probe_adaptive, score_threshold, score_uot_energy, "
+            "score_elastic_ot, "
             "rc_cost_baseline, rc_cost, rc_edge, "
             "hcuot, hcuot_cost_only, hcuot_marginal_only. "
             "Default all keeps the suite's normal variants."
@@ -1765,7 +1766,7 @@ def build_ours_final_failure_probe_variants():
 
 
 def build_ours_final_objective_score_variants():
-    """Compare the original score with the objective-consistent UOT energy."""
+    """Compare fixed-budget UOT objectives with adaptive-mass Elastic OT."""
     base = _ours_final_base_args()
     probe = [
         "--enable_ours_final_failure_probe",
@@ -1789,6 +1790,21 @@ def build_ours_final_objective_score_variants():
             + [
                 "--ours_final_score_mode",
                 "uot_energy",
+            ],
+        },
+        {
+            "tag": "ours_final_score_elastic_ot",
+            "checkpoint_tag": "score_elastic_ot",
+            "label": (
+                "Ours-Final Elastic OT: uniform capacities, adaptive matched mass, "
+                "and objective-consistent T*M-C score"
+            ),
+            "extra_args": base
+            + [
+                "--ours_final_score_mode",
+                "elastic_ot",
+                "--enable_elastic_ot_probe",
+                "true",
             ],
         },
     ]
@@ -3255,6 +3271,11 @@ def parse_ours_final_variant_filter(variants_str):
         "uot_energy": "ours_final_score_uot_energy",
         "objective_score": "ours_final_score_uot_energy",
         "ours_final_score_uot_energy": "ours_final_score_uot_energy",
+        "score_elastic": "ours_final_score_elastic_ot",
+        "score_elastic_ot": "ours_final_score_elastic_ot",
+        "elastic_ot": "ours_final_score_elastic_ot",
+        "elot": "ours_final_score_elastic_ot",
+        "ours_final_score_elastic_ot": "ours_final_score_elastic_ot",
         "rc_cost_baseline": "ours_final_rc_cost_baseline",
         "rival_cost_baseline": "ours_final_rc_cost_baseline",
         "ours_final_rc_cost_baseline": "ours_final_rc_cost_baseline",
@@ -3311,7 +3332,7 @@ def parse_ours_final_variant_filter(variants_str):
                 "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
                 "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
                 "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
-                "probe_adaptive, score_threshold, score_uot_energy, "
+                "probe_adaptive, score_threshold, score_uot_energy, score_elastic_ot, "
                 "rc_cost_baseline, rc_cost, rc_edge, hcuot, hcuot_cost_only, "
                 "hcuot_marginal_only, or exact tags."
             )
