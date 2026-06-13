@@ -2918,6 +2918,9 @@ def build_model_from_args(args):
                                 getattr(args, "enable_elastic_ot_probe", "false"),
                                 default=False,
                             ),
+                            "dustbin_score_init": float(
+                                getattr(args, "dustbin_score_init", 0.0)
+                            ),
                             "enable_ours_final_failure_probe": _bool_flag(
                                 getattr(args, "enable_ours_final_failure_probe", "false"),
                                 default=False,
@@ -3454,6 +3457,7 @@ def build_model_from_args(args):
                 if is_ours_final_model
                 else getattr(args, "hrot_ecot_m2_score_mode", "threshold_mass")
             ),
+            ecot_m2_dustbin_score_init=float(getattr(args, "dustbin_score_init", 0.0)),
             ecot_m2_ablate_threshold_mass=_bool_flag(
                 (
                     "false"

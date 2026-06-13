@@ -19,6 +19,7 @@ from net.hyperbolic.poincare_ops import (
     safe_project_to_ball,
 )
 from net.modules.episode_adaptive_mass import EpisodeAdaptiveMass, summarize_hyperbolic_tokens
+from net.modules.dustbin_ot import dustbin_transport_diagnostics, dustbin_transport_from_cost
 from net.modules.elastic_ot import elastic_capacity_residuals, sinkhorn_elastic_log
 from net.modules.crs_marginal import CrossReferencedSelectiveMarginal
 from net.modules.ccdm_marginal import CrossClassDiscriminativeMarginal
@@ -495,6 +496,7 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_m2_score_mode: str = "threshold_mass",
         ecot_m2_elastic_sigma: float = 1.0,
         ecot_m2_elastic_probe: bool = False,
+        ecot_m2_dustbin_score_init: float = 0.0,
         ecot_m2_cost_per_mass_score: bool = False,
         ecot_m2_cost_per_mass_alpha: float = 1.0,
         ecot_m2_cost_per_mass_detach_mass: bool = True,
@@ -972,13 +974,15 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_m2_pst_hidden = int(ecot_m2_pst_hidden)
         self.ecot_m2_ablate_threshold_mass = bool(ecot_m2_ablate_threshold_mass) and variant == "J_ECOT_M2"
         score_mode = str(ecot_m2_score_mode).strip().lower().replace("-", "_")
-        if score_mode not in {"threshold_mass", "uot_energy", "elastic_ot"}:
+        if score_mode not in {"threshold_mass", "uot_energy", "elastic_ot", "dustbin_ot"}:
             raise ValueError(
-                "ecot_m2_score_mode must be 'threshold_mass', 'uot_energy', or 'elastic_ot'"
+                "ecot_m2_score_mode must be 'threshold_mass', 'uot_energy', "
+                "'elastic_ot', or 'dustbin_ot'"
             )
         self.ecot_m2_score_mode = score_mode if variant == "J_ECOT_M2" else "threshold_mass"
         self.ecot_m2_elastic_sigma = float(ecot_m2_elastic_sigma)
         self.ecot_m2_elastic_probe = bool(ecot_m2_elastic_probe) and variant == "J_ECOT_M2"
+        self.ecot_m2_dustbin_score_init = float(ecot_m2_dustbin_score_init)
         if self.ecot_m2_elastic_sigma <= 0.0:
             raise ValueError("ecot_m2_elastic_sigma must be positive")
         self.ecot_m2_cost_per_mass_score = bool(ecot_m2_cost_per_mass_score) and variant == "J_ECOT_M2"
@@ -1022,6 +1026,37 @@ class HROTFSL(BaseConv64FewShotModel):
                 raise ValueError(
                     "ecot_m2_score_mode='elastic_ot' defines the complete transport-score "
                     "objective and cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
+        if self.ecot_m2_score_mode == "dustbin_ot":
+            dustbin_conflicts = {
+                "ecot_m2_ablate_threshold_mass": self.ecot_m2_ablate_threshold_mass,
+                "ecot_m2_cost_per_mass_score": self.ecot_m2_cost_per_mass_score,
+                "ecot_enable_threshold_offset": bool(ecot_enable_threshold_offset),
+                "ecot_m2_per_shot_threshold": bool(ecot_m2_per_shot_threshold),
+                "ecot_enable_noise_sink": bool(ecot_enable_noise_sink),
+                "ecot_m2_use_aqm": bool(ecot_m2_use_aqm),
+                "ecot_m2_use_swts": bool(ecot_m2_use_swts),
+                "ecot_m2_mass_score_mode": (
+                    str(ecot_m2_mass_score_mode).strip().lower().replace("-", "_")
+                    != "standard"
+                ),
+                "ecot_m2_mass_reward_beta": abs(float(ecot_m2_mass_reward_beta) - 1.0) > 1e-8,
+                "ecot_m2_mass_reward_shot_scaling": (
+                    str(ecot_m2_mass_reward_shot_scaling).strip().lower().replace("-", "_")
+                    != "none"
+                ),
+                "ecot_enable_crs_marginal": bool(ecot_enable_crs_marginal),
+                "ecot_enable_mea_marginal": bool(ecot_enable_mea_marginal),
+                "ecot_enable_ccdm_marginal": bool(ecot_enable_ccdm_marginal),
+                "ecot_enable_egsm": bool(ecot_enable_egsm),
+                "ecot_enable_ccem_marginal": bool(ecot_enable_ccem_marginal),
+            }
+            active_conflicts = [name for name, active in dustbin_conflicts.items() if active]
+            if active_conflicts:
+                raise ValueError(
+                    "ecot_m2_score_mode='dustbin_ot' defines the complete "
+                    "transport-score objective and cannot be combined with: "
                     + ", ".join(active_conflicts)
                 )
         if self.ecot_m2_ablate_threshold_mass and self.ecot_m2_cost_per_mass_score:
@@ -1459,6 +1494,16 @@ class HROTFSL(BaseConv64FewShotModel):
         else:
             self.raw_transport_cost_threshold = None
             self.mass_bonus = nn.Parameter(torch.tensor(float(mass_bonus_init), dtype=torch.float32))
+        self.ecot_m2_dustbin_score = (
+            nn.Parameter(
+                torch.tensor(
+                    float(self.ecot_m2_dustbin_score_init),
+                    dtype=torch.float32,
+                )
+            )
+            if self.ecot_m2_score_mode == "dustbin_ot"
+            else None
+        )
 
         if self.uses_hrot_v:
             self.w_q = nn.Parameter(torch.randn(token_dim, dtype=torch.float32) * 0.01)
@@ -3371,7 +3416,39 @@ class HROTFSL(BaseConv64FewShotModel):
         noise_self_mass = None
         elastic_probe_cost_out = None
         elastic_probe_mass_out = None
-        if self.ecot_m2_score_mode == "elastic_ot":
+        dustbin_augmented_plan = None
+        dustbin_augmented_a = None
+        dustbin_augmented_b = None
+        dustbin_alpha = None
+        if self.ecot_m2_score_mode == "dustbin_ot":
+            if transport_kwargs:
+                raise ValueError(
+                    "dustbin_ot uses uniform token capacities and cannot be "
+                    "combined with explicit or learned marginal weights"
+                )
+            if self.ecot_m2_dustbin_score is None:
+                raise RuntimeError("dustbin_ot requires ecot_m2_dustbin_score")
+            dustbin_alpha = self.ecot_m2_dustbin_score.to(
+                device=flat_cost.device,
+                dtype=flat_cost.dtype,
+            )
+            dustbin_out = dustbin_transport_from_cost(
+                cost_bank,
+                threshold,
+                dustbin_alpha,
+                rho_bank_flat,
+                temperature=self.sinkhorn_epsilon,
+                max_iter=self.sinkhorn_iterations,
+                tol=self.sinkhorn_tolerance,
+                return_augmented=True,
+            )
+            plan_bank = dustbin_out["plan"]
+            cost_out = dustbin_out["transport_cost"]
+            mass_out = dustbin_out["real_mass"]
+            dustbin_augmented_plan = dustbin_out["augmented_plan"]
+            dustbin_augmented_a = dustbin_out["augmented_a"]
+            dustbin_augmented_b = dustbin_out["augmented_b"]
+        elif self.ecot_m2_score_mode == "elastic_ot":
             if transport_kwargs:
                 raise ValueError(
                     "elastic_ot uses uniform token capacities and cannot be combined "
@@ -3458,6 +3535,40 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
         D_bank = cost_bank.view(num_query, way_num, shot_num, budget_count, query_len, support_len)
+        dustbin_augmented_plan_bank = (
+            None
+            if dustbin_augmented_plan is None
+            else dustbin_augmented_plan.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                query_len + 1,
+                support_len + 1,
+            )
+        )
+        dustbin_augmented_a_bank = (
+            None
+            if dustbin_augmented_a is None
+            else dustbin_augmented_a.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                query_len + 1,
+            )
+        )
+        dustbin_augmented_b_bank = (
+            None
+            if dustbin_augmented_b is None
+            else dustbin_augmented_b.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                support_len + 1,
+            )
+        )
         if "a" in transport_kwargs:
             target_query_bank = transport_kwargs["a"].reshape(
                 num_query,
@@ -3638,10 +3749,10 @@ class HROTFSL(BaseConv64FewShotModel):
         evidence_score_mix = flat_cost.new_tensor(evidence_score_mix_value)
         evidence_score_mode_id = flat_cost.new_tensor(0.0 if evidence_score_mode == "replace" else 1.0)
         use_evidence_score = evidence_mass_bank is not None
-        if self.ecot_m2_score_mode == "elastic_ot" and use_evidence_score:
+        if self.ecot_m2_score_mode in {"elastic_ot", "dustbin_ot"} and use_evidence_score:
             raise ValueError(
-                "elastic_ot cannot be combined with evidence-score replacement; "
-                "its mixed-sign transport cost is the classification objective"
+                f"{self.ecot_m2_score_mode} cannot be combined with evidence-score "
+                "replacement; its mixed-sign transport cost is the classification objective"
             )
 
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
@@ -3931,6 +4042,80 @@ class HROTFSL(BaseConv64FewShotModel):
                 / uot_classification_energy_bank.abs().mean().clamp_min(self.eps)
             ).detach(),
         }
+        if self.ecot_m2_score_mode == "dustbin_ot":
+            if (
+                dustbin_augmented_plan_bank is None
+                or dustbin_augmented_a_bank is None
+                or dustbin_augmented_b_bank is None
+                or dustbin_alpha is None
+            ):
+                raise RuntimeError("dustbin_ot diagnostics were not initialized")
+            active_score_bank = threshold - D_bank
+            dustbin_diag = dustbin_transport_diagnostics(
+                plan_bank,
+                dustbin_augmented_plan_bank,
+                dustbin_augmented_a_bank,
+                dustbin_augmented_b_bank,
+                active_score_bank,
+                rho_bank.view(1, 1, 1, budget_count),
+                eps=self.eps,
+            )
+            dustbin_real_mass_fraction_bank = dustbin_diag["real_mass_fraction"]
+            dustbin_query_fraction_bank = dustbin_diag["query_dustbin_fraction"]
+            dustbin_support_fraction_bank = dustbin_diag["support_dustbin_fraction"]
+            dustbin_score_terms = threshold * shot_mass_bank - shot_cost_bank
+            dustbin_real_mass_fraction_diag = (
+                pi_view * dustbin_real_mass_fraction_bank
+            ).sum(dim=-1)
+            dustbin_query_fraction_diag = (pi_view * dustbin_query_fraction_bank).sum(dim=-1)
+            dustbin_support_fraction_diag = (pi_view * dustbin_support_fraction_bank).sum(dim=-1)
+            dustbin_class_real_fraction = (
+                shot_pool_weights * dustbin_real_mass_fraction_diag
+            ).sum(dim=-1)
+            dustbin_class_query_fraction = (
+                shot_pool_weights * dustbin_query_fraction_diag
+            ).sum(dim=-1)
+            dustbin_class_support_fraction = (
+                shot_pool_weights * dustbin_support_fraction_diag
+            ).sum(dim=-1)
+            payload.update(
+                {
+                    "dustbin_real_mass": transport_mass,
+                    "dustbin_score": logits,
+                    "dustbin_real_mass_fraction": dustbin_class_real_fraction,
+                    "dustbin_query_dustbin_fraction": dustbin_class_query_fraction,
+                    "dustbin_support_dustbin_fraction": dustbin_class_support_fraction,
+                    "dustbin_real_mass_fraction_bank": dustbin_real_mass_fraction_bank,
+                    "dustbin_query_dustbin_fraction_bank": dustbin_query_fraction_bank,
+                    "dustbin_support_dustbin_fraction_bank": dustbin_support_fraction_bank,
+                    "dustbin_score_bank": dustbin_score_terms,
+                    "dustbin_ot/enabled": flat_cost.new_tensor(1.0),
+                    "dustbin_ot/real_mass_fraction": (
+                        dustbin_real_mass_fraction_bank.mean().detach()
+                    ),
+                    "dustbin_ot/query_dustbin_fraction": (
+                        dustbin_query_fraction_bank.mean().detach()
+                    ),
+                    "dustbin_ot/support_dustbin_fraction": (
+                        dustbin_support_fraction_bank.mean().detach()
+                    ),
+                    "dustbin_ot/dustbin_score": dustbin_alpha.detach(),
+                    "dustbin_ot/accepted_edge_score_mean": (
+                        dustbin_diag["accepted_edge_score_mean"].mean().detach()
+                    ),
+                    "dustbin_ot/rejected_query_score_mean": (
+                        dustbin_diag["rejected_query_score_mean"].mean().detach()
+                    ),
+                    "dustbin_ot/row_residual": dustbin_diag["row_residual"].max().detach(),
+                    "dustbin_ot/column_residual": (
+                        dustbin_diag["column_residual"].max().detach()
+                    ),
+                    "dustbin_ot/mass_residual": dustbin_diag["mass_residual"].max().detach(),
+                    "dustbin_ot/score_identity_error": (
+                        budget_scores / float(self.score_scale) - dustbin_score_terms
+                    ).abs().max().detach(),
+                }
+            )
         if self.ecot_m2_score_mode == "elastic_ot":
             elastic_objective_bank = shot_cost_bank - threshold * shot_mass_bank
             elastic_capacity = elastic_capacity_residuals(
@@ -5705,6 +5890,10 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_uot_energy_logits",
             "elastic_ot_objective_bank",
             "elastic_ot_transported_fraction_bank",
+            "dustbin_real_mass_fraction_bank",
+            "dustbin_query_dustbin_fraction_bank",
+            "dustbin_support_dustbin_fraction_bank",
+            "dustbin_score_bank",
             "elastic_probe_uniform_uot_logits",
             "elastic_probe_uniform_uot_shot_score",
             "ecot_m2_mass_for_score_bank",
@@ -5757,6 +5946,17 @@ class HROTFSL(BaseConv64FewShotModel):
             "elastic_ot/column_capacity_violation",
             "elastic_ot/objective",
             "elastic_ot/score_identity_error",
+            "dustbin_ot/enabled",
+            "dustbin_ot/real_mass_fraction",
+            "dustbin_ot/query_dustbin_fraction",
+            "dustbin_ot/support_dustbin_fraction",
+            "dustbin_ot/dustbin_score",
+            "dustbin_ot/accepted_edge_score_mean",
+            "dustbin_ot/rejected_query_score_mean",
+            "dustbin_ot/row_residual",
+            "dustbin_ot/column_residual",
+            "dustbin_ot/mass_residual",
+            "dustbin_ot/score_identity_error",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
@@ -5870,6 +6070,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "adaptive_transport_cost_threshold",
             "shot_logits",
             "shot_pool_weights",
+            "dustbin_real_mass",
+            "dustbin_score",
+            "dustbin_real_mass_fraction",
+            "dustbin_query_dustbin_fraction",
+            "dustbin_support_dustbin_fraction",
             "shot_mass_for_score",
             "shot_evidence_score_mass",
             "shot_evidence_score_cost",

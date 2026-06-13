@@ -572,6 +572,7 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "ours_final_score_mode",
                 "elastic_ot_sigma",
                 "enable_elastic_ot_probe",
+                "dustbin_score_init",
             }
         ),
     ),
@@ -2642,14 +2643,16 @@ def get_args():
         "--ours_final_score_mode",
         type=str,
         default="threshold_mass",
-        choices=["threshold_mass", "uot_energy", "elastic_ot"],
+        choices=["threshold_mass", "uot_energy", "elastic_ot", "dustbin_ot"],
         help=(
             "Ours-Final only: threshold_mass preserves fixed-budget UOT; "
             "uot_energy scores its KL objective; elastic_ot jointly decides "
-            "where and how much mass to match using the T*M-C objective."
+            "where and how much mass to match using the T*M-C objective; "
+            "dustbin_ot adds a learned unmatched bin for token rejection."
         ),
     )
     parser.add_argument("--elastic_ot_sigma", type=float, default=1.0)
+    parser.add_argument("--dustbin_score_init", type=float, default=0.0)
     parser.add_argument(
         "--enable_elastic_ot_probe",
         nargs="?",
@@ -5101,6 +5104,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "ours_final_score_mode",
             "elastic_ot_sigma",
             "enable_elastic_ot_probe",
+            "dustbin_score_init",
             "enable_ours_final_failure_probe",
             "ours_probe_common_margin",
             "enable_rival_conditional_cost",
@@ -5511,6 +5515,13 @@ _ELASTIC_OT_DEBUG_PREFIXES = (
     "elastic_ot",
     "elastic_probe",
 )
+_DUSTBIN_OT_DEBUG_PREFIXES = (
+    "dustbin_ot",
+    "dustbin_real_mass",
+    "dustbin_score",
+    "dustbin_query_dustbin",
+    "dustbin_support_dustbin",
+)
 
 
 def is_uot_energy_debug_metric(key: str) -> bool:
@@ -5541,6 +5552,21 @@ def elastic_ot_debug_enabled(args) -> bool:
 
 def is_elastic_ot_debug_metric(key: str) -> bool:
     return str(key).startswith(_ELASTIC_OT_DEBUG_PREFIXES)
+
+
+def dustbin_ot_debug_enabled(args) -> bool:
+    return (
+        str(getattr(args, "model", "")).strip().lower() == "ours_final"
+        and str(getattr(args, "ours_final_score_mode", "threshold_mass"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        == "dustbin_ot"
+    )
+
+
+def is_dustbin_ot_debug_metric(key: str) -> bool:
+    return str(key).startswith(_DUSTBIN_OT_DEBUG_PREFIXES)
 
 
 def write_elastic_ot_debug_report(
@@ -5648,6 +5674,103 @@ def write_elastic_ot_debug_report(
             handle.write(f"Fix Rate: {float(fix_rate):.6f}\n")
         if harm_rate is not None:
             handle.write(f"Harm Rate: {float(harm_rate):.6f}\n")
+        handle.write(f"Verdict: {verdict}\n")
+        handle.write(f"Reason: {verdict_reason}\n")
+        handle.write("-" * 64 + "\n")
+        for key in debug_keys:
+            value = test_diag[key]
+            if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+                handle.write(f"{key}: {float(value):.6f}\n")
+    return path
+
+
+def write_dustbin_ot_debug_report(
+    args,
+    test_diag,
+    *,
+    accuracy,
+    current_test_name=None,
+):
+    if not dustbin_ot_debug_enabled(args):
+        return None
+
+    samples_stem = (
+        f"{args.training_samples}samples"
+        if getattr(args, "training_samples", None)
+        else "allsamples"
+    )
+    experiment_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    tag_suffix = f"_{sanitize_result_tag(experiment_tag)}" if experiment_tag else ""
+    protocol_suffix = get_test_protocol_suffix(args)
+    path = os.path.join(
+        args.path_results,
+        (
+            f"debug_dustbin_ot_{args.dataset_name}_{args.model}_{samples_stem}_"
+            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt"
+        ),
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    identity_error = test_diag.get("dustbin_ot/score_identity_error")
+    residual_error = max(
+        float(test_diag.get("dustbin_ot/row_residual", 0.0)),
+        float(test_diag.get("dustbin_ot/column_residual", 0.0)),
+        float(test_diag.get("dustbin_ot/mass_residual", 0.0)),
+    )
+    real_mass_gap = test_diag.get("dustbin_real_mass_gap")
+    mathematically_valid = (
+        identity_error is not None
+        and float(identity_error) < 1e-5
+        and residual_error < 1e-5
+    )
+    if not mathematically_valid:
+        verdict = "INVALID"
+        verdict_reason = "Score identity or augmented Sinkhorn residual check failed."
+    elif real_mass_gap is not None and float(real_mass_gap) > 0.0:
+        verdict = "SUPPORTED_DIAGNOSTIC"
+        verdict_reason = "True classes carry more accepted real mass than best negatives."
+    elif real_mass_gap is None:
+        verdict = "INCOMPLETE"
+        verdict_reason = "Class-wise real-mass gap diagnostic is missing."
+    else:
+        verdict = "INCONCLUSIVE"
+        verdict_reason = "Math checks pass, but true-class accepted mass gap is not positive."
+
+    debug_keys = [
+        key
+        for key in sorted(test_diag)
+        if is_dustbin_ot_debug_metric(key)
+        or key
+        in {
+            "pred_acc",
+            "logit_margin",
+            "wrong_logit_margin",
+            "correct_logit_margin",
+            "transport_mass_true",
+            "transport_mass_best_negative",
+            "transport_mass_gap",
+        }
+    ]
+    with open(path, "w") as handle:
+        handle.write("DUSTBIN OT TOKEN-REJECTION DEBUG REPORT\n")
+        handle.write("=" * 64 + "\n")
+        handle.write(f"Model: {args.model}\n")
+        handle.write(f"Dataset: {args.dataset_name}\n")
+        handle.write(f"Training Samples: {getattr(args, 'training_samples', None) or 'All'}\n")
+        handle.write(f"Shot: {args.shot_num}\n")
+        handle.write(f"Training Seed: {getattr(args, 'seed', 'unknown')}\n")
+        handle.write(f"Final Test Seed: {getattr(args, 'final_test_seed', 'unknown')}\n")
+        handle.write(
+            "Test Protocol: "
+            f"{getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        handle.write(f"Experiment Tag: {experiment_tag or 'none'}\n")
+        handle.write("Objective: maximize real-real sum P*(T-C) with learned unmatched bin\n")
+        handle.write("Acceptance signal: true class should have higher accepted real mass/evidence\n")
+        handle.write("-" * 64 + "\n")
+        handle.write(f"Active Dustbin OT Accuracy: {float(test_diag.get('pred_acc', accuracy)):.6f}\n")
         handle.write(f"Verdict: {verdict}\n")
         handle.write(f"Reason: {verdict_reason}\n")
         handle.write("-" * 64 + "\n")
@@ -6264,6 +6387,64 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     if torch.is_tensor(transported_mass) and transported_mass.dim() == 2 and transported_mass.shape[0] == targets.shape[0]:
         metrics.update(summarize_budget_tensor(transported_mass, targets, prefix="transport_mass"))
 
+    dustbin_real_mass = scores.get("dustbin_real_mass")
+    if (
+        torch.is_tensor(dustbin_real_mass)
+        and dustbin_real_mass.dim() == 2
+        and dustbin_real_mass.shape[0] == targets.shape[0]
+    ):
+        metrics.update(summarize_budget_tensor(dustbin_real_mass, targets, prefix="dustbin_real_mass"))
+
+    dustbin_real_mass_fraction = scores.get("dustbin_real_mass_fraction")
+    if (
+        torch.is_tensor(dustbin_real_mass_fraction)
+        and dustbin_real_mass_fraction.dim() == 2
+        and dustbin_real_mass_fraction.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_budget_tensor(
+                dustbin_real_mass_fraction,
+                targets,
+                prefix="dustbin_real_mass_fraction",
+            )
+        )
+
+    dustbin_query_fraction = scores.get("dustbin_query_dustbin_fraction")
+    if (
+        torch.is_tensor(dustbin_query_fraction)
+        and dustbin_query_fraction.dim() == 2
+        and dustbin_query_fraction.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_budget_tensor(
+                dustbin_query_fraction,
+                targets,
+                prefix="dustbin_query_dustbin_fraction",
+            )
+        )
+
+    dustbin_support_fraction = scores.get("dustbin_support_dustbin_fraction")
+    if (
+        torch.is_tensor(dustbin_support_fraction)
+        and dustbin_support_fraction.dim() == 2
+        and dustbin_support_fraction.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_budget_tensor(
+                dustbin_support_fraction,
+                targets,
+                prefix="dustbin_support_dustbin_fraction",
+            )
+        )
+
+    dustbin_score = scores.get("dustbin_score")
+    if (
+        torch.is_tensor(dustbin_score)
+        and dustbin_score.dim() == 2
+        and dustbin_score.shape[0] == targets.shape[0]
+    ):
+        metrics.update(summarize_class_score_tensor(dustbin_score, targets, prefix="dustbin_score"))
+
     weighted_unmatched_mass = scores.get("weighted_unmatched_mass")
     if (
         torch.is_tensor(weighted_unmatched_mass)
@@ -6799,6 +6980,17 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "elastic_ot/column_capacity_violation",
         "elastic_ot/objective",
         "elastic_ot/score_identity_error",
+        "dustbin_ot/enabled",
+        "dustbin_ot/real_mass_fraction",
+        "dustbin_ot/query_dustbin_fraction",
+        "dustbin_ot/support_dustbin_fraction",
+        "dustbin_ot/dustbin_score",
+        "dustbin_ot/accepted_edge_score_mean",
+        "dustbin_ot/rejected_query_score_mean",
+        "dustbin_ot/row_residual",
+        "dustbin_ot/column_residual",
+        "dustbin_ot/mass_residual",
+        "dustbin_ot/score_identity_error",
         "rc_cost/enabled",
         "rc_cost/penalty_weight",
         "rc_cost/temperature",
@@ -7338,6 +7530,18 @@ def format_diagnostic_summary(metrics):
         "transport_mass_true",
         "transport_mass_best_negative",
         "transport_mass_gap",
+        "dustbin_real_mass_true",
+        "dustbin_real_mass_best_negative",
+        "dustbin_real_mass_gap",
+        "dustbin_score_true_score",
+        "dustbin_score_best_negative_score",
+        "dustbin_score_score_gap",
+        "dustbin_query_dustbin_fraction_true",
+        "dustbin_query_dustbin_fraction_best_negative",
+        "dustbin_query_dustbin_fraction_gap",
+        "dustbin_support_dustbin_fraction_true",
+        "dustbin_support_dustbin_fraction_best_negative",
+        "dustbin_support_dustbin_fraction_gap",
         "m2_mean_true_mass",
         "m2_mean_best_wrong_mass",
         "m2_mean_true_cost",
@@ -8106,6 +8310,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         )
         or uot_energy_debug_enabled(args)
         or elastic_ot_debug_enabled(args)
+        or dustbin_ot_debug_enabled(args)
     )
     ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
@@ -8792,6 +8997,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     )
     if elastic_ot_debug_path is not None:
         print(f"Elastic OT debug report saved to {elastic_ot_debug_path}")
+    dustbin_ot_debug_path = write_dustbin_ot_debug_report(
+        args,
+        test_diag,
+        accuracy=acc_micro,
+        current_test_name=current_test_name,
+    )
+    if dustbin_ot_debug_path is not None:
+        print(f"Dustbin OT debug report saved to {dustbin_ot_debug_path}")
 
     txt_path = os.path.join(
         args.path_results,
@@ -8842,6 +9055,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 if uot_energy_debug_enabled(args) and is_uot_energy_debug_metric(key):
                     continue
                 if elastic_ot_debug_enabled(args) and is_elastic_ot_debug_metric(key):
+                    continue
+                if dustbin_ot_debug_enabled(args) and is_dustbin_ot_debug_metric(key):
                     continue
                 value = test_diag[key]
                 if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):

@@ -352,6 +352,7 @@ class OursM2(JECOTM2):
         ours_final_score_mode: str = "threshold_mass",
         elastic_ot_sigma: float = 1.0,
         enable_elastic_ot_probe: bool = False,
+        dustbin_score_init: float = 0.0,
         enable_ours_final_failure_probe: bool = False,
         ours_probe_common_margin: float = 0.10,
         enable_rival_conditional_cost: bool = False,
@@ -537,19 +538,21 @@ class OursM2(JECOTM2):
             "threshold_mass",
             "uot_energy",
             "elastic_ot",
+            "dustbin_ot",
         }:
             raise ValueError(
                 "ours_final_score_mode must be 'threshold_mass', 'uot_energy', "
-                "or 'elastic_ot'"
+                "'elastic_ot', or 'dustbin_ot'"
             )
         self.elastic_ot_sigma = float(elastic_ot_sigma)
         self.enable_elastic_ot_probe = _bool_config(enable_elastic_ot_probe)
+        self.dustbin_score_init = float(dustbin_score_init)
         if (
-            self.ours_final_score_mode == "elastic_ot"
+            self.ours_final_score_mode in {"elastic_ot", "dustbin_ot"}
             and self.ours_final_marginal_mode != "uniform"
         ):
             raise ValueError(
-                "ours_final_score_mode='elastic_ot' cannot be combined with "
+                f"ours_final_score_mode='{self.ours_final_score_mode}' cannot be combined with "
                 "ours_final_marginal_mode; uniform values are capacities, not target marginals"
             )
         self.enable_ours_final_failure_probe = _bool_config(
@@ -601,7 +604,8 @@ class OursM2(JECOTM2):
         kwargs["ecot_m2_score_mode"] = self.ours_final_score_mode
         kwargs["ecot_m2_elastic_sigma"] = self.elastic_ot_sigma
         kwargs["ecot_m2_elastic_probe"] = self.enable_elastic_ot_probe
-        if self.ours_final_score_mode in {"uot_energy", "elastic_ot"}:
+        kwargs["ecot_m2_dustbin_score_init"] = self.dustbin_score_init
+        if self.ours_final_score_mode in {"uot_energy", "elastic_ot", "dustbin_ot"}:
             kwargs["ecot_m2_ablate_threshold_mass"] = False
             kwargs["ecot_m2_cost_per_mass_score"] = False
         if enable_mspta:
