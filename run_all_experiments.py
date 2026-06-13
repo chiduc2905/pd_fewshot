@@ -1114,6 +1114,7 @@ def _ours_final_base_args(
     transport_mode="unbalanced",
     ablate_threshold_mass="false",
     fixed_mass=None,
+    score_mode="threshold_mass",
 ):
     """Explicit Ours-Final defaults; variant args are appended after passthrough args."""
     fixed_mass = str(rho) if fixed_mass is None else str(fixed_mass)
@@ -1127,7 +1128,7 @@ def _ours_final_base_args(
         "--hrot_ecot_m2_cost_per_mass_score",
         "false",
         "--ours_final_score_mode",
-        "threshold_mass",
+        str(score_mode),
         "--hrot_ecot_rho_bank",
         str(rho),
         "--hrot_ecot_base_rho",
@@ -1767,7 +1768,9 @@ def build_ours_final_failure_probe_variants():
 
 def build_ours_final_objective_score_variants():
     """Compare fixed-budget UOT objectives with adaptive-mass Elastic OT."""
-    base = _ours_final_base_args()
+    threshold_base = _ours_final_base_args(score_mode="threshold_mass")
+    energy_base = _ours_final_base_args(score_mode="uot_energy")
+    elastic_base = _ours_final_base_args(score_mode="elastic_ot")
     probe = [
         "--enable_ours_final_failure_probe",
         "true",
@@ -1779,18 +1782,13 @@ def build_ours_final_objective_score_variants():
             "tag": "ours_final_score_threshold_mass",
             "checkpoint_tag": "score_threshold_mass",
             "label": "Original Ours-Final T*M-C score with uniform UOT marginals",
-            "extra_args": base + probe,
+            "extra_args": threshold_base + probe,
         },
         {
             "tag": "ours_final_score_uot_energy",
             "checkpoint_tag": "score_uot_energy",
             "label": "Ours-Final objective-consistent KL-UOT classification energy",
-            "extra_args": base
-            + probe
-            + [
-                "--ours_final_score_mode",
-                "uot_energy",
-            ],
+            "extra_args": energy_base + probe,
         },
         {
             "tag": "ours_final_score_elastic_ot",
@@ -1799,13 +1797,7 @@ def build_ours_final_objective_score_variants():
                 "Ours-Final Elastic OT: uniform capacities, adaptive matched mass, "
                 "and objective-consistent T*M-C score"
             ),
-            "extra_args": base
-            + [
-                "--ours_final_score_mode",
-                "elastic_ot",
-                "--enable_elastic_ot_probe",
-                "true",
-            ],
+            "extra_args": elastic_base,
         },
     ]
 

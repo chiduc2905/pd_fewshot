@@ -3391,7 +3391,7 @@ class HROTFSL(BaseConv64FewShotModel):
             elastic_b = (
                 elastic_b * rho_bank.view(1, 1, budget_count, 1)
             ).reshape(num_query, num_pairs * budget_count, support_len)
-            if self.ecot_m2_elastic_probe:
+            if self.ecot_m2_elastic_probe and not self.training:
                 _, elastic_probe_cost_out, elastic_probe_mass_out = self._transport_match(
                     cost_bank,
                     rho_bank_flat,

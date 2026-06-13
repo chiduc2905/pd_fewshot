@@ -1193,13 +1193,16 @@ def test_objective_score_runner_isolates_scoring_change():
         "ours_final_score_elastic_ot",
     ]
     assert variants[0]["extra_args"][-2:] == ["--ours_probe_common_margin", "0.10"]
-    assert variants[1]["extra_args"][-2:] == ["--ours_final_score_mode", "uot_energy"]
-    assert variants[2]["extra_args"][-4:] == [
-        "--ours_final_score_mode",
-        "elastic_ot",
-        "--enable_elastic_ot_probe",
-        "true",
-    ]
+    assert variants[0]["extra_args"].count("--ours_final_score_mode") == 1
+    assert variants[1]["extra_args"].count("--ours_final_score_mode") == 1
+    assert variants[2]["extra_args"].count("--ours_final_score_mode") == 1
+    assert variants[1]["extra_args"][
+        variants[1]["extra_args"].index("--ours_final_score_mode") + 1
+    ] == "uot_energy"
+    assert variants[2]["extra_args"][
+        variants[2]["extra_args"].index("--ours_final_score_mode") + 1
+    ] == "elastic_ot"
+    assert "--enable_elastic_ot_probe" not in variants[2]["extra_args"]
     assert "--ours_final_marginal_mode" not in variants[1]["extra_args"]
     assert "--enable_rival_conditional_cost" not in variants[1]["extra_args"]
 
