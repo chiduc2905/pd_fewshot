@@ -1,10 +1,78 @@
+from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
-from main import build_wandb_init_config
+from main import (
+    accumulate_diagnostics,
+    build_wandb_init_config,
+    finalize_diagnostics,
+    is_uot_energy_debug_metric,
+    write_uot_energy_debug_report,
+)
 
 
 def _model_meta():
     return {"architecture": "arch", "metric": "metric"}
+
+
+def test_diagnostic_metrics_use_per_key_denominators():
+    sums = defaultdict(float)
+    accumulate_diagnostics(sums, {"always": 2.0, "probe": 1.0}, weight=4)
+    accumulate_diagnostics(sums, {"always": 4.0}, weight=4)
+
+    result = finalize_diagnostics(sums, total_weight=8)
+
+    assert result["always"] == 3.0
+    assert result["probe"] == 1.0
+
+
+def test_uot_energy_debug_report_is_separate_and_seeded():
+    output_dir = Path(".pytest_tmp") / f"uot_energy_debug_{uuid4().hex}"
+    output_dir.mkdir(parents=True)
+    args = SimpleNamespace(
+        model="ours_final",
+        dataset_name="knee_aug_split",
+        training_samples=60,
+        shot_num=1,
+        seed=43,
+        final_test_seed=42,
+        test_protocol="clean",
+        effective_test_protocol="clean",
+        current_test_name="",
+        experiment_tag="seed43_ours_final_score_uot_energy",
+        path_results=str(output_dir),
+        ours_final_score_mode="uot_energy",
+    )
+    diagnostics = {
+        "pred_acc": 0.82,
+        "ours_probe_utility_pred_acc": 0.80,
+        "uot_energy_pred_acc": 0.82,
+        "uot_energy/marginal_penalty_share": 0.14,
+        "ours_probe/harm_share": 0.98,
+        "transport_audit/common_mass_ratio": 0.75,
+    }
+
+    try:
+        path = write_uot_energy_debug_report(
+            args,
+            diagnostics,
+            accuracy=0.82,
+        )
+
+        assert path is not None
+        assert "seed43" in path
+        text = Path(path).read_text()
+        assert "Verdict: SUPPORTED" in text
+        assert "UOT-Energy Accuracy Delta: +0.020000" in text
+        assert "ours_probe/harm_share: 0.980000" in text
+        assert is_uot_energy_debug_metric("uot_energy/query_kl")
+        assert is_uot_energy_debug_metric("ours_probe/harm_share")
+        assert not is_uot_energy_debug_metric("pred_acc")
+    finally:
+        for file_path in output_dir.iterdir():
+            file_path.unlink()
+        output_dir.rmdir()
 
 
 def test_ours_final_wandb_config_hides_other_model_flags_and_keeps_global_residual():

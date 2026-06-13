@@ -13,6 +13,7 @@ from net.modules.rival_conditional_ground_cost import RivalConditionalGroundCost
 from net.ours import OursM2
 from run_all_experiments import (
     build_ours_final_failure_probe_variants,
+    build_ours_final_objective_score_variants,
     build_ours_final_rival_cost_variants,
 )
 
@@ -1125,6 +1126,77 @@ def test_ours_final_failure_probe_runner_builds_baseline_and_novelty_ablation():
     assert variants[2]["extra_args"][-1] == "true"
 
 
+def test_uot_energy_score_keeps_transport_plan_and_uses_full_classification_energy():
+    torch.manual_seed(5222)
+    baseline = _tiny_ours_final()
+    energy_model = _tiny_ours_final(ours_final_score_mode="uot_energy")
+    energy_model.load_state_dict(baseline.state_dict())
+    baseline.eval()
+    energy_model.eval()
+    query, support = _episode()
+
+    with torch.no_grad():
+        expected = baseline(query, support, return_aux=True)
+        actual = energy_model(query, support, return_aux=True)
+
+    assert torch.equal(actual["transport_plan"], expected["transport_plan"])
+    assert torch.equal(actual["shot_transport_cost"], expected["shot_transport_cost"])
+    assert torch.equal(actual["shot_transported_mass"], expected["shot_transported_mass"])
+    assert torch.allclose(
+        actual["shot_logits"],
+        actual["ecot_uot_energy_shot_score"],
+        atol=1e-6,
+    )
+    assert actual["uot_energy/enabled"].item() == pytest.approx(1.0)
+    assert actual["uot_energy/query_kl"].item() >= 0.0
+    assert actual["uot_energy/support_kl"].item() >= 0.0
+
+
+def test_uot_energy_penalizes_a_wrong_class_that_wins_by_dropping_mass():
+    target = torch.tensor([[0.4, 0.4]])
+    true_plan = torch.tensor([[[0.4, 0.0], [0.0, 0.4]]])
+    wrong_plan = torch.tensor([[[0.1, 0.0], [0.0, 0.1]]])
+    true_cost = torch.full((1, 2, 2), 0.35)
+    wrong_cost = torch.zeros(1, 2, 2)
+
+    true_threshold_score = 0.1 * true_plan.sum() - (true_plan * true_cost).sum()
+    wrong_threshold_score = 0.1 * wrong_plan.sum() - (wrong_plan * wrong_cost).sum()
+    assert wrong_threshold_score > true_threshold_score
+
+    from net.modules.unbalanced_ot import compute_unbalanced_classification_energy
+
+    true_energy = compute_unbalanced_classification_energy(
+        true_plan,
+        true_cost,
+        target,
+        target,
+        tau_q=0.5,
+        tau_c=0.5,
+    )
+    wrong_energy = compute_unbalanced_classification_energy(
+        wrong_plan,
+        wrong_cost,
+        target,
+        target,
+        tau_q=0.5,
+        tau_c=0.5,
+    )
+    assert true_energy < wrong_energy
+
+
+def test_objective_score_runner_isolates_scoring_change():
+    variants = build_ours_final_objective_score_variants()
+
+    assert [variant["tag"] for variant in variants] == [
+        "ours_final_score_threshold_mass",
+        "ours_final_score_uot_energy",
+    ]
+    assert variants[0]["extra_args"][-2:] == ["--ours_probe_common_margin", "0.10"]
+    assert variants[1]["extra_args"][-2:] == ["--ours_final_score_mode", "uot_energy"]
+    assert "--ours_final_marginal_mode" not in variants[1]["extra_args"]
+    assert "--enable_rival_conditional_cost" not in variants[1]["extra_args"]
+
+
 def test_rival_conditional_cost_zero_weight_is_exact_identity():
     module = RivalConditionalGroundCost(
         penalty_weight=0.0,
@@ -1268,6 +1340,41 @@ def test_rival_conditional_cost_model_changes_only_ground_cost_and_backpropagate
     assert sum(gradient.abs().sum() for gradient in gradients) > 0.0
 
 
+def test_rival_conditional_cost_noise_test_scope_preserves_clean_training_and_eval():
+    torch.manual_seed(5224)
+    baseline = _tiny_ours_final()
+    noise_defense = _tiny_ours_final(
+        enable_rival_conditional_cost=True,
+        rc_cost_weight=0.5,
+        rc_cost_temperature=0.25,
+        rc_cost_scope="noise_test",
+    )
+    noise_defense.load_state_dict(baseline.state_dict())
+    query, support = _episode()
+
+    baseline.train()
+    noise_defense.train()
+    expected_train = baseline(query, support, return_aux=True)
+    actual_train = noise_defense(query, support, return_aux=True)
+    assert torch.equal(actual_train["logits"], expected_train["logits"])
+    assert "rc_cost/enabled" not in actual_train
+
+    baseline.eval()
+    noise_defense.eval()
+    noise_defense.set_rival_conditional_cost_test_context(is_noise=False)
+    with torch.no_grad():
+        expected_clean = baseline(query, support, return_aux=True)
+        actual_clean = noise_defense(query, support, return_aux=True)
+    assert torch.equal(actual_clean["logits"], expected_clean["logits"])
+    assert "rc_cost/enabled" not in actual_clean
+
+    noise_defense.set_rival_conditional_cost_test_context(is_noise=True)
+    with torch.no_grad():
+        actual_noise = noise_defense(query, support, return_aux=True)
+    assert not torch.equal(actual_noise["logits"], expected_clean["logits"])
+    assert actual_noise["rc_cost/enabled"].item() == pytest.approx(1.0)
+
+
 def test_rival_conditional_cost_runner_isolates_one_architecture_change():
     variants = build_ours_final_rival_cost_variants()
 
@@ -1296,6 +1403,7 @@ def test_rival_conditional_cost_factory_flags_are_ours_final_only():
         rc_cost_weight=0.4,
         rc_cost_temperature=0.3,
         rc_cost_mode="edge_advantage",
+        rc_cost_scope="noise_test",
     )
     ours_final = build_model_from_args(
         SimpleNamespace(
@@ -1309,6 +1417,7 @@ def test_rival_conditional_cost_factory_flags_are_ours_final_only():
     assert ours_final.rc_cost_weight == pytest.approx(0.4)
     assert ours_final.rc_cost_temperature == pytest.approx(0.3)
     assert ours_final.rc_cost_mode == "edge_advantage"
+    assert ours_final.rc_cost_scope == "noise_test"
     assert hasattr(ours_final, "rival_conditional_ground_cost")
 
     with pytest.raises(

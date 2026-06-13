@@ -33,6 +33,7 @@ from net.modules.partial_ot import (
 from net.modules.unbalanced_ot import (
     compute_transport_cost,
     compute_transported_mass,
+    generalized_kl_divergence,
     resolve_ot_backend,
     sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
@@ -490,6 +491,7 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_m2_per_shot_threshold: bool = False,
         ecot_m2_pst_hidden: int = 32,
         ecot_m2_ablate_threshold_mass: bool = True,
+        ecot_m2_score_mode: str = "threshold_mass",
         ecot_m2_cost_per_mass_score: bool = False,
         ecot_m2_cost_per_mass_alpha: float = 1.0,
         ecot_m2_cost_per_mass_detach_mass: bool = True,
@@ -966,8 +968,22 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_m2_per_shot_threshold = bool(ecot_m2_per_shot_threshold) and variant == "J_ECOT_M2"
         self.ecot_m2_pst_hidden = int(ecot_m2_pst_hidden)
         self.ecot_m2_ablate_threshold_mass = bool(ecot_m2_ablate_threshold_mass) and variant == "J_ECOT_M2"
+        score_mode = str(ecot_m2_score_mode).strip().lower().replace("-", "_")
+        if score_mode not in {"threshold_mass", "uot_energy"}:
+            raise ValueError("ecot_m2_score_mode must be 'threshold_mass' or 'uot_energy'")
+        self.ecot_m2_score_mode = score_mode if variant == "J_ECOT_M2" else "threshold_mass"
         self.ecot_m2_cost_per_mass_score = bool(ecot_m2_cost_per_mass_score) and variant == "J_ECOT_M2"
         self.ecot_m2_cost_per_mass_alpha = float(ecot_m2_cost_per_mass_alpha)
+        if self.ecot_m2_score_mode == "uot_energy":
+            if not self.uses_unbalanced_transport or self.uses_partial_transport:
+                raise ValueError(
+                    "ecot_m2_score_mode='uot_energy' requires KL-relaxed unbalanced transport"
+                )
+            if self.ecot_m2_ablate_threshold_mass or self.ecot_m2_cost_per_mass_score:
+                raise ValueError(
+                    "ecot_m2_score_mode='uot_energy' cannot be combined with cost-only "
+                    "or cost-per-mass scoring"
+                )
         if self.ecot_m2_ablate_threshold_mass and self.ecot_m2_cost_per_mass_score:
             raise ValueError(
                 "ecot_m2_ablate_threshold_mass and ecot_m2_cost_per_mass_score are mutually exclusive on J_ECOT_M2"
@@ -3361,6 +3377,50 @@ class HROTFSL(BaseConv64FewShotModel):
         shot_cost_bank = cost_out.reshape(num_query, way_num, shot_num, budget_count)
         shot_mass_bank = mass_out.reshape(num_query, way_num, shot_num, budget_count)
         D_bank = cost_bank.view(num_query, way_num, shot_num, budget_count, query_len, support_len)
+        if "a" in transport_kwargs:
+            target_query_bank = transport_kwargs["a"].reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                query_len,
+            )
+        else:
+            target_query_bank = flat_cost.new_full(
+                (num_query, way_num, shot_num, budget_count, query_len),
+                1.0 / float(query_len),
+            )
+            target_query_bank = target_query_bank * rho_bank.view(1, 1, 1, budget_count, 1)
+        if "b" in transport_kwargs:
+            target_support_bank = transport_kwargs["b"].reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                support_len,
+            )
+        else:
+            target_support_bank = flat_cost.new_full(
+                (num_query, way_num, shot_num, budget_count, support_len),
+                1.0 / float(support_len),
+            )
+            target_support_bank = target_support_bank * rho_bank.view(1, 1, 1, budget_count, 1)
+
+        query_marginal_kl_bank = generalized_kl_divergence(
+            plan_bank.sum(dim=-1),
+            target_query_bank,
+            eps=self.eps,
+        )
+        support_marginal_kl_bank = generalized_kl_divergence(
+            plan_bank.sum(dim=-2),
+            target_support_bank,
+            eps=self.eps,
+        )
+        uot_classification_energy_bank = (
+            shot_cost_bank
+            + float(self.tau_q) * query_marginal_kl_bank
+            + float(self.tau_c) * support_marginal_kl_bank
+        )
         evidence_pair_bank: torch.Tensor | None = None
         evidence_mass_bank: torch.Tensor | None = None
         evidence_cost_bank: torch.Tensor | None = None
@@ -3501,7 +3561,13 @@ class HROTFSL(BaseConv64FewShotModel):
         use_evidence_score = evidence_mass_bank is not None
 
         def ecot_budget_score(active_threshold: torch.Tensor) -> torch.Tensor:
-            if self.ecot_m2_cost_per_mass_score:
+            if self.ecot_m2_score_mode == "uot_energy":
+                if use_evidence_score:
+                    raise ValueError(
+                        "ecot_m2_score_mode='uot_energy' cannot be combined with evidence-score replacement"
+                    )
+                score_terms = -uot_classification_energy_bank
+            elif self.ecot_m2_cost_per_mass_score:
                 replace_with_evidence = use_evidence_score and evidence_score_mode == "replace"
                 active_mass_bank = evidence_mass_bank if replace_with_evidence else shot_mass_bank
                 active_cost_bank = evidence_cost_bank if replace_with_evidence else shot_cost_bank
@@ -3679,6 +3745,19 @@ class HROTFSL(BaseConv64FewShotModel):
             )
             identity_loss = (shot_logits - base_score).pow(2).mean()
 
+        uot_energy_shot_score = (
+            -self.score_scale * uot_classification_energy_bank[..., base_idx]
+        )
+        if uot_energy_shot_score.shape[-1] == 1:
+            uot_energy_logits = uot_energy_shot_score.squeeze(-1)
+        else:
+            uot_energy_logits, _, _, _, _ = self._pool_ecot_shot_scores(
+                uot_energy_shot_score,
+                shot_cost_diag,
+                shot_mass_diag,
+                controller_outputs.get("raw_tau_shot"),
+            )
+
         plan_diag = (pi_view.unsqueeze(-1).unsqueeze(-1) * plan_bank).sum(dim=3)
         shot_rho = base_rho.expand(num_query, way_num, shot_num).clone()
         policy_entropy = -(pi_budget.clamp_min(self.eps) * pi_budget.clamp_min(self.eps).log()).sum()
@@ -3711,11 +3790,30 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_budget_scores": budget_scores,
             "ecot_shot_transport_cost_bank": shot_cost_bank,
             "ecot_shot_transported_mass_bank": shot_mass_bank,
+            "ecot_uot_classification_energy_bank": uot_classification_energy_bank,
+            "ecot_uot_query_kl_bank": query_marginal_kl_bank,
+            "ecot_uot_support_kl_bank": support_marginal_kl_bank,
+            "ecot_uot_energy_shot_score": uot_energy_shot_score,
+            "ecot_uot_energy_logits": uot_energy_logits,
             "ecot_diagnostics": diagnostics,
             "ecot_identity_loss": identity_loss,
             "ecot_policy_entropy": policy_entropy,
             "ecot_policy_entropy_loss": -self.ecot_policy_entropy_reg * policy_entropy,
             "ecot_aux_loss": ecot_aux_loss,
+            "uot_energy/enabled": flat_cost.new_tensor(
+                float(self.ecot_m2_score_mode == "uot_energy")
+            ),
+            "uot_energy/query_kl": query_marginal_kl_bank.mean().detach(),
+            "uot_energy/support_kl": support_marginal_kl_bank.mean().detach(),
+            "uot_energy/transport_cost": shot_cost_bank.mean().detach(),
+            "uot_energy/classification_energy": uot_classification_energy_bank.mean().detach(),
+            "uot_energy/marginal_penalty_share": (
+                (
+                    float(self.tau_q) * query_marginal_kl_bank
+                    + float(self.tau_c) * support_marginal_kl_bank
+                ).mean()
+                / uot_classification_energy_bank.abs().mean().clamp_min(self.eps)
+            ).detach(),
         }
         if self.ecot_m2_mass_score_mode == "shot_consensus":
             payload.update(
@@ -5439,6 +5537,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_class_mix_score",
             "ecot_shot_transport_cost_bank",
             "ecot_shot_transported_mass_bank",
+            "ecot_uot_classification_energy_bank",
+            "ecot_uot_query_kl_bank",
+            "ecot_uot_support_kl_bank",
+            "ecot_uot_energy_shot_score",
+            "ecot_uot_energy_logits",
             "ecot_m2_mass_for_score_bank",
             "ecot_m2_mass_consensus_bank",
             "evidence_score_mass_bank",
@@ -5475,6 +5578,12 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_m2_consensus_mass_alpha",
             "ecot_m2_mass_reward_beta_effective",
             "mean_aqm_a_entropy",
+            "uot_energy/enabled",
+            "uot_energy/query_kl",
+            "uot_energy/support_kl",
+            "uot_energy/transport_cost",
+            "uot_energy/classification_energy",
+            "uot_energy/marginal_penalty_share",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()

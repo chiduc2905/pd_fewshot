@@ -566,6 +566,10 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "ours_final_score_mode",
+        frozenset({"ours_final_score_mode"}),
+    ),
+    (
         "enable_ours_final_failure_probe",
         frozenset(
             {
@@ -582,6 +586,7 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "rc_cost_weight",
                 "rc_cost_temperature",
                 "rc_cost_mode",
+                "rc_cost_scope",
             }
         ),
     ),
@@ -801,6 +806,8 @@ def _wandb_flag_enabled(cfg, key):
 def _wandb_optional_group_enabled_for_ours_final(cfg, gate_key):
     if gate_key == "ours_final_marginal_mode":
         return str(cfg.get(gate_key, "uniform")).strip().lower() == "score_aligned"
+    if gate_key == "ours_final_score_mode":
+        return str(cfg.get(gate_key, "threshold_mass")).strip().lower() != "threshold_mass"
     if gate_key == "enable_verified_uot_score":
         model_name = str(cfg.get("model", "") or "").strip().lower()
         if model_name == "ours_final_verified_uot":
@@ -2626,6 +2633,16 @@ def get_args():
     )
     parser.add_argument("--score_marginal_confidence_power", type=float, default=1.0)
     parser.add_argument(
+        "--ours_final_score_mode",
+        type=str,
+        default="threshold_mass",
+        choices=["threshold_mass", "uot_energy"],
+        help=(
+            "Ours-Final only: threshold_mass preserves T*M-C; uot_energy scores "
+            "the solved plan by transport cost plus both KL marginal penalties."
+        ),
+    )
+    parser.add_argument(
         "--enable_ours_final_failure_probe",
         nargs="?",
         const="true",
@@ -2655,6 +2672,17 @@ def get_args():
         type=str,
         default="class_nll",
         choices=["class_nll", "edge_advantage"],
+    )
+    parser.add_argument(
+        "--rc_cost_scope",
+        type=str,
+        default="always",
+        choices=["always", "eval_only", "noise_test"],
+        help=(
+            "Ours-Final RC-cost activation scope. noise_test bypasses RC cost during "
+            "training, validation, and clean testing, and activates it only for "
+            "--test_protocol noise."
+        ),
     )
     parser.add_argument(
         "--enable_rival_aware_evidence_uot",
@@ -5051,12 +5079,14 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "score_marginal_mix",
             "score_marginal_adaptive_mix",
             "score_marginal_confidence_power",
+            "ours_final_score_mode",
             "enable_ours_final_failure_probe",
             "ours_probe_common_margin",
             "enable_rival_conditional_cost",
             "rc_cost_weight",
             "rc_cost_temperature",
             "rc_cost_mode",
+            "rc_cost_scope",
             "enable_rival_aware_evidence_uot",
             "rae_uot_tau",
             "rae_uot_marginal_mix",
@@ -5449,6 +5479,138 @@ def get_test_protocol_suffix(args):
     if protocol in {"auto", "clean", ""}:
         return ""
     return f"_{sanitize_result_tag(protocol)}"
+
+
+_UOT_ENERGY_DEBUG_PREFIXES = (
+    "ours_probe",
+    "uot_energy",
+    "transport_audit",
+)
+
+
+def is_uot_energy_debug_metric(key: str) -> bool:
+    return str(key).startswith(_UOT_ENERGY_DEBUG_PREFIXES)
+
+
+def uot_energy_debug_enabled(args) -> bool:
+    return (
+        str(getattr(args, "model", "")).strip().lower() == "ours_final"
+        and str(getattr(args, "ours_final_score_mode", "threshold_mass"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        == "uot_energy"
+    )
+
+
+def write_uot_energy_debug_report(
+    args,
+    test_diag,
+    *,
+    accuracy,
+    current_test_name=None,
+):
+    if not uot_energy_debug_enabled(args):
+        return None
+
+    samples_stem = (
+        f"{args.training_samples}samples"
+        if getattr(args, "training_samples", None)
+        else "allsamples"
+    )
+    experiment_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    tag_suffix = f"_{sanitize_result_tag(experiment_tag)}" if experiment_tag else ""
+    protocol_suffix = get_test_protocol_suffix(args)
+    path = os.path.join(
+        args.path_results,
+        (
+            f"debug_uot_energy_{args.dataset_name}_{args.model}_{samples_stem}_"
+            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt"
+        ),
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    active_acc = float(test_diag.get("pred_acc", accuracy))
+    energy_acc = test_diag.get("uot_energy_pred_acc")
+    threshold_acc = test_diag.get("ours_probe_utility_pred_acc")
+    delta = None
+    if energy_acc is not None and threshold_acc is not None:
+        delta = float(energy_acc) - float(threshold_acc)
+    if delta is None:
+        verdict = "INCOMPLETE"
+        verdict_reason = "Missing counterfactual accuracy; ensure the failure probe is enabled."
+    elif delta > 1e-6:
+        verdict = "SUPPORTED"
+        verdict_reason = "UOT-energy corrects more queries than T*M-C on the same transport plan."
+    elif delta < -1e-6:
+        verdict = "REGRESSION"
+        verdict_reason = "UOT-energy corrects fewer queries than T*M-C on the same transport plan."
+    else:
+        verdict = "INCONCLUSIVE"
+        verdict_reason = "UOT-energy and T*M-C have identical query accuracy on this test."
+
+    debug_keys = [
+        key
+        for key in sorted(test_diag)
+        if is_uot_energy_debug_metric(key)
+        or key
+        in {
+            "pred_acc",
+            "logit_margin",
+            "wrong_logit_margin",
+            "correct_logit_margin",
+            "distance_gap",
+            "wrong_distance_gap",
+            "correct_distance_gap",
+            "transport_mass_true",
+            "transport_mass_best_negative",
+            "transport_mass_gap",
+        }
+    ]
+    with open(path, "w") as handle:
+        handle.write("UOT OBJECTIVE-ENERGY DEBUG REPORT\n")
+        handle.write("=" * 64 + "\n")
+        handle.write(f"Model: {args.model}\n")
+        handle.write(f"Dataset: {args.dataset_name}\n")
+        handle.write(f"Training Samples: {getattr(args, 'training_samples', None) or 'All'}\n")
+        handle.write(f"Shot: {args.shot_num}\n")
+        handle.write(f"Training Seed: {getattr(args, 'seed', 'unknown')}\n")
+        handle.write(f"Final Test Seed: {getattr(args, 'final_test_seed', 'unknown')}\n")
+        handle.write(
+            "Test Protocol: "
+            f"{getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        handle.write(f"Experiment Tag: {experiment_tag or 'none'}\n")
+        handle.write("Active Score: negative KL-UOT classification energy\n")
+        handle.write("Marginals: original uniform marginals\n")
+        handle.write("Transport Plan: unchanged by the score replacement\n")
+        handle.write("\nHYPOTHESIS TEST\n")
+        handle.write("-" * 64 + "\n")
+        handle.write(f"Active Query Accuracy: {active_acc:.6f}\n")
+        if threshold_acc is not None:
+            handle.write(
+                "Counterfactual T*M-C Accuracy: "
+                f"{float(threshold_acc):.6f}\n"
+            )
+        if energy_acc is not None:
+            handle.write(
+                "Counterfactual UOT-Energy Accuracy: "
+                f"{float(energy_acc):.6f}\n"
+            )
+        if delta is not None:
+            handle.write(f"UOT-Energy Accuracy Delta: {delta:+.6f}\n")
+        handle.write(f"Verdict: {verdict}\n")
+        handle.write(f"Reason: {verdict_reason}\n")
+        handle.write("\nDEBUG METRICS\n")
+        handle.write("-" * 64 + "\n")
+        for key in debug_keys:
+            value = test_diag[key]
+            if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+                handle.write(f"{key}: {float(value):.6f}\n")
+
+    return path
 
 
 def build_robust_test_dataset(args, clean_X, clean_y, clean_file_paths, robust_pools, return_indices=False):
@@ -5866,6 +6028,9 @@ def summarize_class_score_tensor(scores, targets, prefix):
             f"{prefix}_true_score": _scalar_metric(true_score),
             f"{prefix}_best_negative_score": _scalar_metric(best_negative_score),
             f"{prefix}_score_gap": _scalar_metric(score_gap),
+            f"{prefix}_pred_acc": _scalar_metric(
+                scores.argmax(dim=1).eq(targets).to(scores.dtype)
+            ),
         }
 
 
@@ -5955,6 +6120,20 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     global_scores = scores.get("global_scores")
     if torch.is_tensor(global_scores) and global_scores.dim() == 2 and global_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(global_scores, targets, prefix="global"))
+
+    uot_energy_logits = scores.get("ecot_uot_energy_logits")
+    if (
+        torch.is_tensor(uot_energy_logits)
+        and uot_energy_logits.dim() == 2
+        and uot_energy_logits.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_score_tensor(
+                uot_energy_logits,
+                targets,
+                prefix="uot_energy",
+            )
+        )
 
     component_score_keys = {
         "raw_logits": "raw",
@@ -6424,6 +6603,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "ours_probe/full_mass_winner_agreement",
         "ours_probe/full_cost_winner_agreement",
         "ours_probe/mass_cost_winner_agreement",
+        "uot_energy/enabled",
+        "uot_energy/query_kl",
+        "uot_energy/support_kl",
+        "uot_energy/transport_cost",
+        "uot_energy/classification_energy",
+        "uot_energy/marginal_penalty_share",
         "rc_cost/enabled",
         "rc_cost/penalty_weight",
         "rc_cost/temperature",
@@ -6516,6 +6701,9 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     return metrics
 
 
+_DIAGNOSTIC_WEIGHT_PREFIX = "__diagnostic_weight__/"
+
+
 def accumulate_diagnostics(metric_sums, metrics, weight):
     if weight <= 0:
         return
@@ -6523,12 +6711,23 @@ def accumulate_diagnostics(metric_sums, metrics, weight):
         if value is None:
             continue
         metric_sums[key] += float(value) * float(weight)
+        metric_sums[f"{_DIAGNOSTIC_WEIGHT_PREFIX}{key}"] += float(weight)
 
 
 def finalize_diagnostics(metric_sums, total_weight):
     if total_weight <= 0:
         return {}
-    return {key: value / float(total_weight) for key, value in metric_sums.items()}
+    finalized = {}
+    for key, value in metric_sums.items():
+        if key.startswith(_DIAGNOSTIC_WEIGHT_PREFIX):
+            continue
+        metric_weight = metric_sums.get(
+            f"{_DIAGNOSTIC_WEIGHT_PREFIX}{key}",
+            total_weight,
+        )
+        if metric_weight > 0:
+            finalized[key] = value / float(metric_weight)
+    return finalized
 
 
 def _unwrap_data_parallel(net):
@@ -7171,6 +7370,13 @@ def maybe_set_model_training_progress(net, progress):
         setter(progress)
 
 
+def set_rival_cost_test_context(net, *, active: bool):
+    module = net.module if hasattr(net, "module") else net
+    setter = getattr(module, "set_rival_conditional_cost_test_context", None)
+    if setter is not None:
+        setter(is_noise=active)
+
+
 def train_loop(net, train_X, train_y, selection_X, selection_y, args):
     device = torch.device(args.device)
     relation_loss_fn = RelationLoss().to(device)
@@ -7485,6 +7691,7 @@ def evaluate(net, loader, args, phase="val", m2_aux_out: dict | None = None):
     device = torch.device(args.device)
     relation_loss_fn = RelationLoss().to(device)
     contrastive_loss_fn = ContrastiveLoss().to(device)
+    set_rival_cost_test_context(net, active=False)
     net.eval()
     correct, total = 0, 0
     total_loss = 0.0
@@ -7647,6 +7854,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     print(f"{num_episodes} episodes x {args.way_num} classes x {args.query_num_test} query")
     print("=" * 60)
 
+    rc_noise_test_active = (
+        str(getattr(args, "effective_test_protocol", getattr(args, "test_protocol", "clean"))).lower()
+        == "noise"
+    )
+    set_rival_cost_test_context(net, active=rc_noise_test_active)
     net.eval()
     save_aux_artifacts = save_auxiliary_result_artifacts(args)
     all_preds, all_targets = [], []
@@ -7698,6 +7910,11 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             getattr(args, "enable_ours_final_failure_probe", "false"),
             default=False,
         )
+        or _bool_flag(
+            getattr(args, "enable_rival_conditional_cost", "false"),
+            default=False,
+        )
+        or uot_energy_debug_enabled(args)
     )
     ours_ablation_name = str(getattr(args, "ours_ablation", "full")).strip().lower().replace("-", "_")
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
@@ -8368,6 +8585,15 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             except RuntimeError as exc:
                 print(f"Skipping t-SNE plot: {exc}")
 
+    uot_energy_debug_path = write_uot_energy_debug_report(
+        args,
+        test_diag,
+        accuracy=acc_micro,
+        current_test_name=current_test_name,
+    )
+    if uot_energy_debug_path is not None:
+        print(f"UOT-energy debug report saved to {uot_energy_debug_path}")
+
     txt_path = os.path.join(
         args.path_results,
         f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt",
@@ -8384,6 +8610,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             handle.write(f"Test Split: {current_test_name}\n")
         if getattr(args, "noise_test_root", None):
             handle.write(f"Noise Test Root: {args.noise_test_root}\n")
+        if _bool_flag(getattr(args, "enable_rival_conditional_cost", "false"), default=False):
+            handle.write(
+                "RC Cost: "
+                f"scope={getattr(args, 'rc_cost_scope', 'always')}, "
+                f"mode={getattr(args, 'rc_cost_mode', 'class_nll')}, "
+                f"weight={getattr(args, 'rc_cost_weight', 0.50)}, "
+                f"temperature={getattr(args, 'rc_cost_temperature', 0.25)}\n"
+            )
         handle.write(f"Model Selection Split: {get_model_selection_split(args)}\n")
         handle.write(
             f"Merged Val Into Train: {_bool_flag(getattr(args, 'merge_val_into_train', 'false'), default=False)}\n"
@@ -8406,6 +8640,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             handle.write("-" * 40 + "\n")
             handle.write("Test Diagnostics\n")
             for key in sorted(test_diag):
+                if uot_energy_debug_enabled(args) and is_uot_energy_debug_metric(key):
+                    continue
                 value = test_diag[key]
                 if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
                     handle.write(f"{key}: {float(value):.6f}\n")

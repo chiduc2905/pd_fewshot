@@ -374,6 +374,7 @@ def get_args():
             "global_residual",
             "score_marginal",
             "failure_probe",
+            "objective_score",
             "rival_cost",
             "hubness_uot",
         ],
@@ -393,6 +394,7 @@ def get_args():
             "global_residual=global-only, global residual weight grid, and w=0.1 OT-family/mass controls; "
             "score_marginal=original uniform baseline plus Ours-Final score-aligned marginal sweep; "
             "failure_probe=uniform diagnostic baseline versus fixed/adaptive utility-contrastive marginals; "
+            "objective_score=original T*M-C versus objective-consistent KL-UOT energy; "
             "rival_cost=original Ours-Final versus rival-conditional ground cost only; "
             "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only."
         ),
@@ -416,7 +418,8 @@ def get_args():
             "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
             "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
             "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
-            "probe_uniform, probe_fixed, probe_adaptive, rc_cost_baseline, rc_cost, rc_edge, "
+            "probe_uniform, probe_fixed, probe_adaptive, score_threshold, score_uot_energy, "
+            "rc_cost_baseline, rc_cost, rc_edge, "
             "hcuot, hcuot_cost_only, hcuot_marginal_only. "
             "Default all keeps the suite's normal variants."
         ),
@@ -1122,6 +1125,8 @@ def _ours_final_base_args(
         str(ablate_threshold_mass),
         "--hrot_ecot_m2_cost_per_mass_score",
         "false",
+        "--ours_final_score_mode",
+        "threshold_mass",
         "--hrot_ecot_rho_bank",
         str(rho),
         "--hrot_ecot_base_rho",
@@ -1755,6 +1760,36 @@ def build_ours_final_failure_probe_variants():
             + probe
             + score_aligned
             + ["--score_marginal_adaptive_mix", "true"],
+        },
+    ]
+
+
+def build_ours_final_objective_score_variants():
+    """Compare the original score with the objective-consistent UOT energy."""
+    base = _ours_final_base_args()
+    probe = [
+        "--enable_ours_final_failure_probe",
+        "true",
+        "--ours_probe_common_margin",
+        "0.10",
+    ]
+    return [
+        {
+            "tag": "ours_final_score_threshold_mass",
+            "checkpoint_tag": "score_threshold_mass",
+            "label": "Original Ours-Final T*M-C score with uniform UOT marginals",
+            "extra_args": base + probe,
+        },
+        {
+            "tag": "ours_final_score_uot_energy",
+            "checkpoint_tag": "score_uot_energy",
+            "label": "Ours-Final objective-consistent KL-UOT classification energy",
+            "extra_args": base
+            + probe
+            + [
+                "--ours_final_score_mode",
+                "uot_energy",
+            ],
         },
     ]
 
@@ -3213,6 +3248,13 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_probe_uniform": "ours_final_probe_uniform",
         "ours_final_probe_utility_fixed": "ours_final_probe_utility_fixed",
         "ours_final_probe_utility_adaptive": "ours_final_probe_utility_adaptive",
+        "score_threshold": "ours_final_score_threshold_mass",
+        "threshold_mass": "ours_final_score_threshold_mass",
+        "ours_final_score_threshold_mass": "ours_final_score_threshold_mass",
+        "score_uot_energy": "ours_final_score_uot_energy",
+        "uot_energy": "ours_final_score_uot_energy",
+        "objective_score": "ours_final_score_uot_energy",
+        "ours_final_score_uot_energy": "ours_final_score_uot_energy",
         "rc_cost_baseline": "ours_final_rc_cost_baseline",
         "rival_cost_baseline": "ours_final_rc_cost_baseline",
         "ours_final_rc_cost_baseline": "ours_final_rc_cost_baseline",
@@ -3269,7 +3311,8 @@ def parse_ours_final_variant_filter(variants_str):
                 "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
                 "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
                 "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
-                "probe_adaptive, rc_cost_baseline, rc_cost, rc_edge, hcuot, hcuot_cost_only, "
+                "probe_adaptive, score_threshold, score_uot_energy, "
+                "rc_cost_baseline, rc_cost, rc_edge, hcuot, hcuot_cost_only, "
                 "hcuot_marginal_only, or exact tags."
             )
         if tag not in parsed:
@@ -3764,6 +3807,7 @@ def main():
         global_residual_variants = build_ours_final_global_residual_variants()
         score_marginal_variants = build_ours_final_score_marginal_variants()
         failure_probe_variants = build_ours_final_failure_probe_variants()
+        objective_score_variants = build_ours_final_objective_score_variants()
         rival_cost_variants = build_ours_final_rival_cost_variants()
         hubness_uot_variants = build_ours_final_hubness_uot_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
@@ -3791,6 +3835,10 @@ def main():
         )
         failure_probe_variants = filter_ours_final_variants(
             failure_probe_variants,
+            ours_final_variant_filter,
+        )
+        objective_score_variants = filter_ours_final_variants(
+            objective_score_variants,
             ours_final_variant_filter,
         )
         rival_cost_variants = filter_ours_final_variants(
@@ -3823,6 +3871,8 @@ def main():
             ablation_variants = score_marginal_variants
         elif suite_name == "failure_probe":
             ablation_variants = failure_probe_variants
+        elif suite_name == "objective_score":
+            ablation_variants = objective_score_variants
         elif suite_name == "rival_cost":
             ablation_variants = rival_cost_variants
         elif suite_name == "hubness_uot":
@@ -4035,6 +4085,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in failure_probe_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "objective_score":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in objective_score_variants
                 for samples in samples_list
                 for shot in shots
             )

@@ -2901,6 +2901,9 @@ def build_model_from_args(args):
                             "score_marginal_confidence_power": float(
                                 getattr(args, "score_marginal_confidence_power", 1.0)
                             ),
+                            "ours_final_score_mode": str(
+                                getattr(args, "ours_final_score_mode", "threshold_mass")
+                            ),
                             "enable_ours_final_failure_probe": _bool_flag(
                                 getattr(args, "enable_ours_final_failure_probe", "false"),
                                 default=False,
@@ -2924,6 +2927,9 @@ def build_model_from_args(args):
                             ),
                             "rc_cost_mode": str(
                                 getattr(args, "rc_cost_mode", "class_nll")
+                            ),
+                            "rc_cost_scope": str(
+                                getattr(args, "rc_cost_scope", "always")
                             ),
                         }
                         if is_ours_final_model
@@ -3429,6 +3435,11 @@ def build_model_from_args(args):
                 default=False,
             ),
             ecot_m2_pst_hidden=int(getattr(args, "hrot_ecot_m2_pst_hidden", 32)),
+            ecot_m2_score_mode=str(
+                getattr(args, "ours_final_score_mode", "threshold_mass")
+                if is_ours_final_model
+                else getattr(args, "hrot_ecot_m2_score_mode", "threshold_mass")
+            ),
             ecot_m2_ablate_threshold_mass=_bool_flag(
                 (
                     "false"

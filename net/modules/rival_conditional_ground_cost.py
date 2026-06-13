@@ -9,6 +9,7 @@ from torch import nn
 
 
 RIVAL_COST_MODES = frozenset({"class_nll", "edge_advantage"})
+RIVAL_COST_SCOPES = frozenset({"always", "eval_only", "noise_test"})
 
 
 def normalize_rival_cost_mode(value: str | None) -> str:
@@ -25,6 +26,24 @@ def normalize_rival_cost_mode(value: str | None) -> str:
         raise ValueError(
             f"Unsupported rival cost mode: {value}. "
             f"Expected one of {sorted(RIVAL_COST_MODES)}"
+        )
+    return name
+
+
+def normalize_rival_cost_scope(value: str | None) -> str:
+    name = str(value or "always").strip().lower().replace("-", "_")
+    aliases = {
+        "train_and_test": "always",
+        "inference": "eval_only",
+        "test_only": "eval_only",
+        "noise": "noise_test",
+        "noise_only": "noise_test",
+    }
+    name = aliases.get(name, name)
+    if name not in RIVAL_COST_SCOPES:
+        raise ValueError(
+            f"Unsupported rival cost scope: {value}. "
+            f"Expected one of {sorted(RIVAL_COST_SCOPES)}"
         )
     return name
 
@@ -240,6 +259,8 @@ class RivalConditionalGroundCost(nn.Module):
 
 __all__ = [
     "RIVAL_COST_MODES",
+    "RIVAL_COST_SCOPES",
     "RivalConditionalGroundCost",
     "normalize_rival_cost_mode",
+    "normalize_rival_cost_scope",
 ]

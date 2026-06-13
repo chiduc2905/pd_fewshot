@@ -35,6 +35,7 @@ from net.modules.region_structural_uot import RegionStructuralUOTGuidance
 from net.modules.rival_conditional_ground_cost import (
     RivalConditionalGroundCost,
     normalize_rival_cost_mode,
+    normalize_rival_cost_scope,
 )
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
@@ -348,12 +349,14 @@ class OursM2(JECOTM2):
         score_marginal_mix: float = 0.65,
         score_marginal_adaptive_mix: bool = True,
         score_marginal_confidence_power: float = 1.0,
+        ours_final_score_mode: str = "threshold_mass",
         enable_ours_final_failure_probe: bool = False,
         ours_probe_common_margin: float = 0.10,
         enable_rival_conditional_cost: bool = False,
         rc_cost_weight: float = 0.50,
         rc_cost_temperature: float = 0.25,
         rc_cost_mode: str = "class_nll",
+        rc_cost_scope: str = "always",
         enable_evidence_marginals: bool = False,
         evidence_tau: float = 0.1,
         evidence_tau_marginal: float = 1.0,
@@ -525,6 +528,13 @@ class OursM2(JECOTM2):
         self.score_marginal_mix = float(score_marginal_mix)
         self.score_marginal_adaptive_mix = _bool_config(score_marginal_adaptive_mix)
         self.score_marginal_confidence_power = float(score_marginal_confidence_power)
+        self.ours_final_score_mode = (
+            str(ours_final_score_mode).strip().lower().replace("-", "_")
+        )
+        if self.ours_final_score_mode not in {"threshold_mass", "uot_energy"}:
+            raise ValueError(
+                "ours_final_score_mode must be 'threshold_mass' or 'uot_energy'"
+            )
         self.enable_ours_final_failure_probe = _bool_config(
             enable_ours_final_failure_probe
         )
@@ -535,6 +545,8 @@ class OursM2(JECOTM2):
         self.rc_cost_weight = float(rc_cost_weight)
         self.rc_cost_temperature = float(rc_cost_temperature)
         self.rc_cost_mode = normalize_rival_cost_mode(rc_cost_mode)
+        self.rc_cost_scope = normalize_rival_cost_scope(rc_cost_scope)
+        self._rc_cost_noise_test_context = False
         if self.lambda_cost < 0.0:
             raise ValueError("lambda_cost must be non-negative")
         if self.lambda_cost > 0.0 and self.token_g_kind == "none":
@@ -569,6 +581,10 @@ class OursM2(JECOTM2):
             kwargs["ecot_m2_ablate_threshold_mass"] = False
             kwargs["ecot_m2_cost_per_mass_score"] = False
         kwargs = apply_ours_design_defaults(kwargs, self.ours_ablation)
+        kwargs["ecot_m2_score_mode"] = self.ours_final_score_mode
+        if self.ours_final_score_mode == "uot_energy":
+            kwargs["ecot_m2_ablate_threshold_mass"] = False
+            kwargs["ecot_m2_cost_per_mass_score"] = False
         if enable_mspta:
             if self.ours_ablation == "gap":
                 raise ValueError("enable_mspta is not supported with ours_ablation='gap'")
@@ -3256,7 +3272,7 @@ class OursM2(JECOTM2):
         spatial_hw: tuple[int, int] | None = None,
     ) -> dict[str, torch.Tensor]:
         rc_cost_payload: dict[str, torch.Tensor] = {}
-        if self.enable_rival_conditional_cost:
+        if self._rival_conditional_cost_is_active():
             flat_cost, rc_cost_payload = self.rival_conditional_ground_cost(
                 flat_cost,
                 way_num=way_num,
@@ -4217,6 +4233,20 @@ class OursM2(JECOTM2):
             if getattr(self, "enable_structural_augmentation", False) and self._last_struct_diagnostics is not None:
                 outputs.update(self._last_struct_diagnostics)
         return outputs
+
+    def set_rival_conditional_cost_test_context(self, *, is_noise: bool) -> None:
+        self._rc_cost_noise_test_context = bool(is_noise)
+
+    def _rival_conditional_cost_is_active(self) -> bool:
+        if not self.enable_rival_conditional_cost:
+            return False
+        if self.rc_cost_scope == "always":
+            return True
+        if self.training:
+            return False
+        if self.rc_cost_scope == "eval_only":
+            return True
+        return self._rc_cost_noise_test_context
 
     def _export_context_debug(self) -> None:
         from net.modules.spatial_context_enrichment import (
