@@ -180,6 +180,61 @@ def sinkhorn_unbalanced_log(
     return torch.exp(log_plan)
 
 
+def sinkhorn_unbalanced_log_adaptive(
+    cost: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    tau_q: torch.Tensor,
+    tau_c: torch.Tensor,
+    eps: float,
+    max_iter: int = 60,
+    tol: float = 1e-5,
+) -> torch.Tensor:
+    """Log-domain UOT with coordinate-wise marginal relaxation.
+
+    ``tau_q`` and ``tau_c`` weight the generalized KL penalty for each query
+    and support token. Larger values make the corresponding marginal harder to
+    destroy; smaller values let the solver discard unreliable local evidence.
+    """
+    _validate_transport_inputs(cost, a, b, eps)
+    if tau_q.shape != a.shape:
+        raise ValueError(f"tau_q must have shape {tuple(a.shape)}, got {tuple(tau_q.shape)}")
+    if tau_c.shape != b.shape:
+        raise ValueError(f"tau_c must have shape {tuple(b.shape)}, got {tuple(tau_c.shape)}")
+    tau_q = tau_q.to(device=cost.device, dtype=cost.dtype)
+    tau_c = tau_c.to(device=cost.device, dtype=cost.dtype)
+    if torch.any(tau_q <= 0.0) or torch.any(tau_c <= 0.0):
+        raise ValueError("adaptive tau_q and tau_c must be positive")
+
+    log_a = torch.log(a.clamp_min(EPS))
+    log_b = torch.log(b.clamp_min(EPS))
+    log_kernel = -cost / float(eps)
+    rho_q = tau_q / (tau_q + float(eps))
+    rho_c = tau_c / (tau_c + float(eps))
+
+    log_u = torch.zeros_like(log_a)
+    log_v = torch.zeros_like(log_b)
+
+    for _ in range(max_iter):
+        prev_log_u = log_u
+        prev_log_v = log_v
+        log_u = rho_q * (
+            log_a - torch.logsumexp(log_kernel + log_v.unsqueeze(-2), dim=-1)
+        )
+        log_v = rho_c * (
+            log_b - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=-2)
+        )
+        delta = torch.maximum(
+            (log_u - prev_log_u).abs().amax(),
+            (log_v - prev_log_v).abs().amax(),
+        )
+        if tol > 0.0 and delta < tol:
+            break
+
+    log_plan = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)
+    return torch.exp(log_plan)
+
+
 def _pot_apply_pairwise(
     solver,
     cost: torch.Tensor,

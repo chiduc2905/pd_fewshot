@@ -1598,10 +1598,19 @@ def _select_transport_shot(
     return 0
 
 
-def _query_evidence_tokens(outputs: dict[str, Any] | torch.Tensor) -> torch.Tensor | None:
+def _query_evidence_tokens(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    way_num: int,
+    shot_num: int,
+) -> torch.Tensor | None:
     if not isinstance(outputs, dict):
         return None
-    tokens = _safe_detach_tensor(outputs.get("ecot_ccem_query_reliability"))
+    tokens = _safe_detach_tensor(outputs.get("ear_uot_query_reliability"))
+    if tokens is not None and tokens.dim() == 3 and tokens.shape[1] == way_num * shot_num:
+        tokens = tokens.view(tokens.shape[0], way_num, shot_num, tokens.shape[-1])
+    if tokens is None:
+        tokens = _safe_detach_tensor(outputs.get("ecot_ccem_query_reliability"))
     if tokens is None:
         tokens = _safe_detach_tensor(outputs.get("ecot_ccem_query_pi"))
     if tokens is None:
@@ -1620,7 +1629,11 @@ def _support_evidence_tokens(
 ) -> torch.Tensor | None:
     if not isinstance(outputs, dict):
         return None
-    tokens = _safe_detach_tensor(outputs.get("ecot_ccem_support_reliability"))
+    tokens = _safe_detach_tensor(outputs.get("ear_uot_support_reliability"))
+    if tokens is not None and tokens.dim() == 3 and tokens.shape[1] == way_num * shot_num:
+        tokens = tokens.view(tokens.shape[0], way_num, shot_num, tokens.shape[-1])
+    if tokens is None:
+        tokens = _safe_detach_tensor(outputs.get("ecot_ccem_support_reliability"))
     if tokens is None:
         tokens = _safe_detach_tensor(outputs.get("ecot_ccem_support_pi"))
     if tokens is None:
@@ -1976,7 +1989,11 @@ def export_uot_evidence_figure(
     if plan is None:
         return []
     cost_matrix = _matrix_by_shot(outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
-    query_evidence_tokens = _query_evidence_tokens(outputs)
+    query_evidence_tokens = _query_evidence_tokens(
+        outputs,
+        way_num=way_num,
+        shot_num=shot_num,
+    )
     support_evidence_tokens = _support_evidence_tokens(outputs, way_num=way_num, shot_num=shot_num)
     has_evidence = query_evidence_tokens is not None and support_evidence_tokens is not None
 

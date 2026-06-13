@@ -377,6 +377,7 @@ def get_args():
             "objective_score",
             "rival_cost",
             "hubness_uot",
+            "adaptive_relaxation",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -396,7 +397,8 @@ def get_args():
             "failure_probe=uniform diagnostic baseline versus fixed/adaptive utility-contrastive marginals; "
             "objective_score=original UOT, KL-UOT energy, adaptive-mass Elastic OT, Dustbin OT, and DCR; "
             "rival_cost=original Ours-Final versus rival-conditional ground cost only; "
-            "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only."
+            "hubness_uot=global-residual baseline plus HC-UOT full/cost-only/marginal-only; "
+            "adaptive_relaxation=scalar UOT versus token-wise evidence-adaptive KL relaxation."
         ),
     )
     parser.add_argument(
@@ -421,7 +423,8 @@ def get_args():
             "probe_uniform, probe_fixed, probe_adaptive, score_threshold, score_uot_energy, "
             "score_elastic_ot, score_dustbin_ot, score_dcr, "
             "rc_cost_baseline, rc_cost, rc_edge, "
-            "hcuot, hcuot_cost_only, hcuot_marginal_only. "
+            "hcuot, hcuot_cost_only, hcuot_marginal_only, "
+            "ear_uot, ear_uot_no_spatial, ear_uot_scalar_control, ear_baseline. "
             "Default all keeps the suite's normal variants."
         ),
     )
@@ -1681,6 +1684,71 @@ def build_ours_final_hubness_uot_variants():
                 "--hcuot_marginal_mix",
                 "0.50",
             ],
+        },
+    ]
+
+
+def build_ours_final_adaptive_relaxation_variants():
+    """Scalar UOT controls versus evidence-adaptive token relaxation."""
+    base = _ours_final_base_args()
+    global_residual = [
+        "--enable_global_residual_score",
+        "--global_residual_mode",
+        "residual",
+        "--global_residual_weight",
+        "0.1",
+        "--enable_ours_final_failure_probe",
+        "true",
+    ]
+    ear = [
+        "--enable_evidence_adaptive_relaxation_uot",
+        "true",
+        "--ear_uot_tau_min",
+        "0.05",
+        "--ear_uot_tau_max",
+        "1.0",
+        "--ear_uot_temperature",
+        "0.25",
+        "--ear_uot_margin",
+        "0.0",
+        "--ear_uot_kernel_size",
+        "3",
+    ]
+    return [
+        {
+            "tag": "ours_final_ear_baseline",
+            "checkpoint_tag": "ear_baseline",
+            "label": "Ours-Final scalar-relaxation UOT + global residual",
+            "extra_args": base + global_residual,
+        },
+        {
+            "tag": "ours_final_ear_scalar_control",
+            "checkpoint_tag": "ear_scalar_control",
+            "label": "EAR solver control with constant token tau=0.5",
+            "extra_args": base
+            + global_residual
+            + [
+                "--enable_evidence_adaptive_relaxation_uot",
+                "true",
+                "--ear_uot_tau_min",
+                "0.5",
+                "--ear_uot_tau_max",
+                "0.5",
+                "--ear_uot_spatial_mix",
+                "0.0",
+            ],
+        },
+        {
+            "tag": "ours_final_ear_no_spatial",
+            "checkpoint_tag": "ear_no_spatial",
+            "label": "EAR-UOT token-wise relaxation without spatial consensus",
+            "extra_args": base + global_residual + ear + ["--ear_uot_spatial_mix", "0.0"],
+        },
+        {
+            "tag": "ours_final_ear_uot",
+            "checkpoint_tag": "ear_uot",
+            "label": "EAR-UOT rival-specific token relaxation + spatial consensus",
+            "extra_args": base + global_residual + ear + ["--ear_uot_spatial_mix", "0.5"],
         },
     ]
 
@@ -3321,6 +3389,16 @@ def parse_ours_final_variant_filter(variants_str):
         "ours_final_hcuot_cost_only_global_res": "ours_final_hcuot_cost_only_global_res",
         "hcuot_marginal_only": "ours_final_hcuot_marginal_only_global_res",
         "ours_final_hcuot_marginal_only_global_res": "ours_final_hcuot_marginal_only_global_res",
+        "ear_uot": "ours_final_ear_uot",
+        "adaptive_relaxation": "ours_final_ear_uot",
+        "ours_final_ear_uot": "ours_final_ear_uot",
+        "ear_uot_no_spatial": "ours_final_ear_no_spatial",
+        "ours_final_ear_no_spatial": "ours_final_ear_no_spatial",
+        "ear_uot_scalar_control": "ours_final_ear_scalar_control",
+        "ear_scalar_control": "ours_final_ear_scalar_control",
+        "ours_final_ear_scalar_control": "ours_final_ear_scalar_control",
+        "ear_baseline": "ours_final_ear_baseline",
+        "ours_final_ear_baseline": "ours_final_ear_baseline",
         "mass_scaled": "ours_final_mass_scaled_b0p5",
         "mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
         "ours_final_mass_scaled_b0p5": "ours_final_mass_scaled_b0p5",
@@ -3364,7 +3442,8 @@ def parse_ours_final_variant_filter(variants_str):
                 "probe_adaptive, score_threshold, score_uot_energy, score_elastic_ot, "
                 "score_dustbin_ot, score_dcr, "
                 "rc_cost_baseline, rc_cost, rc_edge, hcuot, hcuot_cost_only, "
-                "hcuot_marginal_only, or exact tags."
+                "hcuot_marginal_only, ear_uot, ear_uot_no_spatial, "
+                "ear_uot_scalar_control, ear_baseline, or exact tags."
             )
         if tag not in parsed:
             parsed.append(tag)
@@ -3861,6 +3940,7 @@ def main():
         objective_score_variants = build_ours_final_objective_score_variants()
         rival_cost_variants = build_ours_final_rival_cost_variants()
         hubness_uot_variants = build_ours_final_hubness_uot_variants()
+        adaptive_relaxation_variants = build_ours_final_adaptive_relaxation_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -3900,6 +3980,10 @@ def main():
             hubness_uot_variants,
             ours_final_variant_filter,
         )
+        adaptive_relaxation_variants = filter_ours_final_variants(
+            adaptive_relaxation_variants,
+            ours_final_variant_filter,
+        )
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -3928,6 +4012,8 @@ def main():
             ablation_variants = rival_cost_variants
         elif suite_name == "hubness_uot":
             ablation_variants = hubness_uot_variants
+        elif suite_name == "adaptive_relaxation":
+            ablation_variants = adaptive_relaxation_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -4187,6 +4273,23 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in hubness_uot_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "adaptive_relaxation":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in adaptive_relaxation_variants
                 for samples in samples_list
                 for shot in shots
             )

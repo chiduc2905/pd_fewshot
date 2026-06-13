@@ -26,6 +26,7 @@ from net.hyperbolic.poincare_ops import safe_project_to_ball
 from net.modules.adaptive_region_uot import AdaptiveRegionUOTGuidance
 from net.modules.cost_evidence_marginals import CostEvidenceMarginals, _normalize_evidence_mode
 from net.modules.dustbin_contrastive_residual import DustbinContrastiveResidualScore
+from net.modules.evidence_adaptive_relaxation_uot import EvidenceAdaptiveRelaxationUOT
 from net.modules.hubness_calibrated_uot import HubnessCalibratedUOT
 from net.modules.multiscale_tokenizer import MultiScaleTokenizer
 from net.modules.mspta import MSPTATokenizer
@@ -361,6 +362,14 @@ class OursM2(JECOTM2):
         dcr_margin: float = 0.0,
         dcr_min_gate: float = 0.05,
         dcr_detach_gate: bool = True,
+        enable_evidence_adaptive_relaxation_uot: bool = False,
+        ear_uot_tau_min: float = 0.05,
+        ear_uot_tau_max: float = 1.00,
+        ear_uot_temperature: float = 0.25,
+        ear_uot_margin: float = 0.0,
+        ear_uot_spatial_mix: float = 0.50,
+        ear_uot_kernel_size: int = 3,
+        ear_uot_detach_reliability: bool = True,
         enable_ours_final_failure_probe: bool = False,
         ours_probe_common_margin: float = 0.10,
         enable_rival_conditional_cost: bool = False,
@@ -564,6 +573,18 @@ class OursM2(JECOTM2):
         self.dcr_margin = float(dcr_margin)
         self.dcr_min_gate = float(dcr_min_gate)
         self.dcr_detach_gate = _bool_config(dcr_detach_gate)
+        self.enable_evidence_adaptive_relaxation_uot = _bool_config(
+            enable_evidence_adaptive_relaxation_uot
+        )
+        self.ear_uot_tau_min = float(ear_uot_tau_min)
+        self.ear_uot_tau_max = float(ear_uot_tau_max)
+        self.ear_uot_temperature = float(ear_uot_temperature)
+        self.ear_uot_margin = float(ear_uot_margin)
+        self.ear_uot_spatial_mix = float(ear_uot_spatial_mix)
+        self.ear_uot_kernel_size = int(ear_uot_kernel_size)
+        self.ear_uot_detach_reliability = _bool_config(
+            ear_uot_detach_reliability
+        )
         if (
             self.enable_dustbin_contrastive_score
             and self.ours_final_score_mode != "threshold_mass"
@@ -622,6 +643,10 @@ class OursM2(JECOTM2):
         if enable_hubness_calibrated_uot:
             # HC-UOT is an analytic episode-local calibration of the original
             # threshold-mass UOT path, with no learned attention branch.
+            kwargs["ecot_enable_egsm"] = False
+            kwargs["ecot_m2_ablate_threshold_mass"] = False
+            kwargs["ecot_m2_cost_per_mass_score"] = False
+        if self.enable_evidence_adaptive_relaxation_uot:
             kwargs["ecot_enable_egsm"] = False
             kwargs["ecot_m2_ablate_threshold_mass"] = False
             kwargs["ecot_m2_cost_per_mass_score"] = False
@@ -705,6 +730,41 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_reciprocal_verified_uot cannot be combined with enable_verified_uot_score")
             if self.ours_ablation == "gap":
                 raise ValueError("enable_reciprocal_verified_uot is not supported with ours_ablation='gap'")
+        if self.enable_evidence_adaptive_relaxation_uot:
+            if self.ours_ablation != "full":
+                raise ValueError(
+                    "enable_evidence_adaptive_relaxation_uot requires ours_ablation='full'"
+                )
+            if self.ours_final_score_mode not in {"threshold_mass", "uot_energy"}:
+                raise ValueError(
+                    "EAR-UOT requires threshold_mass or uot_energy scoring"
+                )
+            conflicts = {
+                "ours_final_marginal_mode": self.ours_final_marginal_mode != "uniform",
+                "enable_dustbin_contrastive_score": self.enable_dustbin_contrastive_score,
+                "enable_rival_conditional_cost": self.enable_rival_conditional_cost,
+                "enable_rival_aware_evidence_uot": enable_rival_aware_evidence_uot,
+                "enable_hubness_calibrated_uot": enable_hubness_calibrated_uot,
+                "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
+                "enable_residual_aligned_uot": enable_residual_aligned_uot,
+                "enable_verified_uot_score": enable_verified_uot_score,
+                "enable_reciprocal_verified_uot": enable_reciprocal_verified_uot,
+                "enable_discriminative_uot": enable_discriminative_uot,
+                "enable_region_structural_uot": enable_region_structural_uot,
+                "enable_adaptive_region_uot": enable_adaptive_region_uot,
+                "enable_pulse_region_uot": enable_pulse_region_uot,
+                "enable_multiscale_ot": enable_multiscale_ot,
+                "enable_mspta": enable_mspta,
+                "enable_evidence_marginals": _bool_config(enable_evidence_marginals),
+                "enable_pot_guide": enable_pot_guide,
+                "token_g_kind": self.token_g_kind != "none",
+            }
+            active_conflicts = [name for name, active in conflicts.items() if active]
+            if active_conflicts:
+                raise ValueError(
+                    "EAR-UOT isolates token-wise marginal relaxation and cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
         if self.ours_final_marginal_mode == "score_aligned":
             if self.ours_ablation != "full":
                 raise ValueError(
@@ -840,6 +900,11 @@ class OursM2(JECOTM2):
             transport_mode=kwargs["ecot_transport_mode"],
             **kwargs,
         )
+        if self.enable_evidence_adaptive_relaxation_uot:
+            if not self.uses_unbalanced_transport:
+                raise ValueError("EAR-UOT requires unbalanced transport")
+            if self.ot_backend != "native":
+                raise ValueError("EAR-UOT currently requires ot_backend='native'")
         if self.ours_final_marginal_mode == "score_aligned":
             self.utility_contrastive_marginals = UtilityContrastiveMarginals(
                 tau=self.score_marginal_tau,
@@ -861,6 +926,17 @@ class OursM2(JECOTM2):
                 margin=self.dcr_margin,
                 min_gate=self.dcr_min_gate,
                 detach_gate=self.dcr_detach_gate,
+                eps=self.eps,
+            )
+        if self.enable_evidence_adaptive_relaxation_uot:
+            self.evidence_adaptive_relaxation_uot = EvidenceAdaptiveRelaxationUOT(
+                tau_min=self.ear_uot_tau_min,
+                tau_max=self.ear_uot_tau_max,
+                temperature=self.ear_uot_temperature,
+                margin=self.ear_uot_margin,
+                spatial_mix=self.ear_uot_spatial_mix,
+                kernel_size=self.ear_uot_kernel_size,
+                detach_reliability=self.ear_uot_detach_reliability,
                 eps=self.eps,
             )
         if self.enable_rival_conditional_cost:
@@ -1005,6 +1081,16 @@ class OursM2(JECOTM2):
             raise ValueError("score_marginal_confidence_power must be positive")
         if self.ours_probe_common_margin < 0.0:
             raise ValueError("ours_probe_common_margin must be non-negative")
+        if self.ear_uot_tau_min <= 0.0 or self.ear_uot_tau_max < self.ear_uot_tau_min:
+            raise ValueError("EAR-UOT requires 0 < tau_min <= tau_max")
+        if self.ear_uot_temperature <= 0.0:
+            raise ValueError("ear_uot_temperature must be positive")
+        if self.ear_uot_margin < 0.0:
+            raise ValueError("ear_uot_margin must be non-negative")
+        if not 0.0 <= self.ear_uot_spatial_mix <= 1.0:
+            raise ValueError("ear_uot_spatial_mix must be in [0, 1]")
+        if self.ear_uot_kernel_size < 1 or self.ear_uot_kernel_size % 2 == 0:
+            raise ValueError("ear_uot_kernel_size must be a positive odd integer")
         if self.rc_cost_weight < 0.0:
             raise ValueError("rc_cost_weight must be non-negative")
         if self.rc_cost_temperature <= 0.0:
@@ -2823,7 +2909,20 @@ class OursM2(JECOTM2):
         rho: torch.Tensor,
         a: torch.Tensor | None = None,
         b: torch.Tensor | None = None,
+        tau_q: torch.Tensor | None = None,
+        tau_c: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if tau_q is not None or tau_c is not None:
+            if self.enable_pot_guide:
+                raise ValueError("POT guide cannot be combined with token-wise UOT relaxation")
+            return super()._transport_match(
+                cost,
+                rho,
+                a=a,
+                b=b,
+                tau_q=tau_q,
+                tau_c=tau_c,
+            )
         num_query, num_way, query_tokens, class_tokens = cost.shape
         partial_transport_mass = None
         if self.enable_pot_guide and a is None and b is None:
@@ -3356,6 +3455,126 @@ class OursM2(JECOTM2):
         payload.update(dcr_payload)
         return payload
 
+    def _apply_evidence_adaptive_relaxation_uot(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+        spatial_hw: tuple[int, int] | None,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        dict[str, torch.Tensor],
+    ]:
+        if not getattr(self, "enable_evidence_adaptive_relaxation_uot", False):
+            return None, None, {}
+        tau_q, tau_c, diagnostics = self.evidence_adaptive_relaxation_uot(
+            flat_cost,
+            threshold=self.transport_cost_threshold,
+            way_num=way_num,
+            shot_num=shot_num,
+            spatial_hw=spatial_hw,
+        )
+        return tau_q, tau_c, diagnostics
+
+    def _audit_evidence_adaptive_relaxation_uot(
+        self,
+        payload: dict[str, torch.Tensor],
+        ear_payload: dict[str, torch.Tensor],
+        *,
+        way_num: int,
+        shot_num: int,
+    ) -> dict[str, torch.Tensor]:
+        if not ear_payload:
+            return {}
+        plan = payload.get("transport_plan")
+        query_reliability = ear_payload.get("ear_uot_query_reliability")
+        support_reliability = ear_payload.get("ear_uot_support_reliability")
+        if not all(torch.is_tensor(value) for value in (plan, query_reliability, support_reliability)):
+            return {}
+
+        num_query, _, _, query_len, support_len = plan.shape
+        query_reliability = query_reliability.reshape(
+            num_query,
+            int(way_num),
+            int(shot_num),
+            query_len,
+        ).to(device=plan.device, dtype=plan.dtype)
+        support_reliability = support_reliability.reshape(
+            num_query,
+            int(way_num),
+            int(shot_num),
+            support_len,
+        ).to(device=plan.device, dtype=plan.dtype)
+        row_mass = plan.sum(dim=-1)
+        col_mass = plan.sum(dim=-2)
+        shot_mass = plan.sum(dim=(-1, -2)).clamp_min(self.eps)
+
+        reliable_mass_shot = 0.5 * (
+            (row_mass * query_reliability).sum(dim=-1)
+            + (col_mass * support_reliability).sum(dim=-1)
+        )
+        low_reliability_mass_shot = 0.5 * (
+            (row_mass * (1.0 - query_reliability)).sum(dim=-1)
+            + (col_mass * (1.0 - support_reliability)).sum(dim=-1)
+        )
+        high_reliability_mass_shot = 0.5 * (
+            (row_mass * (query_reliability >= 0.5).to(plan.dtype)).sum(dim=-1)
+            + (col_mass * (support_reliability >= 0.5).to(plan.dtype)).sum(dim=-1)
+        )
+        high_reliability_mass_fraction = high_reliability_mass_shot / shot_mass
+
+        base_rho = self._ecot_base_rho_tensor(plan).to(device=plan.device, dtype=plan.dtype)
+        target_query = base_rho / float(max(query_len, 1))
+        target_support = base_rho / float(max(support_len, 1))
+        target_low_mass = 0.5 * (
+            target_query * (1.0 - query_reliability).sum(dim=-1)
+            + target_support * (1.0 - support_reliability).sum(dim=-1)
+        )
+        low_reliability_destroyed_fraction = (
+            (target_low_mass - low_reliability_mass_shot).clamp_min(0.0)
+            / target_low_mass.clamp_min(self.eps)
+        )
+
+        mass_field = torch.cat([row_mass, col_mass], dim=-1)
+        reliability_field = torch.cat(
+            [query_reliability, support_reliability],
+            dim=-1,
+        )
+        mass_centered = mass_field - mass_field.mean(dim=-1, keepdim=True)
+        reliability_centered = (
+            reliability_field - reliability_field.mean(dim=-1, keepdim=True)
+        )
+        correlation = (
+            (mass_centered * reliability_centered).mean(dim=-1)
+            / (
+                mass_centered.square().mean(dim=-1).sqrt()
+                * reliability_centered.square().mean(dim=-1).sqrt()
+            ).clamp_min(self.eps)
+        )
+
+        return {
+            "ear_uot_reliable_mass": reliable_mass_shot.mean(dim=2).detach(),
+            "ear_uot_low_reliability_mass": low_reliability_mass_shot.mean(dim=2).detach(),
+            "ear_uot_high_reliability_mass_fraction": (
+                high_reliability_mass_fraction.mean(dim=2).detach()
+            ),
+            "ear_uot_low_reliability_destroyed_fraction": (
+                low_reliability_destroyed_fraction.mean(dim=2).detach()
+            ),
+            "ear_uot/reliable_mass_fraction": (
+                reliable_mass_shot / shot_mass
+            ).mean().detach(),
+            "ear_uot/high_reliability_mass_fraction": (
+                high_reliability_mass_fraction.mean().detach()
+            ),
+            "ear_uot/low_reliability_destroyed_fraction": (
+                low_reliability_destroyed_fraction.mean().detach()
+            ),
+            "ear_uot/mass_reliability_correlation": correlation.mean().detach(),
+        }
+
     def _mspta_weights_for_ecot(
         self,
         flat_cost: torch.Tensor,
@@ -3800,6 +4019,14 @@ class OursM2(JECOTM2):
                 shot_num=shot_num,
             )
         )
+        transport_tau_q, transport_tau_c, ear_uot_payload = (
+            self._apply_evidence_adaptive_relaxation_uot(
+                cost_for_transport,
+                way_num=way_num,
+                shot_num=shot_num,
+                spatial_hw=spatial_hw,
+            )
+        )
 
         payload = super()._forward_ecot_budget_bank(
             cost_for_transport,
@@ -3818,6 +4045,8 @@ class OursM2(JECOTM2):
             score_background_penalty=score_background_penalty,
             score_evidence_mode=score_evidence_mode,
             score_evidence_mix=score_evidence_mix,
+            transport_tau_q=transport_tau_q,
+            transport_tau_c=transport_tau_c,
         )
         payload = self._apply_verified_uot_score(
             payload,
@@ -3839,6 +4068,16 @@ class OursM2(JECOTM2):
             way_num=way_num,
             shot_num=shot_num,
         )
+        if ear_uot_payload:
+            payload.update(
+                self._audit_evidence_adaptive_relaxation_uot(
+                    payload,
+                    ear_uot_payload,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                )
+            )
+            payload.update(ear_uot_payload)
         if torch.is_tensor(payload.get("transport_plan")):
             payload.update(
                 self._transport_specificity_audit(
@@ -4550,6 +4789,15 @@ class OursM2(JECOTM2):
             "score_marginal_query_weight",
             "score_marginal_support_weight",
             "score_marginal_query_advantage",
+            "ear_uot_query_reliability",
+            "ear_uot_support_reliability",
+            "ear_uot_query_tau",
+            "ear_uot_support_tau",
+            "ear_uot_rival_advantage",
+            "ear_uot_reliable_mass",
+            "ear_uot_low_reliability_mass",
+            "ear_uot_high_reliability_mass_fraction",
+            "ear_uot_low_reliability_destroyed_fraction",
             "ours_probe_negative_utility_mass_ratio",
             "ours_probe_common_mass_ratio",
             "ours_probe_harm_share",
@@ -4661,6 +4909,7 @@ class OursM2(JECOTM2):
             "ours_probe/",
             "rc_cost/",
             "hcuot/",
+            "ear_uot/",
             "residual_aligned/",
             "rae_uot/",
             "transport_audit/",

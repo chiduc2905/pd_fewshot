@@ -407,6 +407,13 @@ def validate_dmuot_scope(args) -> None:
             "--enable_dustbin_contrastive_score is supported only with --model ours_final"
         )
     if _bool_flag(
+        getattr(args, "enable_evidence_adaptive_relaxation_uot", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_evidence_adaptive_relaxation_uot is supported only with --model ours_final"
+        )
+    if _bool_flag(
         getattr(args, "enable_rival_conditional_cost", False),
         default=False,
     ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
@@ -2939,6 +2946,36 @@ def build_model_from_args(args):
                             "dcr_min_gate": float(getattr(args, "dcr_min_gate", 0.05)),
                             "dcr_detach_gate": _bool_flag(
                                 getattr(args, "dcr_detach_gate", "true"),
+                                default=True,
+                            ),
+                            "enable_evidence_adaptive_relaxation_uot": _bool_flag(
+                                getattr(
+                                    args,
+                                    "enable_evidence_adaptive_relaxation_uot",
+                                    "false",
+                                ),
+                                default=False,
+                            ),
+                            "ear_uot_tau_min": float(
+                                getattr(args, "ear_uot_tau_min", 0.05)
+                            ),
+                            "ear_uot_tau_max": float(
+                                getattr(args, "ear_uot_tau_max", 1.00)
+                            ),
+                            "ear_uot_temperature": float(
+                                getattr(args, "ear_uot_temperature", 0.25)
+                            ),
+                            "ear_uot_margin": float(
+                                getattr(args, "ear_uot_margin", 0.0)
+                            ),
+                            "ear_uot_spatial_mix": float(
+                                getattr(args, "ear_uot_spatial_mix", 0.50)
+                            ),
+                            "ear_uot_kernel_size": int(
+                                getattr(args, "ear_uot_kernel_size", 3)
+                            ),
+                            "ear_uot_detach_reliability": _bool_flag(
+                                getattr(args, "ear_uot_detach_reliability", "true"),
                                 default=True,
                             ),
                             "enable_ours_final_failure_probe": _bool_flag(

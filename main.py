@@ -591,6 +591,21 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_evidence_adaptive_relaxation_uot",
+        frozenset(
+            {
+                "enable_evidence_adaptive_relaxation_uot",
+                "ear_uot_tau_min",
+                "ear_uot_tau_max",
+                "ear_uot_temperature",
+                "ear_uot_margin",
+                "ear_uot_spatial_mix",
+                "ear_uot_kernel_size",
+                "ear_uot_detach_reliability",
+            }
+        ),
+    ),
+    (
         "enable_ours_final_failure_probe",
         frozenset(
             {
@@ -2692,6 +2707,34 @@ def get_args():
         help="Detach the DCR gate so gradients follow the original UOT evidence terms.",
     )
     parser.add_argument(
+        "--enable_evidence_adaptive_relaxation_uot",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: replace scalar UOT marginal relaxation by "
+            "candidate- and token-wise KL penalties derived from rival-specific, "
+            "spatially coherent transport evidence."
+        ),
+    )
+    parser.add_argument("--ear_uot_tau_min", type=float, default=0.05)
+    parser.add_argument("--ear_uot_tau_max", type=float, default=1.00)
+    parser.add_argument("--ear_uot_temperature", type=float, default=0.25)
+    parser.add_argument("--ear_uot_margin", type=float, default=0.0)
+    parser.add_argument("--ear_uot_spatial_mix", type=float, default=0.50)
+    parser.add_argument("--ear_uot_kernel_size", type=int, default=3)
+    parser.add_argument(
+        "--ear_uot_detach_reliability",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help=(
+            "Detach the analytic EAR reliability field. The transport plan "
+            "remains differentiable with respect to the ground cost."
+        ),
+    )
+    parser.add_argument(
         "--enable_elastic_ot_probe",
         nargs="?",
         const="true",
@@ -4490,6 +4533,10 @@ def get_model(args):
                 getattr(args, "enable_hubness_calibrated_uot", "false"),
                 default=False,
             )
+            ear_uot_enabled = _bool_flag(
+                getattr(args, "enable_evidence_adaptive_relaxation_uot", "false"),
+                default=False,
+            )
             score_marginal_enabled = (
                 str(getattr(args, "ours_final_marginal_mode", "uniform")).strip().lower()
                 == "score_aligned"
@@ -4503,6 +4550,9 @@ def get_model(args):
             elif rae_uot_enabled:
                 egsm_enabled = False
                 evidence_text = "RAE-UOT cross-reference+rival evidence"
+            elif ear_uot_enabled:
+                egsm_enabled = False
+                evidence_text = "EAR-UOT token-wise KL relaxation"
             else:
                 evidence_text = "EGSM on" if egsm_enabled else "EGSM off"
             base_rho_text = getattr(args, "hrot_ecot_base_rho", None) or 0.8
@@ -4512,6 +4562,12 @@ def get_model(args):
                 transport_text = f"fast PartialOT(rho={base_rho_text})"
             else:
                 transport_text = f"UOT(rho={base_rho_text})"
+            if ear_uot_enabled:
+                transport_text = (
+                    f"EAR-UOT(rho={base_rho_text}, "
+                    f"tau=[{getattr(args, 'ear_uot_tau_min', 0.05)},"
+                    f"{getattr(args, 'ear_uot_tau_max', 1.0)}])"
+                )
             token_text = "local descriptors"
             if normalized_ours_ablation == "gap":
                 token_text = "GAP descriptors"
@@ -5150,6 +5206,14 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "dcr_margin",
             "dcr_min_gate",
             "dcr_detach_gate",
+            "enable_evidence_adaptive_relaxation_uot",
+            "ear_uot_tau_min",
+            "ear_uot_tau_max",
+            "ear_uot_temperature",
+            "ear_uot_margin",
+            "ear_uot_spatial_mix",
+            "ear_uot_kernel_size",
+            "ear_uot_detach_reliability",
             "enable_ours_final_failure_probe",
             "ours_probe_common_margin",
             "enable_rival_conditional_cost",
@@ -6570,6 +6634,62 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     if torch.is_tensor(transported_mass) and transported_mass.dim() == 2 and transported_mass.shape[0] == targets.shape[0]:
         metrics.update(summarize_budget_tensor(transported_mass, targets, prefix="transport_mass"))
 
+    ear_reliable_mass = scores.get("ear_uot_reliable_mass")
+    if (
+        torch.is_tensor(ear_reliable_mass)
+        and ear_reliable_mass.dim() == 2
+        and ear_reliable_mass.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_budget_tensor(
+                ear_reliable_mass,
+                targets,
+                prefix="ear_uot_reliable_mass",
+            )
+        )
+
+    ear_low_reliability_mass = scores.get("ear_uot_low_reliability_mass")
+    if (
+        torch.is_tensor(ear_low_reliability_mass)
+        and ear_low_reliability_mass.dim() == 2
+        and ear_low_reliability_mass.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_distance_tensor(
+                ear_low_reliability_mass,
+                targets,
+                prefix="ear_uot_low_reliability_mass",
+            )
+        )
+
+    ear_high_mass_fraction = scores.get("ear_uot_high_reliability_mass_fraction")
+    if (
+        torch.is_tensor(ear_high_mass_fraction)
+        and ear_high_mass_fraction.dim() == 2
+        and ear_high_mass_fraction.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_budget_tensor(
+                ear_high_mass_fraction,
+                targets,
+                prefix="ear_uot_high_reliability_mass_fraction",
+            )
+        )
+
+    ear_low_destroyed = scores.get("ear_uot_low_reliability_destroyed_fraction")
+    if (
+        torch.is_tensor(ear_low_destroyed)
+        and ear_low_destroyed.dim() == 2
+        and ear_low_destroyed.shape[0] == targets.shape[0]
+    ):
+        metrics.update(
+            summarize_class_distance_tensor(
+                ear_low_destroyed,
+                targets,
+                prefix="ear_uot_low_reliability_destroyed",
+            )
+        )
+
     dustbin_real_mass = scores.get("dustbin_real_mass")
     if (
         torch.is_tensor(dustbin_real_mass)
@@ -7265,6 +7385,26 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "dcr/shot_score_delta",
         "dcr/shot_logit_delta",
         "dcr/shot_logit_delta_abs",
+        "ear_uot/enabled",
+        "ear_uot/tau_min",
+        "ear_uot/tau_max",
+        "ear_uot/temperature",
+        "ear_uot/margin",
+        "ear_uot/spatial_mix",
+        "ear_uot/query_reliability_mean",
+        "ear_uot/support_reliability_mean",
+        "ear_uot/query_tau_mean",
+        "ear_uot/support_tau_mean",
+        "ear_uot/query_tau_std",
+        "ear_uot/support_tau_std",
+        "ear_uot/high_reliability_query_share",
+        "ear_uot/high_reliability_support_share",
+        "ear_uot/rival_advantage_mean",
+        "ear_uot/positive_rival_advantage_share",
+        "ear_uot/reliable_mass_fraction",
+        "ear_uot/high_reliability_mass_fraction",
+        "ear_uot/low_reliability_destroyed_fraction",
+        "ear_uot/mass_reliability_correlation",
         "rc_cost/enabled",
         "rc_cost/penalty_weight",
         "rc_cost/temperature",
@@ -7755,6 +7895,16 @@ def format_diagnostic_summary(metrics):
         "hcuot/support_weight_entropy",
         "hcuot/uniform_fallback_query_share",
         "hcuot/uniform_fallback_support_share",
+        "ear_uot/query_reliability_mean",
+        "ear_uot/support_reliability_mean",
+        "ear_uot/query_tau_mean",
+        "ear_uot/support_tau_mean",
+        "ear_uot/high_reliability_query_share",
+        "ear_uot/high_reliability_support_share",
+        "ear_uot/reliable_mass_fraction",
+        "ear_uot/high_reliability_mass_fraction",
+        "ear_uot/low_reliability_destroyed_fraction",
+        "ear_uot/mass_reliability_correlation",
         "transport_audit/common_mass_ratio",
         "transport_audit/specific_mass_ratio",
         "transport_audit/common_score_term",
@@ -7841,6 +7991,18 @@ def format_diagnostic_summary(metrics):
         "dcr/specificity_mean",
         "dcr/removed_positive_share",
         "dcr/shot_logit_delta_abs",
+        "ear_uot_reliable_mass_true",
+        "ear_uot_reliable_mass_best_negative",
+        "ear_uot_reliable_mass_gap",
+        "ear_uot_high_reliability_mass_fraction_true",
+        "ear_uot_high_reliability_mass_fraction_best_negative",
+        "ear_uot_high_reliability_mass_fraction_gap",
+        "ear_uot_low_reliability_mass_true_distance",
+        "ear_uot_low_reliability_mass_best_negative_distance",
+        "ear_uot_low_reliability_mass_distance_gap",
+        "ear_uot_low_reliability_destroyed_true_distance",
+        "ear_uot_low_reliability_destroyed_best_negative_distance",
+        "ear_uot_low_reliability_destroyed_distance_gap",
         "m2_mean_true_mass",
         "m2_mean_best_wrong_mass",
         "m2_mean_true_cost",

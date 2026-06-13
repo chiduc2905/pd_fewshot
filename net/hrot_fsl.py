@@ -40,6 +40,7 @@ from net.modules.unbalanced_ot import (
     sinkhorn_balanced_log,
     sinkhorn_balanced_pot,
     sinkhorn_unbalanced_log,
+    sinkhorn_unbalanced_log_adaptive,
     sinkhorn_unbalanced_pot,
 )
 
@@ -3187,6 +3188,8 @@ class HROTFSL(BaseConv64FewShotModel):
         score_background_penalty: float = 0.0,
         score_evidence_mode: str = "replace",
         score_evidence_mix: float = 1.0,
+        transport_tau_q: torch.Tensor | None = None,
+        transport_tau_c: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
             raise RuntimeError("ECOT variants require an episode_controller")
@@ -3199,6 +3202,37 @@ class HROTFSL(BaseConv64FewShotModel):
         budget_count = len(self.ecot_rho_bank)
         if num_pairs != way_num * shot_num:
             raise ValueError(f"flat_cost pair dimension {num_pairs} does not match Way*Shot={way_num * shot_num}")
+        if (transport_tau_q is None) != (transport_tau_c is None):
+            raise ValueError("transport_tau_q and transport_tau_c must be provided together")
+        adaptive_tau_q_bank: torch.Tensor | None = None
+        adaptive_tau_c_bank: torch.Tensor | None = None
+        if transport_tau_q is not None and transport_tau_c is not None:
+            if not self.uses_unbalanced_transport:
+                raise ValueError("token-wise transport relaxation requires unbalanced OT")
+            if self.ot_backend != "native":
+                raise ValueError("token-wise transport relaxation currently requires the native OT backend")
+            if tuple(transport_tau_q.shape) != (num_query, num_pairs, query_len):
+                raise ValueError(
+                    "transport_tau_q must have shape "
+                    f"{(num_query, num_pairs, query_len)}, got {tuple(transport_tau_q.shape)}"
+                )
+            if tuple(transport_tau_c.shape) != (num_query, num_pairs, support_len):
+                raise ValueError(
+                    "transport_tau_c must have shape "
+                    f"{(num_query, num_pairs, support_len)}, got {tuple(transport_tau_c.shape)}"
+                )
+            adaptive_tau_q_bank = (
+                transport_tau_q.to(device=flat_cost.device, dtype=flat_cost.dtype)
+                .unsqueeze(2)
+                .expand(-1, -1, budget_count, -1)
+                .reshape(num_query, num_pairs * budget_count, query_len)
+            )
+            adaptive_tau_c_bank = (
+                transport_tau_c.to(device=flat_cost.device, dtype=flat_cost.dtype)
+                .unsqueeze(2)
+                .expand(-1, -1, budget_count, -1)
+                .reshape(num_query, num_pairs * budget_count, support_len)
+            )
 
         rho_bank = self.ecot_rho_bank_tensor.to(device=flat_cost.device, dtype=flat_cost.dtype)
         cost_bank = flat_cost.unsqueeze(2).expand(num_query, num_pairs, budget_count, query_len, support_len)
@@ -3421,6 +3455,8 @@ class HROTFSL(BaseConv64FewShotModel):
         dustbin_augmented_b = None
         dustbin_alpha = None
         if self.ecot_m2_score_mode == "dustbin_ot":
+            if adaptive_tau_q_bank is not None:
+                raise ValueError("dustbin_ot cannot be combined with token-wise UOT relaxation")
             if transport_kwargs:
                 raise ValueError(
                     "dustbin_ot uses uniform token capacities and cannot be "
@@ -3449,6 +3485,8 @@ class HROTFSL(BaseConv64FewShotModel):
             dustbin_augmented_a = dustbin_out["augmented_a"]
             dustbin_augmented_b = dustbin_out["augmented_b"]
         elif self.ecot_m2_score_mode == "elastic_ot":
+            if adaptive_tau_q_bank is not None:
+                raise ValueError("elastic_ot cannot be combined with token-wise UOT relaxation")
             if transport_kwargs:
                 raise ValueError(
                     "elastic_ot uses uniform token capacities and cannot be combined "
@@ -3487,6 +3525,8 @@ class HROTFSL(BaseConv64FewShotModel):
             transport_kwargs["a"] = elastic_a
             transport_kwargs["b"] = elastic_b
         elif self.uses_ecot_noise_sink:
+            if adaptive_tau_q_bank is not None:
+                raise ValueError("noise-sink UOT cannot be combined with token-wise relaxation")
             if "a" in transport_kwargs:
                 real_a = transport_kwargs["a"]
             else:
@@ -3529,6 +3569,8 @@ class HROTFSL(BaseConv64FewShotModel):
             plan_bank, cost_out, mass_out = self._transport_match(
                 cost_bank,
                 rho_bank_flat,
+                tau_q=adaptive_tau_q_bank,
+                tau_c=adaptive_tau_c_bank,
                 **transport_kwargs,
             )
         plan_bank = plan_bank.reshape(num_query, way_num, shot_num, budget_count, query_len, support_len)
@@ -3608,10 +3650,54 @@ class HROTFSL(BaseConv64FewShotModel):
             target_support_bank,
             eps=self.eps,
         )
+        if adaptive_tau_q_bank is None or adaptive_tau_c_bank is None:
+            query_marginal_penalty_bank = float(self.tau_q) * query_marginal_kl_bank
+            support_marginal_penalty_bank = float(self.tau_c) * support_marginal_kl_bank
+        else:
+            adaptive_tau_q_view = adaptive_tau_q_bank.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                query_len,
+            )
+            adaptive_tau_c_view = adaptive_tau_c_bank.reshape(
+                num_query,
+                way_num,
+                shot_num,
+                budget_count,
+                support_len,
+            )
+            row_mass = plan_bank.sum(dim=-1)
+            col_mass = plan_bank.sum(dim=-2)
+            query_kl_terms = (
+                row_mass
+                * (
+                    torch.log(row_mass.clamp_min(self.eps))
+                    - torch.log(target_query_bank.clamp_min(self.eps))
+                )
+                - row_mass
+                + target_query_bank
+            )
+            support_kl_terms = (
+                col_mass
+                * (
+                    torch.log(col_mass.clamp_min(self.eps))
+                    - torch.log(target_support_bank.clamp_min(self.eps))
+                )
+                - col_mass
+                + target_support_bank
+            )
+            query_marginal_penalty_bank = (
+                adaptive_tau_q_view * query_kl_terms
+            ).sum(dim=-1)
+            support_marginal_penalty_bank = (
+                adaptive_tau_c_view * support_kl_terms
+            ).sum(dim=-1)
         uot_classification_energy_bank = (
             shot_cost_bank
-            + float(self.tau_q) * query_marginal_kl_bank
-            + float(self.tau_c) * support_marginal_kl_bank
+            + query_marginal_penalty_bank
+            + support_marginal_penalty_bank
         )
         evidence_pair_bank: torch.Tensor | None = None
         evidence_mass_bank: torch.Tensor | None = None
@@ -4020,6 +4106,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_uot_classification_energy_bank": uot_classification_energy_bank,
             "ecot_uot_query_kl_bank": query_marginal_kl_bank,
             "ecot_uot_support_kl_bank": support_marginal_kl_bank,
+            "ecot_uot_query_penalty_bank": query_marginal_penalty_bank,
+            "ecot_uot_support_penalty_bank": support_marginal_penalty_bank,
             "ecot_uot_energy_shot_score": uot_energy_shot_score,
             "ecot_uot_energy_logits": uot_energy_logits,
             "ecot_diagnostics": diagnostics,
@@ -4036,8 +4124,8 @@ class HROTFSL(BaseConv64FewShotModel):
             "uot_energy/classification_energy": uot_classification_energy_bank.mean().detach(),
             "uot_energy/marginal_penalty_share": (
                 (
-                    float(self.tau_q) * query_marginal_kl_bank
-                    + float(self.tau_c) * support_marginal_kl_bank
+                    query_marginal_penalty_bank
+                    + support_marginal_penalty_bank
                 ).mean()
                 / uot_classification_energy_bank.abs().mean().clamp_min(self.eps)
             ).detach(),
@@ -4454,6 +4542,8 @@ class HROTFSL(BaseConv64FewShotModel):
         rho: torch.Tensor,
         a: torch.Tensor | None = None,
         b: torch.Tensor | None = None,
+        tau_q: torch.Tensor | None = None,
+        tau_c: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_query, num_way, query_tokens, class_tokens = cost.shape
         partial_transport_mass = None
@@ -4490,8 +4580,31 @@ class HROTFSL(BaseConv64FewShotModel):
         pair_cost = cost.reshape(num_query * num_way, query_tokens, class_tokens)
         pair_a = a.reshape(num_query * num_way, query_tokens)
         pair_b = b.reshape(num_query * num_way, class_tokens)
+        if (tau_q is None) != (tau_c is None):
+            raise ValueError("tau_q and tau_c must be provided together")
+        pair_tau_q = None
+        pair_tau_c = None
+        if tau_q is not None and tau_c is not None:
+            if tuple(tau_q.shape) != (num_query, num_way, query_tokens):
+                raise ValueError(
+                    f"tau_q must have shape {(num_query, num_way, query_tokens)}, got {tuple(tau_q.shape)}"
+                )
+            if tuple(tau_c.shape) != (num_query, num_way, class_tokens):
+                raise ValueError(
+                    f"tau_c must have shape {(num_query, num_way, class_tokens)}, got {tuple(tau_c.shape)}"
+                )
+            pair_tau_q = tau_q.to(device=cost.device, dtype=cost.dtype).reshape(
+                num_query * num_way,
+                query_tokens,
+            )
+            pair_tau_c = tau_c.to(device=cost.device, dtype=cost.dtype).reshape(
+                num_query * num_way,
+                class_tokens,
+            )
 
         if self.uses_partial_transport:
+            if pair_tau_q is not None:
+                raise ValueError("partial OT does not support token-wise UOT relaxation")
             max_mass = torch.minimum(pair_a.sum(dim=-1), pair_b.sum(dim=-1))
             if partial_transport_mass is None:
                 pair_transport_mass = max_mass
@@ -4516,6 +4629,8 @@ class HROTFSL(BaseConv64FewShotModel):
             pair_transport_cost = compute_partial_transport_cost(pair_plan, pair_cost)
             pair_transport_mass = compute_partial_transported_mass(pair_plan)
         elif self.ot_backend == "pot":
+            if pair_tau_q is not None:
+                raise ValueError("POT backend does not support token-wise UOT relaxation")
             if self.uses_unbalanced_transport:
                 pair_plan = sinkhorn_unbalanced_pot(
                     pair_cost,
@@ -4540,16 +4655,28 @@ class HROTFSL(BaseConv64FewShotModel):
             pair_transport_mass = compute_transported_mass(pair_plan)
         else:
             if self.uses_unbalanced_transport:
-                pair_plan = sinkhorn_unbalanced_log(
-                    pair_cost,
-                    pair_a,
-                    pair_b,
-                    tau_q=self.tau_q,
-                    tau_c=self.tau_c,
-                    eps=self.sinkhorn_epsilon,
-                    max_iter=self.sinkhorn_iterations,
-                    tol=self.sinkhorn_tolerance,
-                )
+                if pair_tau_q is not None and pair_tau_c is not None:
+                    pair_plan = sinkhorn_unbalanced_log_adaptive(
+                        pair_cost,
+                        pair_a,
+                        pair_b,
+                        tau_q=pair_tau_q,
+                        tau_c=pair_tau_c,
+                        eps=self.sinkhorn_epsilon,
+                        max_iter=self.sinkhorn_iterations,
+                        tol=self.sinkhorn_tolerance,
+                    )
+                else:
+                    pair_plan = sinkhorn_unbalanced_log(
+                        pair_cost,
+                        pair_a,
+                        pair_b,
+                        tau_q=self.tau_q,
+                        tau_c=self.tau_c,
+                        eps=self.sinkhorn_epsilon,
+                        max_iter=self.sinkhorn_iterations,
+                        tol=self.sinkhorn_tolerance,
+                    )
             else:
                 pair_plan = sinkhorn_balanced_log(
                     pair_cost,
