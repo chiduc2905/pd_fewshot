@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 from net.modules.evidence_adaptive_relaxation_uot import (
     EvidenceAdaptiveRelaxationUOT,
@@ -161,6 +162,80 @@ def test_ear_uot_model_forward_exposes_plan_level_diagnostics():
     assert outputs["ear_uot_low_reliability_destroyed_fraction"].shape == (2, 2)
     assert torch.isfinite(outputs["transport_plan"]).all()
     assert torch.isfinite(outputs["ear_uot/mass_reliability_correlation"])
+
+
+def test_ear_uot_model_backward_has_finite_gradients():
+    torch.manual_seed(6105)
+    model = _tiny_ours_final(
+        enable_evidence_adaptive_relaxation_uot=True,
+        ear_uot_tau_min=0.05,
+        ear_uot_tau_max=1.0,
+        ear_uot_temperature=0.25,
+        ear_uot_spatial_mix=0.5,
+        ear_uot_detach_reliability=True,
+        enable_global_residual_score=True,
+        global_residual_weight=0.1,
+    )
+    model.train()
+    query = torch.randn(1, 5, 3, 64, 64)
+    support = torch.randn(1, 5, 1, 3, 64, 64)
+    targets = torch.arange(5)
+
+    outputs = model(query, support, return_aux=True)
+    loss = F.cross_entropy(outputs["logits"], targets) + outputs["aux_loss"]
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    gradients = [
+        parameter.grad
+        for parameter in model.parameters()
+        if parameter.grad is not None
+    ]
+    assert gradients
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    assert model.raw_transport_cost_threshold.grad is not None
+    assert torch.isfinite(model.raw_transport_cost_threshold.grad)
+
+
+def test_ear_uot_differentiable_reliability_is_finite_at_zero_specificity():
+    cost = torch.full((1, 2, 4, 4), 0.5, requires_grad=True)
+    threshold = torch.tensor(0.5, requires_grad=True)
+    module = EvidenceAdaptiveRelaxationUOT(
+        tau_min=0.05,
+        tau_max=1.0,
+        detach_reliability=False,
+    )
+
+    tau_q, tau_c, _ = module(
+        cost,
+        threshold=threshold,
+        way_num=2,
+        shot_num=1,
+        spatial_hw=(2, 2),
+    )
+    (tau_q.sum() + tau_c.sum()).backward()
+
+    assert cost.grad is not None
+    assert threshold.grad is not None
+    assert torch.isfinite(cost.grad).all()
+    assert torch.isfinite(threshold.grad)
+
+
+def test_ear_uot_detached_reliability_has_no_cost_or_threshold_graph():
+    cost = torch.rand(1, 2, 4, 4, requires_grad=True)
+    threshold = torch.tensor(0.5, requires_grad=True)
+    module = EvidenceAdaptiveRelaxationUOT(detach_reliability=True)
+
+    tau_q, tau_c, _ = module(
+        cost,
+        threshold=threshold,
+        way_num=2,
+        shot_num=1,
+        spatial_hw=(2, 2),
+    )
+
+    assert not tau_q.requires_grad
+    assert not tau_c.requires_grad
 
 
 def test_ear_uot_scalar_control_matches_original_uot_model():

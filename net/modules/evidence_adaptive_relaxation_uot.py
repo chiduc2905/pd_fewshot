@@ -129,6 +129,8 @@ class EvidenceAdaptiveRelaxationUOT(nn.Module):
         temperature = (self.temperature * episode_scale).clamp_min(self.eps)
         query_temperature = temperature.reshape(num_query, 1, 1)
         threshold_value = self._threshold_scalar(threshold, reference_cost)
+        if self.detach_reliability:
+            threshold_value = threshold_value.detach()
 
         candidate_query_cost = -query_temperature * (
             torch.logsumexp(-reference_cost / temperature, dim=(2, 4))
@@ -167,13 +169,25 @@ class EvidenceAdaptiveRelaxationUOT(nn.Module):
             (threshold_value - candidate_query_cost)
             / query_temperature
         )
-        query_reliability = torch.sqrt(
-            (query_specificity * query_matchability).clamp_min(0.0)
-        )
+        reliability_product = (
+            query_specificity * query_matchability
+        ).clamp(0.0, 1.0)
+        reliability_eps = reference_cost.new_tensor(max(self.eps, 1e-6))
+        reliability_floor = torch.sqrt(reliability_eps)
+        reliability_scale = (
+            torch.sqrt(reference_cost.new_tensor(1.0) + reliability_eps)
+            - reliability_floor
+        ).clamp_min(reliability_eps)
+        query_reliability = (
+            torch.sqrt(reliability_product + reliability_eps)
+            - reliability_floor
+        ) / reliability_scale
         query_reliability = self._smooth(
             query_reliability,
             spatial_hw=spatial_hw,
         ).clamp(0.0, 1.0)
+        if self.detach_reliability:
+            query_reliability = query_reliability.detach()
 
         row_min = reference_cost.amin(dim=-1, keepdim=True)
         edge_affinity = torch.exp(
@@ -192,6 +206,8 @@ class EvidenceAdaptiveRelaxationUOT(nn.Module):
             support_reliability,
             spatial_hw=spatial_hw,
         ).clamp(0.0, 1.0)
+        if self.detach_reliability:
+            support_reliability = support_reliability.detach()
 
         query_reliability_pair = (
             query_reliability[:, :, None, :]
