@@ -1722,6 +1722,12 @@ def build_ours_final_adaptive_relaxation_variants():
             "extra_args": base + global_residual,
         },
         {
+            "tag": "ours_final_ear_uot",
+            "checkpoint_tag": "ear_uot",
+            "label": "EAR-UOT rival-specific token relaxation + spatial consensus",
+            "extra_args": base + global_residual + ear + ["--ear_uot_spatial_mix", "0.5"],
+        },
+        {
             "tag": "ours_final_ear_scalar_control",
             "checkpoint_tag": "ear_scalar_control",
             "label": "EAR solver control with constant token tau=0.5",
@@ -1743,12 +1749,6 @@ def build_ours_final_adaptive_relaxation_variants():
             "checkpoint_tag": "ear_no_spatial",
             "label": "EAR-UOT token-wise relaxation without spatial consensus",
             "extra_args": base + global_residual + ear + ["--ear_uot_spatial_mix", "0.0"],
-        },
-        {
-            "tag": "ours_final_ear_uot",
-            "checkpoint_tag": "ear_uot",
-            "label": "EAR-UOT rival-specific token relaxation + spatial consensus",
-            "extra_args": base + global_residual + ear + ["--ear_uot_spatial_mix", "0.5"],
         },
     ]
 

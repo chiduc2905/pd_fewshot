@@ -199,15 +199,18 @@ def test_ear_uot_ablation_suite_has_baseline_and_mechanism_controls():
     variants = build_ours_final_adaptive_relaxation_variants()
     assert [variant["tag"] for variant in variants] == [
         "ours_final_ear_baseline",
+        "ours_final_ear_uot",
         "ours_final_ear_scalar_control",
         "ours_final_ear_no_spatial",
-        "ours_final_ear_uot",
     ]
     selected = filter_ours_final_variants(
         variants,
-        parse_ours_final_variant_filter("ear_uot,ear_uot_scalar_control"),
+        parse_ours_final_variant_filter(
+            "ear_uot,ear_uot_scalar_control,ear_uot_no_spatial"
+        ),
     )
     assert [variant["tag"] for variant in selected] == [
-        "ours_final_ear_scalar_control",
         "ours_final_ear_uot",
+        "ours_final_ear_scalar_control",
+        "ours_final_ear_no_spatial",
     ]
