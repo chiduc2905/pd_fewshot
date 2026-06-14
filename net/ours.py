@@ -2481,9 +2481,15 @@ class OursM2(JECOTM2):
         if not getattr(self, "enable_sci", False):
             return projected
         before = projected
-        projected = self.spatial_context_injection(projected, spatial_hw)
-        self._last_sci_diagnostics = self.spatial_context_injection.diagnostics(before, projected)
-        return projected
+        enriched = self.spatial_context_injection(projected, spatial_hw)
+        # Re-normalize back to unit sphere so cost = 1 - dot(q_sci, s_sci) is a
+        # proper cosine distance.  Without this the cross-terms dot(Δq, s) and
+        # dot(q, Δs) are O(||Δ||) and corrupt the cost matrix with unstructured
+        # noise.  Re-normalization preserves the directional shift from SCI
+        # (cosine_shift is unchanged) while eliminating magnitude artefacts.
+        enriched = F.normalize(enriched, p=2, dim=-1, eps=self.eps)
+        self._last_sci_diagnostics = self.spatial_context_injection.diagnostics(before, enriched)
+        return enriched
 
     @property
     def multiscale_transport_cost_thresholds(self) -> torch.Tensor:
