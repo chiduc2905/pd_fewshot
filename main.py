@@ -7163,6 +7163,31 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     if torch.is_tensor(local_scores) and local_scores.dim() == 2 and local_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(local_scores, targets, prefix="local"))
         if (
+            torch.is_tensor(global_scores)
+            and global_scores.dim() == 2
+            and tuple(global_scores.shape) == tuple(local_scores.shape)
+            and tuple(logits.shape) == tuple(local_scores.shape)
+        ):
+            fused_pred = logits.argmax(dim=1)
+            local_pred = local_scores.argmax(dim=1)
+            fused_correct = fused_pred.eq(targets)
+            local_correct = local_pred.eq(targets)
+            metrics["global_vs_local_prediction_agreement"] = _scalar_metric(
+                fused_pred.eq(local_pred).float()
+            )
+            metrics["global_vs_local_change_rate"] = _scalar_metric(
+                fused_pred.ne(local_pred).float()
+            )
+            metrics["global_vs_local_fix_rate"] = _scalar_metric(
+                ((~local_correct) & fused_correct).float()
+            )
+            metrics["global_vs_local_harm_rate"] = _scalar_metric(
+                (local_correct & (~fused_correct)).float()
+            )
+            metrics["global_vs_local_accuracy_delta"] = _scalar_metric(
+                fused_correct.float() - local_correct.float()
+            )
+        if (
             torch.is_tensor(nr_ot_scores)
             and nr_ot_scores.dim() == 2
             and tuple(nr_ot_scores.shape) == tuple(local_scores.shape)
@@ -7896,6 +7921,11 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "transport_audit_unverified/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
+        "global_vs_local_prediction_agreement",
+        "global_vs_local_change_rate",
+        "global_vs_local_fix_rate",
+        "global_vs_local_harm_rate",
+        "global_vs_local_accuracy_delta",
         "nr_ot/enabled",
         "nr_ot/mode_id",
         "nr_ot/threshold",
@@ -8365,6 +8395,11 @@ def format_diagnostic_summary(metrics):
         "transport_audit/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
+        "global_vs_local_prediction_agreement",
+        "global_vs_local_change_rate",
+        "global_vs_local_fix_rate",
+        "global_vs_local_harm_rate",
+        "global_vs_local_accuracy_delta",
         "nr_ot/enabled",
         "nr_ot/mode_id",
         "nr_ot/threshold",
@@ -9189,10 +9224,10 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     device = torch.device(args.device)
     non_blocking = _pin_memory_enabled(args) and device.type == "cuda"
     num_episodes = len(loader)
-    meta = get_model_metadata(args.model)
+    model_meta = get_model_metadata(args.model)
     current_test_name = str(getattr(args, "current_test_name", "") or "").strip()
     print(f"\n{'=' * 60}")
-    print(f"Final Test: {meta['display_name']} | {args.dataset_name} | {args.shot_num}-shot")
+    print(f"Final Test: {model_meta['display_name']} | {args.dataset_name} | {args.shot_num}-shot")
     if current_test_name:
         print(f"Test Split: {current_test_name}")
     print(f"{num_episodes} episodes x {args.way_num} classes x {args.query_num_test} query")
@@ -9564,8 +9599,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                                     query_indices=export_query_indices,
                                     file_format=str(getattr(args, "uot_evidence_file_format", "png")),
                                 )
-                                for meta in mechanism_rows:
-                                    nr_ot_mechanism_paths.extend(meta.get("paths", []))
+                                for mechanism_meta in mechanism_rows:
+                                    nr_ot_mechanism_paths.extend(mechanism_meta.get("paths", []))
                         except Exception as exc:
                             print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")
                             rows = []
@@ -9798,8 +9833,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         query_indices=[query_idx],
                         file_format=str(getattr(args, "uot_evidence_file_format", "png")),
                     )
-                    for meta in mechanism_rows:
-                        nr_ot_mechanism_paths.extend(meta.get("paths", []))
+                    for mechanism_meta in mechanism_rows:
+                        nr_ot_mechanism_paths.extend(mechanism_meta.get("paths", []))
             except Exception as exc:
                 print(f"Skipping best transport evidence figure for episode {episode_idx}: {exc}")
                 rows = []
@@ -10012,7 +10047,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt",
     )
     with open(txt_path, "w") as handle:
-        handle.write(f"Model: {meta['display_name']} ({args.model})\n")
+        handle.write(f"Model: {model_meta['display_name']} ({args.model})\n")
         handle.write(f"Dataset: {args.dataset_name}\n")
         handle.write(f"Shot: {args.shot_num}\n")
         handle.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
