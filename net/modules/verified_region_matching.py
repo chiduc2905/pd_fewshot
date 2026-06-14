@@ -82,6 +82,21 @@ class VerifiedRegionMatchingUOT(nn.Module):
         if not (self.use_concentration or self.use_region_patch or self.use_rival):
             raise ValueError("At least one VRM gate must be enabled")
 
+    def _combine_gates(self, components: list[torch.Tensor]) -> torch.Tensor:
+        """Parameter-free soft AND that preserves relative evidence scale.
+
+        A direct product collapses when any component has a naturally small
+        absolute scale, which turned VRM full into near-uniform cost inflation.
+        The geometric mean still requires all enabled checks to agree, but keeps
+        the final gate on the same rough scale as its components.
+        """
+        if not components:
+            raise ValueError("VRM requires at least one gate component")
+        if len(components) == 1:
+            return components[0].clamp(0.0, 1.0)
+        stacked = torch.stack([component.clamp(0.0, 1.0) for component in components])
+        return stacked.clamp_min(self.eps).log().mean(dim=0).exp().clamp(0.0, 1.0)
+
     def _region_tokens(
         self,
         tokens: torch.Tensor,
@@ -226,7 +241,7 @@ class VerifiedRegionMatchingUOT(nn.Module):
                 f"support_tokens shape {tuple(support_tokens.shape)} does not match flat_cost"
             )
 
-        gate = torch.ones_like(flat_cost)
+        gate_components: list[torch.Tensor] = []
         payload: dict[str, torch.Tensor] = {
             "verified/enabled": flat_cost.new_tensor(1.0),
             "verified/lambda": flat_cost.new_tensor(self.penalty_lambda),
@@ -242,7 +257,7 @@ class VerifiedRegionMatchingUOT(nn.Module):
         concentration_gate = None
         if self.use_concentration:
             concentration_gate = self._concentration_gate(flat_cost)
-            gate = gate * concentration_gate
+            gate_components.append(concentration_gate)
             payload["verified/concentration_score_mean"] = (
                 concentration_gate.mean().detach()
             )
@@ -269,7 +284,7 @@ class VerifiedRegionMatchingUOT(nn.Module):
                 shot_num=shot_num,
                 spatial_hw=spatial_hw,
             )
-            gate = gate * patch_gate
+            gate_components.append(patch_gate)
             payload["verified/patch_consistency_mean"] = patch_gate.mean().detach()
             payload["verified/patch_consistency_max"] = patch_gate.amax().detach()
             payload["verified_region_cost_matrix"] = region_cost.reshape(
@@ -295,14 +310,18 @@ class VerifiedRegionMatchingUOT(nn.Module):
                 way_num=way_num,
                 shot_num=shot_num,
             )
-            gate = gate * rival_gate
+            gate_components.append(rival_gate)
             payload["verified/rival_specificity_mean"] = rival_gate.mean().detach()
             for key, value in rival_diag.items():
                 payload[f"verified/{key.removeprefix('evidence/')}"] = value
         else:
             payload["verified/rival_specificity_mean"] = flat_cost.new_tensor(1.0)
 
-        gate = gate.clamp(0.0, 1.0)
+        gate = self._combine_gates(gate_components)
+        gate_flat = gate.reshape(-1)
+        payload["verified/gate_q50"] = torch.quantile(gate_flat.detach(), 0.50)
+        payload["verified/gate_q90"] = torch.quantile(gate_flat.detach(), 0.90)
+        payload["verified/gate_q95"] = torch.quantile(gate_flat.detach(), 0.95)
         if self.detach_gate:
             gate_for_cost = gate.detach()
         else:

@@ -24,11 +24,17 @@ The implementation is parameter-free and modifies only the ground cost:
 C_vrm = C * (1 + lambda * (1 - gate))
 ```
 
-The default gate is:
+The v1.1 gate is a geometric soft-AND over the enabled checks:
 
 ```text
-gate = concentration_gate * region_patch_gate
+gate = geometric_mean(enabled_gate_components)
 ```
+
+The first v1 implementation used a direct product. Diagnostics from
+`vrm_full` showed `gate_mean ~= 0.005`, `accepted_mass_ratio = 0`, and nearly
+uniform cost inflation. The geometric mean keeps the logical "all checks should
+agree" behavior while avoiding gate collapse when one component has a naturally
+small absolute scale.
 
 Optional rival evidence can be enabled with `--vrm_use_rival true`. It reuses the
 shared `compute_rival_discriminative_query_evidence()` helper from
@@ -67,6 +73,7 @@ same raw token cost.
 VRM logs the following non-accuracy signals:
 
 - `verified/gate_mean`, `gate_min`, `gate_max`
+- `verified/gate_q50`, `gate_q90`, `gate_q95`
 - `verified/concentration_score_mean`
 - `verified/patch_consistency_mean`
 - `verified/rival_specificity_mean`
@@ -77,6 +84,8 @@ VRM logs the following non-accuracy signals:
 - `verified/rejected_mass_ratio`
 - `verified/plan_gate_mean`
 - `verified/plan_gate_correlation`
+- `verified/top10_gate_mass_ratio`, `top20_gate_mass_ratio`
+- `verified/top10_gate_mean`, `top20_gate_mean`
 
 Interpretation:
 
@@ -87,6 +96,7 @@ Interpretation:
 | `rejected_mass_ratio` high | solver still spends mass on low-gate matches |
 | `gate_mean` near zero | VRM may over-penalize and collapse local evidence |
 | `cost_delta_ratio` very high | `vrm_lambda` is too strong |
+| `top10_gate_mass_ratio` low | transport is not concentrating on the best relative VRM matches |
 
 ## Novelty Boundary
 

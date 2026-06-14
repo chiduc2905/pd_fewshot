@@ -2699,6 +2699,66 @@ def test_context_enrichment_factory_flags_are_ours_final_only():
 # ───────── Structural Token Augmentation tests ─────────
 
 
+def test_sci_enabled_runs_and_exposes_diagnostics():
+    torch.manual_seed(700)
+    model = _tiny_ours_final(enable_sci=True, sci_num_layers=2, sci_kernel_size=3)
+    model.train()
+    query, support = _episode()
+
+    outputs = model(query, support, return_aux=True)
+    loss = outputs["logits"].sum()
+    loss.backward()
+
+    assert model.enable_sci
+    assert hasattr(model, "spatial_context_injection")
+    assert outputs["logits"].shape == (2, 2)
+    assert torch.isfinite(outputs["logits"]).all()
+    for key in (
+        "sci/token_change_ratio",
+        "sci/token_cosine_shift",
+        "sci/layer0_weight_norm",
+        "sci/layer1_weight_norm",
+    ):
+        assert key in outputs, f"Missing SCI diagnostic key: {key}"
+        assert torch.isfinite(outputs[key]), f"Non-finite SCI diagnostic: {key}"
+    first_weight = model.spatial_context_injection.layers[0].dw_conv.weight
+    assert first_weight.grad is not None
+    assert torch.isfinite(first_weight.grad).all()
+
+
+def test_sci_factory_flags_are_ours_final_only():
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_sci="true",
+        sci_num_layers=2,
+        sci_kernel_size=3,
+    )
+    ours_final = build_model_from_args(
+        SimpleNamespace(
+            model="ours_final",
+            ours_ablation="full",
+            **common,
+        )
+    )
+    assert hasattr(ours_final, "spatial_context_injection")
+    assert ours_final.enable_sci
+
+    with pytest.raises(ValueError, match="--enable_sci is supported only with --model ours_final"):
+        build_model_from_args(
+            SimpleNamespace(
+                model="ours",
+                ours_ablation="full",
+                **common,
+            )
+        )
+
+
 def test_structural_augmentation_off_matches_baseline_logits():
     torch.manual_seed(800)
     baseline = _tiny_ours_final()

@@ -28,6 +28,40 @@ def test_hrot_ground_cost_cli_accepts_cosine(monkeypatch):
     assert args.hrot_ground_cost == "cosine"
 
 
+def test_ours_final_sci_cli_accepts_optional_value(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--model",
+            "ours_final",
+            "--enable_sci",
+            "true",
+            "--sci_num_layers",
+            "2",
+            "--sci_kernel_size",
+            "3",
+        ],
+    )
+
+    args = get_args()
+
+    assert args.enable_sci == "true"
+    assert args.sci_num_layers == 2
+    assert args.sci_kernel_size == 3
+
+
+def test_ours_final_sci_cli_accepts_bare_flag(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--model", "ours_final", "--enable_sci"],
+    )
+
+    args = get_args()
+
+    assert args.enable_sci == "true"
+
+
 def test_hrot_eam_mode_cli_accepts_legacy(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -354,6 +388,29 @@ def test_infer_hrot_arch_overrides_detects_token_attention_marginal_state():
     assert overrides["tam_uniform_floor"] == pytest.approx(0.2)
     assert overrides["tam_detach_weights"] == "true"
     assert overrides["tam_share_qk"] == "true"
+
+
+def test_infer_hrot_arch_overrides_detects_sci_state():
+    state_dict = {
+        "raw_ecot_lambda": torch.tensor(0.0),
+        "episode_controller.network.0.weight": torch.randn(32, 11),
+        "spatial_context_injection.layers.0.dw_conv.weight": torch.randn(24, 1, 3, 3),
+        "spatial_context_injection.layers.1.dw_conv.weight": torch.randn(24, 1, 3, 3),
+    }
+    checkpoint_args = {
+        "hrot_variant": "J_ECOT_M2",
+        "hrot_ecot_rho_bank": "0.80",
+        "hrot_ecot_base_rho": 0.80,
+    }
+
+    overrides = infer_hrot_arch_overrides_from_state_dict(
+        state_dict,
+        checkpoint_args=checkpoint_args,
+    )
+
+    assert overrides["enable_sci"] == "true"
+    assert overrides["sci_num_layers"] == 2
+    assert overrides["sci_kernel_size"] == 3
 
 
 def test_infer_hrot_arch_overrides_detects_cata_state():

@@ -42,6 +42,7 @@ def test_verified_region_matching_shapes_and_multiplicative_cost():
     assert payload["verified_region_guided_cost_matrix"].shape == (2, 3, 1, 4, 4)
     for key in (
         "verified/gate_mean",
+        "verified/gate_q90",
         "verified/concentration_score_mean",
         "verified/patch_consistency_mean",
         "verified/region_vs_token_consistency_gap",
@@ -49,6 +50,47 @@ def test_verified_region_matching_shapes_and_multiplicative_cost():
     ):
         assert key in payload
         assert torch.isfinite(payload[key])
+
+
+def test_verified_region_matching_full_gate_uses_soft_and_not_product():
+    module = VerifiedRegionMatchingUOT(
+        penalty_lambda=0.2,
+        use_concentration=True,
+        use_region_patch=True,
+        use_rival=True,
+    )
+    flat_cost = torch.ones(1, 1, 2, 2)
+    query_tokens = torch.randn(1, 2, 3)
+    support_tokens = torch.randn(1, 1, 2, 3)
+    concentration = torch.full_like(flat_cost, 0.01)
+    patch = torch.full_like(flat_cost, 0.25)
+    rival = torch.full_like(flat_cost, 0.64)
+
+    module._concentration_gate = lambda cost: concentration
+    module._region_patch_gate = lambda **kwargs: (patch, torch.zeros_like(flat_cost))
+    module._rival_gate = lambda **kwargs: (
+        rival,
+        {
+            "evidence/rival_margin": flat_cost.new_tensor(0.5),
+            "evidence/class_evidence_std": flat_cost.new_tensor(0.0),
+        },
+    )
+
+    guided, payload = module(
+        flat_cost=flat_cost,
+        query_tokens=query_tokens,
+        support_tokens=support_tokens,
+        way_num=1,
+        shot_num=1,
+        spatial_hw=(1, 2),
+    )
+
+    product_gate = 0.01 * 0.25 * 0.64
+    soft_and_gate = product_gate ** (1.0 / 3.0)
+    observed = payload["verified_region_pair_gate"].mean().item()
+    assert observed == pytest.approx(soft_and_gate)
+    assert observed > product_gate * 10.0
+    assert guided.mean().item() == pytest.approx(1.0 + 0.2 * (1.0 - soft_and_gate))
 
 
 def test_verified_region_matching_reuses_rival_gate_signal():
@@ -143,6 +185,8 @@ def test_ours_final_verified_region_matching_forward_logs_diagnostics():
         "verified/accepted_mass_ratio",
         "verified/rejected_mass_ratio",
         "verified/plan_gate_correlation",
+        "verified/top10_gate_mass_ratio",
+        "verified/top20_gate_mass_ratio",
         "global_residual_weight",
     ):
         assert key in outputs

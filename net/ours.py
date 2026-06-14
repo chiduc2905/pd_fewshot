@@ -4911,6 +4911,17 @@ class OursM2(JECOTM2):
         )
         plan_flat = plan.reshape(-1)
         gate_flat = gate.reshape(-1)
+        flat_count = int(gate_flat.numel())
+        top10_k = max(1, int(math.ceil(0.10 * flat_count)))
+        top20_k = max(1, int(math.ceil(0.20 * flat_count)))
+        top10_threshold = torch.topk(gate_flat, k=top10_k).values.min()
+        top20_threshold = torch.topk(gate_flat, k=top20_k).values.min()
+        top10_mask = gate >= top10_threshold
+        top20_mask = gate >= top20_threshold
+        top10_mass_ratio = plan.masked_select(top10_mask).sum() / total_mass
+        top20_mass_ratio = plan.masked_select(top20_mask).sum() / total_mass
+        top10_gate_mean = gate_flat.topk(top10_k).values.mean()
+        top20_gate_mean = gate_flat.topk(top20_k).values.mean()
         plan_centered = plan_flat - plan_flat.mean()
         gate_centered = gate_flat - gate_flat.mean()
         denom = (
@@ -4922,6 +4933,10 @@ class OursM2(JECOTM2):
             "verified/rejected_mass_ratio": rejected_mass_ratio.detach(),
             "verified/plan_gate_mean": mass_weighted_gate.detach(),
             "verified/plan_gate_correlation": correlation.detach(),
+            "verified/top10_gate_mass_ratio": top10_mass_ratio.detach(),
+            "verified/top20_gate_mass_ratio": top20_mass_ratio.detach(),
+            "verified/top10_gate_mean": top10_gate_mean.detach(),
+            "verified/top20_gate_mean": top20_gate_mean.detach(),
         }
 
     def _export_context_debug(self) -> None:

@@ -690,6 +690,10 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_sci",
+        frozenset({"enable_sci", "sci_num_layers", "sci_kernel_size"}),
+    ),
+    (
         "context_debug",
         frozenset({"context_debug", "context_debug_dir", "context_debug_max_episodes"}),
     ),
@@ -2292,6 +2296,29 @@ def get_args():
     )
     parser.add_argument("--context_debug_dir", type=str, default="results/context_debug")
     parser.add_argument("--context_debug_max_episodes", type=int, default=3)
+    parser.add_argument(
+        "--enable_sci",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: inject depthwise spatial context into projected "
+            "tokens before OT. Accepts either --enable_sci or --enable_sci true."
+        ),
+    )
+    parser.add_argument(
+        "--sci_num_layers",
+        type=int,
+        default=2,
+        help="Number of residual depthwise-conv SCI layers.",
+    )
+    parser.add_argument(
+        "--sci_kernel_size",
+        type=int,
+        default=3,
+        help="Odd depthwise-conv kernel size for SCI.",
+    )
     parser.add_argument(
         "--enable_structural_augmentation",
         action="store_true",
@@ -4655,6 +4682,14 @@ def get_model(args):
             token_text = "local descriptors"
             if normalized_ours_ablation == "gap":
                 token_text = "GAP descriptors"
+            if (
+                args.model in OURS_FINAL_MODEL_NAMES
+                and _bool_flag(getattr(args, "enable_sci", "false"), default=False)
+            ):
+                token_text = (
+                    f"SCI(layers={getattr(args, 'sci_num_layers', 2)}, "
+                    f"k={getattr(args, 'sci_kernel_size', 3)})+{token_text}"
+                )
             default_ablate_mass = "false" if args.model in OURS_FINAL_MODEL_NAMES else "true"
             ablate_mass = _bool_flag(
                 getattr(args, "hrot_ecot_m2_ablate_threshold_mass", default_ablate_mass),
@@ -5191,6 +5226,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "context_fusion",
             "context_gate_max",
             "context_change_max",
+            "enable_sci",
+            "sci_num_layers",
+            "sci_kernel_size",
             "enable_structural_augmentation",
             "struct_dim",
             "enable_region_structural_uot",
@@ -5358,6 +5396,22 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             overrides.setdefault("mspta_learnable_weights", True)
         if any(key.startswith("context_enrichment.") for key in state_dict):
             overrides.setdefault("enable_context_enrichment", True)
+        sci_layer_indices = []
+        for key, value in state_dict.items():
+            if not (
+                key.startswith("spatial_context_injection.layers.")
+                and key.endswith(".dw_conv.weight")
+                and torch.is_tensor(value)
+            ):
+                continue
+            match = re.match(r"spatial_context_injection\.layers\.(\d+)\.dw_conv\.weight$", key)
+            if match:
+                sci_layer_indices.append(int(match.group(1)))
+            if value.dim() >= 4:
+                overrides.setdefault("sci_kernel_size", int(value.shape[-1]))
+        if sci_layer_indices:
+            overrides.setdefault("enable_sci", "true")
+            overrides.setdefault("sci_num_layers", max(sci_layer_indices) + 1)
         if any(key.startswith("structural_augmentation.") for key in state_dict):
             overrides.setdefault("enable_structural_augmentation", True)
         if (
@@ -7352,6 +7406,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "context/branch_weight_conv5",
         "context/branch_weight_conv7",
         "context/token_change_ratio",
+        "sci/token_change_ratio",
+        "sci/token_cosine_shift",
+        "sci/layer0_weight_norm",
+        "sci/layer0_weight_max",
+        "sci/layer1_weight_norm",
+        "sci/layer1_weight_max",
+        "sci/layer2_weight_norm",
+        "sci/layer2_weight_max",
         "struct/token_change_ratio",
         "struct/struct_weight_norm",
         "struct/semantic_weight_norm",
@@ -7547,6 +7609,9 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "verified/gate_mean",
         "verified/gate_min",
         "verified/gate_max",
+        "verified/gate_q50",
+        "verified/gate_q90",
+        "verified/gate_q95",
         "verified/gate_class_gap",
         "verified/cost_delta_ratio",
         "verified/multiplier_mean",
@@ -7554,6 +7619,10 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "verified/rejected_mass_ratio",
         "verified/plan_gate_mean",
         "verified/plan_gate_correlation",
+        "verified/top10_gate_mass_ratio",
+        "verified/top20_gate_mass_ratio",
+        "verified/top10_gate_mean",
+        "verified/top20_gate_mean",
         "verified/rival_margin",
         "verified/class_evidence_std",
         "ours_probe/enabled",
@@ -8313,6 +8382,14 @@ def format_diagnostic_summary(metrics):
         "context/branch_weight_conv5",
         "context/branch_weight_conv7",
         "context/token_change_ratio",
+        "sci/token_change_ratio",
+        "sci/token_cosine_shift",
+        "sci/layer0_weight_norm",
+        "sci/layer0_weight_max",
+        "sci/layer1_weight_norm",
+        "sci/layer1_weight_max",
+        "sci/layer2_weight_norm",
+        "sci/layer2_weight_max",
         "struct/token_change_ratio",
         "struct/struct_weight_norm",
         "struct/semantic_weight_norm",
