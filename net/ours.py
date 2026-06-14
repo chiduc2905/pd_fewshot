@@ -2634,8 +2634,8 @@ class OursM2(JECOTM2):
             projected = self._project_backbone_tokens(tokens)
             projected = self._apply_cata(projected)
             projected = self._apply_structural_augmentation(projected, spatial_hw)
-            projected = self._apply_sci(projected, spatial_hw)
             euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
+            euclidean_tokens = self._apply_sci(euclidean_tokens, spatial_hw)
             scale_records.append(
                 {
                     "name": scale_name,
@@ -2684,9 +2684,9 @@ class OursM2(JECOTM2):
         if not self.uses_ours_gap_control:
             projected = self._apply_cata(projected)
         projected = self._apply_structural_augmentation(projected, spatial_hw)
-        projected = self._apply_sci(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
+        euclidean_tokens = self._apply_sci(euclidean_tokens, spatial_hw)
         return euclidean_tokens, hyperbolic_tokens, spatial_hw
 
     def _project_tokens_from_images(self, images: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
@@ -2706,7 +2706,6 @@ class OursM2(JECOTM2):
         projected = self._project_backbone_tokens(tokens)
         projected = self._apply_cata(projected)
         projected = self._apply_structural_augmentation(projected, spatial_hw)
-        projected = self._apply_sci(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         return projected, spatial_hw
 
@@ -2732,13 +2731,13 @@ class OursM2(JECOTM2):
             projected = self._apply_cata(projected)
             pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)
         projected = self._apply_structural_augmentation(projected, spatial_hw)
-        projected = self._apply_sci(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
             if self.normalize_euclidean_tokens
             else projected
         )
+        euclidean_tokens = self._apply_sci(euclidean_tokens, spatial_hw)
         ball = self._build_ball(projected)
         hyperbolic_tokens = safe_project_to_ball(projected * self.projection_scale, ball)
         return euclidean_tokens, hyperbolic_tokens, pre_proj_norms, spatial_hw
