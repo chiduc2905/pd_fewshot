@@ -18,6 +18,7 @@ from .noise_diagnostics import (
     export_uot_evidence_figure,
     score_uot_evidence_candidate,
 )
+from .nr_ot_figure import export_nr_ot_debiasing_figure
 
 __all__ = [
     'FeatureVisualizer',
@@ -34,4 +35,5 @@ __all__ = [
     'export_support_distribution_figure',
     'export_uot_evidence_figure',
     'score_uot_evidence_candidate',
+    'export_nr_ot_debiasing_figure',
 ]

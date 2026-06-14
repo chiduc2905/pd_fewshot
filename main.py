@@ -58,6 +58,7 @@ from visualization import (
     compute_support_episode_distribution,
     export_dataset_noise_profile,
     export_episode_q1_figure,
+    export_nr_ot_debiasing_figure,
     export_support_distribution_figure,
     export_uot_evidence_figure,
     score_uot_evidence_candidate,
@@ -107,6 +108,15 @@ def resolve_uot_evidence_artifacts(args):
     if value not in {"all", "aux_only", "main_only"}:
         raise ValueError("uot_evidence_artifacts must be one of: all, aux_only, main_only")
     return value
+
+
+def nr_ot_standalone_enabled(args):
+    return (
+        _is_ours_final_model(args)
+        and _bool_flag(getattr(args, "enable_nr_ot", "false"), default=False)
+        and str(getattr(args, "nr_ot_mode", "standalone")).strip().lower().replace("-", "_")
+        == "standalone"
+    )
 
 
 def _uot_auxiliary_figure_paths(path):
@@ -512,6 +522,18 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "enable_global_residual_score",
                 "global_residual_mode",
                 "global_residual_weight",
+            }
+        ),
+    ),
+    (
+        "enable_nr_ot",
+        frozenset(
+            {
+                "enable_nr_ot",
+                "nr_ot_mode",
+                "nr_ot_weight",
+                "nr_ot_novelty_temp",
+                "nr_ot_uniform_reference",
             }
         ),
     ),
@@ -2661,6 +2683,45 @@ def get_args():
         type=float,
         default=0.10,
         help="Weight of the global prototype residual logits when enable_global_residual_score is set.",
+    )
+    parser.add_argument(
+        "--enable_nr_ot",
+        nargs="?",
+        const="true",
+        default="false",
+        type=str,
+        help=(
+            "Ours-Final only: Nuisance-Referenced OT. Score each query by background-debiased "
+            "partial transport against a leave-class-out episode background measure, with "
+            "novelty-weighted token marginals. Mutually exclusive with --enable_global_residual_score."
+        ),
+    )
+    parser.add_argument(
+        "--nr_ot_mode",
+        type=str,
+        default="standalone",
+        choices=["standalone", "residual"],
+        help="standalone uses NR-OT logits as the class scores; residual adds them onto base local UOT logits.",
+    )
+    parser.add_argument(
+        "--nr_ot_weight",
+        type=float,
+        default=1.0,
+        help="Weight of the NR-OT logits when nr_ot_mode=residual.",
+    )
+    parser.add_argument(
+        "--nr_ot_novelty_temp",
+        type=float,
+        default=0.5,
+        help="Softmax temperature for background-novelty token marginals (smaller = more concentrated on anomalous tokens).",
+    )
+    parser.add_argument(
+        "--nr_ot_uniform_reference",
+        nargs="?",
+        const="true",
+        default="true",
+        type=str,
+        help="Use a uniform background marginal in the debiasing reference transport (true) or a symmetric novelty marginal (false).",
     )
     parser.add_argument(
         "--enable_token_attention_marginal",
@@ -5306,6 +5367,11 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "enable_global_residual_score",
             "global_residual_mode",
             "global_residual_weight",
+            "enable_nr_ot",
+            "nr_ot_mode",
+            "nr_ot_weight",
+            "nr_ot_novelty_temp",
+            "nr_ot_uniform_reference",
             "enable_residual_aligned_uot",
             "rauot_tau",
             "rauot_margin",
@@ -7052,6 +7118,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     if torch.is_tensor(global_scores) and global_scores.dim() == 2 and global_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(global_scores, targets, prefix="global"))
 
+    nr_ot_scores = scores.get("nr_ot_scores")
+    if torch.is_tensor(nr_ot_scores) and nr_ot_scores.dim() == 2 and nr_ot_scores.shape[0] == targets.shape[0]:
+        metrics.update(summarize_class_score_tensor(nr_ot_scores, targets, prefix="nr_ot"))
+
+    local_scores = scores.get("local_scores")
+    if torch.is_tensor(local_scores) and local_scores.dim() == 2 and local_scores.shape[0] == targets.shape[0]:
+        metrics.update(summarize_class_score_tensor(local_scores, targets, prefix="local"))
+
     uot_energy_logits = scores.get("ecot_uot_energy_logits")
     if (
         torch.is_tensor(uot_energy_logits)
@@ -7760,6 +7834,14 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "transport_audit_unverified/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
+        "nr_ot/enabled",
+        "nr_ot/mode_id",
+        "nr_ot/threshold",
+        "nr_ot/class_evidence_mean",
+        "nr_ot/ref_evidence_mean",
+        "nr_ot/debias_gap_mean",
+        "nr_ot/novelty_top20_mass_frac",
+        "nr_ot/logit_delta_abs",
         "pulse/discriminative_gate_mean",
         "pulse/discriminative_gate_low_share",
         "pulse/rival_advantage_mean",
@@ -8207,6 +8289,14 @@ def format_diagnostic_summary(metrics):
         "transport_audit/cost_per_mass",
         "global_residual_weight",
         "global_residual_mode_id",
+        "nr_ot/enabled",
+        "nr_ot/mode_id",
+        "nr_ot/threshold",
+        "nr_ot/class_evidence_mean",
+        "nr_ot/ref_evidence_mean",
+        "nr_ot/debias_gap_mean",
+        "nr_ot/novelty_top20_mass_frac",
+        "nr_ot/logit_delta_abs",
         "compact_loss",
         "decorr_loss",
         "entropy_loss",
@@ -8532,6 +8622,13 @@ def set_rival_cost_test_context(net, *, active: bool):
     setter = getattr(module, "set_rival_conditional_cost_test_context", None)
     if setter is not None:
         setter(is_noise=active)
+
+
+def set_nr_ot_evidence_export_context(net, *, active: bool):
+    module = net.module if hasattr(net, "module") else net
+    setter = getattr(module, "set_nr_ot_evidence_export_context", None)
+    if setter is not None:
+        setter(active=active)
 
 
 def train_loop(net, train_X, train_y, selection_X, selection_y, args):
@@ -9071,6 +9168,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             getattr(args, "enable_rival_conditional_cost", "false"),
             default=False,
         )
+        or _bool_flag(getattr(args, "enable_nr_ot", "false"), default=False)
         or uot_energy_debug_enabled(args)
         or elastic_ot_debug_enabled(args)
         or dustbin_ot_debug_enabled(args)
@@ -9080,7 +9178,9 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     transport_mode_name = str(getattr(args, "hrot_ecot_transport_mode", "") or "").strip().lower()
     ot_backend_name = str(getattr(args, "hrot_ot_backend", "") or "").strip().lower()
     uot_transport_kind = (
-        "partial_ot"
+        "nr_ot"
+        if nr_ot_standalone_enabled(args)
+        else "partial_ot"
         if model_name in OURS_FINAL_PARTIAL_OT_MODEL_NAMES or ot_backend_name in {"partial", "partial_ot", "partial_sinkhorn"}
         else
         "balanced_ot"
@@ -9110,6 +9210,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         and len(uot_evidence_seen_classes) >= uot_evidence_target_class_count
                     )
                 )
+            set_nr_ot_evidence_export_context(
+                net,
+                active=(
+                    nr_ot_standalone_enabled(args)
+                    and uot_evidence_enabled
+                    and not uot_evidence_complete
+                ),
+            )
             if len(batch) == 6:
                 query, q_labels, support, support_labels, q_indices, support_indices = batch
                 q_indices_np = q_indices.view(-1).cpu().numpy()
@@ -9338,6 +9446,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                                 f"{os.path.basename(uot_base_prefix)}{class_suffix}{uot_ext}"
                             ),
                         )
+                        nr_ot_mechanism_paths = []
                         try:
                             rows = export_uot_evidence_figure(
                                 outputs=scores if isinstance(scores, dict) else {"logits": logits},
@@ -9354,6 +9463,19 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                                 variant_label=uot_variant_label,
                                 visual_style=uot_evidence_visual_style,
                             )
+                            if rows and uot_transport_kind == "nr_ot":
+                                mechanism_rows = export_nr_ot_debiasing_figure(
+                                    outputs=scores if isinstance(scores, dict) else {"logits": logits},
+                                    query_images=query[0].detach().cpu(),
+                                    preds=preds.detach().cpu(),
+                                    targets=targets.detach().cpu(),
+                                    class_names=args.class_names,
+                                    save_path=uot_base,
+                                    query_indices=export_query_indices,
+                                    file_format=str(getattr(args, "uot_evidence_file_format", "png")),
+                                )
+                                for meta in mechanism_rows:
+                                    nr_ot_mechanism_paths.extend(meta.get("paths", []))
                         except Exception as exc:
                             print(f"Skipping transport evidence figure for episode {episode_idx}: {exc}")
                             rows = []
@@ -9363,6 +9485,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                             uot_evidence_paths.extend(
                                 _select_uot_evidence_log_paths(uot_base, uot_evidence_artifacts)
                             )
+                            uot_evidence_paths.extend(nr_ot_mechanism_paths)
                             exported_uot_evidence += 1
                             if uot_evidence_one_per_class:
                                 for row in rows:
@@ -9388,6 +9511,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                         query_mis[idx_i] += 1
                         query_pair[idx_i][(true_i, pred_i)] += 1
 
+    set_nr_ot_evidence_export_context(net, active=False)
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
     episode_accuracies = np.array(episode_accuracies)
@@ -9556,6 +9680,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 args.path_results,
                 f"{os.path.basename(uot_base_prefix)}{class_suffix}{uot_ext}",
             )
+            nr_ot_mechanism_paths = []
             try:
                 rows = export_uot_evidence_figure(
                     outputs=candidate["outputs"],
@@ -9572,6 +9697,19 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                     variant_label=uot_variant_label,
                     visual_style=uot_evidence_visual_style,
                 )
+                if rows and uot_transport_kind == "nr_ot":
+                    mechanism_rows = export_nr_ot_debiasing_figure(
+                        outputs=candidate["outputs"],
+                        query_images=candidate["query_images"],
+                        preds=candidate["preds"],
+                        targets=candidate["targets"],
+                        class_names=args.class_names,
+                        save_path=uot_base,
+                        query_indices=[query_idx],
+                        file_format=str(getattr(args, "uot_evidence_file_format", "png")),
+                    )
+                    for meta in mechanism_rows:
+                        nr_ot_mechanism_paths.extend(meta.get("paths", []))
             except Exception as exc:
                 print(f"Skipping best transport evidence figure for episode {episode_idx}: {exc}")
                 rows = []
@@ -9587,6 +9725,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                 uot_evidence_paths.extend(
                     _select_uot_evidence_log_paths(uot_base, uot_evidence_artifacts)
                 )
+                uot_evidence_paths.extend(nr_ot_mechanism_paths)
                 exported_uot_evidence += 1
                 if uot_evidence_one_per_class:
                     uot_evidence_seen_classes.add(class_idx)

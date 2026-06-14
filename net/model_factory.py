@@ -389,6 +389,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_global_residual_score is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_nr_ot", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_nr_ot is supported only with --model ours_final")
     if _bool_flag(
         getattr(args, "enable_token_attention_marginal", False),
         default=False,
@@ -3122,6 +3126,22 @@ def build_model_from_args(args):
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_global_residual_score", False), default=False)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_nr_ot": True,
+                            "nr_ot_mode": str(getattr(args, "nr_ot_mode", "standalone")),
+                            "nr_ot_weight": float(getattr(args, "nr_ot_weight", 1.0)),
+                            "nr_ot_novelty_temp": float(
+                                getattr(args, "nr_ot_novelty_temp", 0.5)
+                            ),
+                            "nr_ot_uniform_reference": _bool_flag(
+                                getattr(args, "nr_ot_uniform_reference", "true"), default=True
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(getattr(args, "enable_nr_ot", False), default=False)
                         else {}
                     ),
                     **(

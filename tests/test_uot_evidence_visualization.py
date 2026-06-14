@@ -1,5 +1,6 @@
 import torch
 
+from visualization.nr_ot_figure import export_nr_ot_debiasing_figure
 from visualization.noise_diagnostics import (
     _contrast_transport_image,
     _transport_plan_by_shot,
@@ -118,6 +119,97 @@ def test_export_uot_evidence_figure_prefers_positive_threshold_evidence(tmp_path
     assert abs(rows[0]["positive_evidence_total"] - 0.03) < 1e-6
     assert 0.0 < rows[0]["top_match_score_fraction"] <= 1.0
     assert rows[0]["positive_pulse_to_pulse_ratio"] is not None
+
+
+def test_export_uot_evidence_figure_nr_ot_uses_nr_payload(tmp_path):
+    query_images = torch.rand(1, 1, 16, 16)
+    support_images = torch.rand(2, 1, 1, 16, 16)
+    base_plan = torch.zeros(1, 2, 1, 4, 4)
+    nr_plan = torch.zeros_like(base_plan)
+    nr_plan[0, 0, 0, 1, 2] = 0.30
+    nr_plan[0, 0, 0, 2, 3] = 0.15
+    nr_cost = torch.ones_like(nr_plan) * 0.20
+    nr_cost[0, 0, 0, 1, 2] = 0.02
+    nr_cost[0, 0, 0, 2, 3] = 0.04
+    outputs = {
+        "transport_plan": base_plan,
+        "nr_ot_class_transport_plan": nr_plan,
+        "nr_ot_class_cost_matrix": nr_cost,
+        "nr_ot_transport_cost_threshold": torch.tensor(0.10),
+        "nr_ot_class_shot_transported_mass": nr_plan.sum(dim=(-1, -2)),
+        "nr_ot_class_shot_expected_mass": torch.ones(1, 2, 1),
+        "nr_ot_class_evidence": torch.tensor([[0.5, 0.1]]),
+        "nr_ot_ref_evidence": torch.tensor([[0.2, 0.1]]),
+        "nr_ot_debias_gap": torch.tensor([[0.3, 0.0]]),
+    }
+    save_path = tmp_path / "nr_ot_evidence.png"
+
+    rows = export_uot_evidence_figure(
+        outputs=outputs,
+        query_images=query_images,
+        support_images=support_images,
+        logits=torch.tensor([[1.0, 0.2]]),
+        preds=torch.tensor([0]),
+        targets=torch.tensor([0]),
+        class_names=["PD-A", "PD-B"],
+        save_path=str(save_path),
+        episode_index=8,
+        query_indices=[0],
+        transport_kind="nr_ot",
+    )
+
+    assert save_path.exists()
+    assert len(rows) == 1
+    assert rows[0]["transport_kind"] == "nr_ot"
+    assert rows[0]["top_match_count"] == 2
+    assert rows[0]["evidence_map_source"] == "positive_evidence"
+    assert abs(rows[0]["positive_evidence_total"] - 0.033) < 1e-6
+    assert abs(rows[0]["nr_ot_class_evidence"] - 0.5) < 1e-6
+    assert abs(rows[0]["nr_ot_ref_evidence"] - 0.2) < 1e-6
+    assert abs(rows[0]["nr_ot_debias_gap"] - 0.3) < 1e-6
+
+
+def test_export_nr_ot_debiasing_figure_handles_non_square_tokens(tmp_path):
+    outputs = {
+        "nr_ot_query_marginal": torch.rand(1, 2, 20),
+        "nr_ot_class_transport_plan": torch.rand(1, 2, 1, 20, 20),
+        "nr_ot_ref_transport_plan": torch.rand(1, 2, 20, 40),
+        "nr_ot_class_evidence": torch.tensor([[0.7, 0.2]]),
+        "nr_ot_ref_evidence": torch.tensor([[0.3, 0.1]]),
+        "nr_ot_debias_gap": torch.tensor([[0.4, 0.1]]),
+    }
+    save_path = tmp_path / "nested" / "nr_ot_mechanism_source.png"
+
+    rows = export_nr_ot_debiasing_figure(
+        outputs=outputs,
+        query_images=torch.rand(1, 1, 16, 16),
+        preds=torch.tensor([0]),
+        targets=torch.tensor([0]),
+        save_path=str(save_path),
+        query_indices=[0, 99],
+        class_names=["PD-A", "PD-B"],
+        file_format="png",
+    )
+
+    expected_path = tmp_path / "nested" / "nr_ot_mechanism_source_nr_ot_mechanism.png"
+    assert expected_path.exists()
+    assert len(rows) == 1
+    assert rows[0]["pred_class_name"] == "PD-A"
+    assert abs(rows[0]["nr_ot_debias_gap"] - 0.4) < 1e-6
+    assert rows[0]["paths"] == [str(expected_path)]
+
+
+def test_export_nr_ot_debiasing_figure_requires_nr_payload(tmp_path):
+    rows = export_nr_ot_debiasing_figure(
+        outputs={"transport_plan": torch.zeros(1, 1, 1, 4, 4)},
+        query_images=torch.rand(1, 1, 16, 16),
+        preds=torch.tensor([0]),
+        targets=torch.tensor([0]),
+        save_path=str(tmp_path / "missing.png"),
+        query_indices=[0],
+    )
+
+    assert rows == []
 
 
 def test_export_uot_evidence_figure_paper_style_is_compact(tmp_path):

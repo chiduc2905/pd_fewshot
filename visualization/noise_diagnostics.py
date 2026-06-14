@@ -104,6 +104,87 @@ def _safe_detach_tensor(value: Any) -> torch.Tensor | None:
     return value.detach()
 
 
+def _transport_kind_is_nr_ot(transport_kind: str) -> bool:
+    normalized = str(transport_kind or "").strip().lower().replace("-", "_")
+    return normalized in {"nr_ot", "nrot", "nuisance_referenced_ot"}
+
+
+def _transport_outputs_for_kind(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    transport_kind: str,
+    way_num: int,
+    shot_num: int,
+) -> dict[str, Any] | torch.Tensor:
+    if not _transport_kind_is_nr_ot(transport_kind) or not isinstance(outputs, dict):
+        return outputs
+    class_plan = _safe_detach_tensor(outputs.get("nr_ot_class_transport_plan"))
+    if class_plan is None:
+        mapped = dict(outputs)
+        mapped.pop("transport_plan", None)
+        mapped.pop("rvuot_evidence_transport_plan", None)
+        return mapped
+
+    mapped = dict(outputs)
+    mapped["transport_plan"] = class_plan
+    class_cost = _safe_detach_tensor(outputs.get("nr_ot_class_cost_matrix"))
+    if class_cost is not None:
+        mapped["cost_matrix"] = class_cost
+    threshold = _safe_detach_tensor(outputs.get("nr_ot_transport_cost_threshold"))
+    if threshold is not None:
+        mapped["transport_cost_threshold"] = threshold
+    shot_mass = _safe_detach_tensor(outputs.get("nr_ot_class_shot_transported_mass"))
+    if shot_mass is not None:
+        mapped["shot_transported_mass"] = shot_mass
+    expected_mass = _safe_detach_tensor(outputs.get("nr_ot_class_shot_expected_mass"))
+    if expected_mass is not None:
+        mapped["shot_rho"] = expected_mass
+
+    query_marginal = _safe_detach_tensor(outputs.get("nr_ot_query_marginal"))
+    if (
+        query_marginal is not None
+        and query_marginal.dim() == 3
+        and query_marginal.shape[1] == way_num
+    ):
+        mapped["ecot_ccem_query_pi"] = query_marginal.unsqueeze(2).expand(
+            -1, -1, int(shot_num), -1
+        )
+    support_marginal = _safe_detach_tensor(outputs.get("nr_ot_support_marginal"))
+    if (
+        support_marginal is not None
+        and support_marginal.dim() == 4
+        and support_marginal.shape[1] == way_num
+        and support_marginal.shape[2] == shot_num
+    ):
+        mapped["ecot_ccem_support_pi"] = support_marginal
+    return mapped
+
+
+def _nr_ot_pair_diagnostics(
+    outputs: dict[str, Any] | torch.Tensor,
+    *,
+    query_idx: int,
+    class_idx: int,
+) -> dict[str, float | str]:
+    if not isinstance(outputs, dict):
+        return {}
+    rows: dict[str, float | str] = {}
+    for key, row_key in (
+        ("nr_ot_class_evidence", "nr_ot_class_evidence"),
+        ("nr_ot_ref_evidence", "nr_ot_ref_evidence"),
+        ("nr_ot_debias_gap", "nr_ot_debias_gap"),
+    ):
+        tensor = _safe_detach_tensor(outputs.get(key))
+        if tensor is None:
+            continue
+        tensor = tensor.float().cpu()
+        if tensor.dim() == 2 and query_idx < tensor.shape[0] and class_idx < tensor.shape[1]:
+            rows[row_key] = float(tensor[query_idx, class_idx].item())
+    if rows:
+        rows["nr_ot_visualization_source"] = "nr_ot_class_transport_minus_reference_score"
+    return rows
+
+
 def _extract_class_token_maps(
     outputs: dict[str, Any],
     way_num: int,
@@ -1300,10 +1381,16 @@ def score_uot_evidence_candidate(
     if query_images.dim() != 4 or support_images.dim() != 5:
         return None
     way_num, shot_num = support_images.shape[:2]
-    plan = _transport_plan_by_shot(outputs, way_num=way_num, shot_num=shot_num)
+    plot_outputs = _transport_outputs_for_kind(
+        outputs,
+        transport_kind=transport_kind,
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+    plan = _transport_plan_by_shot(plot_outputs, way_num=way_num, shot_num=shot_num)
     if plan is None:
         return None
-    cost_matrix = _matrix_by_shot(outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
+    cost_matrix = _matrix_by_shot(plot_outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
     logits = logits.detach().float().cpu()
     preds = preds.detach().cpu()
     targets = targets.detach().cpu()
@@ -1327,7 +1414,7 @@ def score_uot_evidence_candidate(
     query_np = _ensure_numpy_image(query_images[query_idx])
     prefer_positive_evidence = str(transport_kind).strip().lower() not in {"balanced", "balanced_ot", "full_ot", "ot"}
     payload = _transport_pair_payload(
-        outputs=outputs,
+        outputs=plot_outputs,
         plan=plan,
         cost_matrix=cost_matrix,
         query_idx=query_idx,
@@ -1358,7 +1445,7 @@ def score_uot_evidence_candidate(
         + 0.75 * top_match_score_fraction
         - 0.75 * unmatched_fraction
     )
-    return {
+    result = {
         "selection_score": float(selection_score),
         "query_idx": query_idx,
         "true_class": true_class,
@@ -1372,6 +1459,14 @@ def score_uot_evidence_candidate(
         "top_match_score_fraction": top_match_score_fraction,
         "unmatched_fraction": unmatched_fraction,
     }
+    result.update(
+        _nr_ot_pair_diagnostics(
+            plot_outputs,
+            query_idx=query_idx,
+            class_idx=selected_class,
+        )
+    )
+    return result
 
 
 def _uot_all_class_match_path(save_path: str) -> str:
@@ -1791,48 +1886,54 @@ def _export_uot_paper_evidence_figure(
             )
         )
 
-        rows.append(
-            {
-                "episode_index": episode_index,
-                "query_rank_in_episode": query_idx,
-                "variant_label": variant_text,
-                "transport_kind": transport_kind,
-                "true_class": true_class,
-                "true_class_name": _class_label(class_names, true_class),
-                "pred_class": pred_class,
-                "pred_class_name": _class_label(class_names, pred_class),
-                "best_wrong_class": best_wrong_class,
-                "best_wrong_class_name": _class_label(class_names, best_wrong_class),
-                "selected_shot": int(metric_payload["shot_idx"]),
-                "correct": int(true_class == pred_class),
-                "true_score": true_score,
-                "best_wrong_score": best_wrong_score,
-                "decision_margin": decision_margin,
-                "expected_mass": float(metric_payload["expected_mass"]),
-                "transported_mass": float(metric_payload["transported_mass"]),
-                "unmatched_fraction": float(metric_payload["unmatched_fraction"]),
-                "evidence_map_source": metric_payload["visual_source"],
-                "positive_evidence_total": metric_payload["positive_evidence_total"],
-                "pulse_to_pulse_mass_ratio": metric_payload["pulse_to_pulse_mass_ratio"],
-                "query_bright_mass_ratio": metric_payload["query_bright_mass_ratio"],
-                "support_bright_mass_ratio": metric_payload["support_bright_mass_ratio"],
-                "positive_pulse_to_pulse_ratio": metric_payload["positive_pulse_to_pulse_ratio"],
-                "transport_cost_threshold": metric_payload["transport_threshold"],
-                "top_match_count": top_match_count,
-                "top_match_score_fraction": top_match_score_fraction,
-                "max_match_score_fraction": max_match_score_fraction,
-                "top_match_mass_fraction": top_match_score_fraction,
-                "max_match_mass_fraction": max_match_score_fraction,
-                "evidence_background_mass_ratio": None,
-                "evidence_query_background_mass_ratio": None,
-                "evidence_support_background_mass_ratio": None,
-                "noise_sink_mass": metric_payload["sink_mass"],
-                "save_path": save_path,
-                "transport_matrix_path": transport_matrix_path,
-                "mass_overlay_path": mass_overlay_path,
-                "all_class_match_path": "",
-            }
+        row = {
+            "episode_index": episode_index,
+            "query_rank_in_episode": query_idx,
+            "variant_label": variant_text,
+            "transport_kind": transport_kind,
+            "true_class": true_class,
+            "true_class_name": _class_label(class_names, true_class),
+            "pred_class": pred_class,
+            "pred_class_name": _class_label(class_names, pred_class),
+            "best_wrong_class": best_wrong_class,
+            "best_wrong_class_name": _class_label(class_names, best_wrong_class),
+            "selected_shot": int(metric_payload["shot_idx"]),
+            "correct": int(true_class == pred_class),
+            "true_score": true_score,
+            "best_wrong_score": best_wrong_score,
+            "decision_margin": decision_margin,
+            "expected_mass": float(metric_payload["expected_mass"]),
+            "transported_mass": float(metric_payload["transported_mass"]),
+            "unmatched_fraction": float(metric_payload["unmatched_fraction"]),
+            "evidence_map_source": metric_payload["visual_source"],
+            "positive_evidence_total": metric_payload["positive_evidence_total"],
+            "pulse_to_pulse_mass_ratio": metric_payload["pulse_to_pulse_mass_ratio"],
+            "query_bright_mass_ratio": metric_payload["query_bright_mass_ratio"],
+            "support_bright_mass_ratio": metric_payload["support_bright_mass_ratio"],
+            "positive_pulse_to_pulse_ratio": metric_payload["positive_pulse_to_pulse_ratio"],
+            "transport_cost_threshold": metric_payload["transport_threshold"],
+            "top_match_count": top_match_count,
+            "top_match_score_fraction": top_match_score_fraction,
+            "max_match_score_fraction": max_match_score_fraction,
+            "top_match_mass_fraction": top_match_score_fraction,
+            "max_match_mass_fraction": max_match_score_fraction,
+            "evidence_background_mass_ratio": None,
+            "evidence_query_background_mass_ratio": None,
+            "evidence_support_background_mass_ratio": None,
+            "noise_sink_mass": metric_payload["sink_mass"],
+            "save_path": save_path,
+            "transport_matrix_path": transport_matrix_path,
+            "mass_overlay_path": mass_overlay_path,
+            "all_class_match_path": "",
+        }
+        row.update(
+            _nr_ot_pair_diagnostics(
+                outputs,
+                query_idx=query_idx,
+                class_idx=selected_class,
+            )
         )
+        rows.append(row)
 
     fig.tight_layout(pad=0.02, w_pad=0.0, h_pad=0.04)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -1985,16 +2086,24 @@ def export_uot_evidence_figure(
         raise ValueError(f"support_images must have shape (Way, Shot, C, H, W), got {tuple(support_images.shape)}")
 
     way_num, shot_num = support_images.shape[:2]
-    plan = _transport_plan_by_shot(outputs, way_num=way_num, shot_num=shot_num)
-    if plan is None:
-        return []
-    cost_matrix = _matrix_by_shot(outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
-    query_evidence_tokens = _query_evidence_tokens(
+    transport_kind = str(transport_kind or "uot").strip().lower().replace("-", "_")
+    is_nr_ot = _transport_kind_is_nr_ot(transport_kind)
+    plot_outputs = _transport_outputs_for_kind(
         outputs,
+        transport_kind=transport_kind,
         way_num=way_num,
         shot_num=shot_num,
     )
-    support_evidence_tokens = _support_evidence_tokens(outputs, way_num=way_num, shot_num=shot_num)
+    plan = _transport_plan_by_shot(plot_outputs, way_num=way_num, shot_num=shot_num)
+    if plan is None:
+        return []
+    cost_matrix = _matrix_by_shot(plot_outputs, "cost_matrix", way_num=way_num, shot_num=shot_num)
+    query_evidence_tokens = _query_evidence_tokens(
+        plot_outputs,
+        way_num=way_num,
+        shot_num=shot_num,
+    )
+    support_evidence_tokens = _support_evidence_tokens(plot_outputs, way_num=way_num, shot_num=shot_num)
     has_evidence = query_evidence_tokens is not None and support_evidence_tokens is not None
 
     selected_indices = list(query_indices) if query_indices is not None else list(range(int(query_images.shape[0])))
@@ -2004,10 +2113,11 @@ def export_uot_evidence_figure(
     logits = logits.detach().float().cpu()
     preds = preds.detach().cpu()
     targets = targets.detach().cpu()
-    transport_kind = str(transport_kind or "uot").strip().lower()
     is_partial_ot = transport_kind in {"partial", "partial_ot", "partial_sinkhorn"}
-    is_uot = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"} and not is_partial_ot
-    if is_partial_ot:
+    is_uot = transport_kind not in {"balanced", "balanced_ot", "full_ot", "ot"} and not is_partial_ot and not is_nr_ot
+    if is_nr_ot:
+        method_title = "NR-OT class transport"
+    elif is_partial_ot:
         method_title = "Fast Partial OT output"
     elif has_evidence:
         method_title = "CCEM-UOT"
@@ -2018,14 +2128,14 @@ def export_uot_evidence_figure(
         or (
             "Ours_final Partial OT"
             if is_partial_ot
-            else ("Ours_final UOT" if is_uot else "Ours_final full OT")
+            else ("Ours_final NR-OT" if is_nr_ot else ("Ours_final UOT" if is_uot else "Ours_final full OT"))
         )
     )
     visual_style = str(visual_style or "legacy").strip().lower().replace("-", "_")
     if visual_style in {"paper", "q1", "compact", "publication"}:
         paper_full_ot = transport_kind in {"balanced", "balanced_ot", "full_ot", "ot"}
         return _export_uot_paper_evidence_figure(
-            outputs=outputs,
+            outputs=plot_outputs,
             query_images=query_images,
             support_images=support_images,
             logits=logits,
@@ -2070,7 +2180,7 @@ def export_uot_evidence_figure(
         decision_margin = true_score - best_wrong_score
 
         shot_idx = _select_transport_shot(
-            outputs,
+            plot_outputs,
             query_idx=query_idx,
             class_idx=true_class,
             way_num=way_num,
@@ -2081,7 +2191,7 @@ def export_uot_evidence_figure(
         support_mass = pair_plan.sum(dim=-2)
         transported_mass = float(pair_plan.sum().item())
         expected_mass = _shot_expected_mass(
-            outputs,
+            plot_outputs,
             query_idx=query_idx,
             class_idx=true_class,
             shot_idx=shot_idx,
@@ -2106,7 +2216,7 @@ def export_uot_evidence_figure(
         if cost_matrix is not None and query_idx < cost_matrix.shape[0]:
             pair_cost = cost_matrix[query_idx, true_class, shot_idx]
         transport_threshold = _threshold_for_transport_pair(
-            outputs,
+            plot_outputs,
             query_idx=query_idx,
             class_idx=true_class,
             shot_idx=shot_idx,
@@ -2179,13 +2289,13 @@ def export_uot_evidence_figure(
             if bg_parts:
                 evidence_bg_mass_ratio = float(np.mean(bg_parts))
         sink_mass = _noise_sink_value(
-            outputs,
+            plot_outputs,
             "ecot_noise_sink_query_mass",
             query_idx=query_idx,
             class_idx=true_class,
             shot_idx=shot_idx,
         ) + _noise_sink_value(
-            outputs,
+            plot_outputs,
             "ecot_noise_sink_support_mass",
             query_idx=query_idx,
             class_idx=true_class,
@@ -2268,48 +2378,54 @@ def export_uot_evidence_figure(
             subtitle=correspondence_subtitle,
         )
 
-        rows.append(
-            {
-                "episode_index": episode_index,
-                "query_rank_in_episode": query_idx,
-                "variant_label": variant_text,
-                "transport_kind": transport_kind,
-                "true_class": true_class,
-                "true_class_name": class_names[true_class] if true_class < len(class_names) else str(true_class),
-                "pred_class": pred_class,
-                "pred_class_name": class_names[pred_class] if pred_class < len(class_names) else str(pred_class),
-                "best_wrong_class": best_wrong_class,
-                "best_wrong_class_name": (
-                    class_names[best_wrong_class] if best_wrong_class < len(class_names) else str(best_wrong_class)
-                ),
-                "selected_shot": shot_idx,
-                "correct": int(true_class == pred_class),
-                "true_score": true_score,
-                "best_wrong_score": best_wrong_score,
-                "decision_margin": decision_margin,
-                "expected_mass": expected_mass,
-                "transported_mass": transported_mass,
-                "unmatched_fraction": unmatched_fraction,
-                "evidence_map_source": visual_source,
-                "positive_evidence_total": positive_evidence_total,
-                "pulse_to_pulse_mass_ratio": pulse_to_pulse_mass_ratio,
-                "query_bright_mass_ratio": query_bright_mass_ratio,
-                "support_bright_mass_ratio": support_bright_mass_ratio,
-                "positive_pulse_to_pulse_ratio": positive_pulse_to_pulse_ratio,
-                "transport_cost_threshold": transport_threshold,
-                "top_match_count": top_match_count,
-                "top_match_score_fraction": top_match_score_fraction,
-                "max_match_score_fraction": max_match_score_fraction,
-                "top_match_mass_fraction": top_match_score_fraction,
-                "max_match_mass_fraction": max_match_score_fraction,
-                "evidence_background_mass_ratio": evidence_bg_mass_ratio,
-                "evidence_query_background_mass_ratio": query_bg_mass_ratio,
-                "evidence_support_background_mass_ratio": support_bg_mass_ratio,
-                "noise_sink_mass": sink_mass,
-                "save_path": save_path,
-                "all_class_match_path": all_class_match_path,
-            }
+        row = {
+            "episode_index": episode_index,
+            "query_rank_in_episode": query_idx,
+            "variant_label": variant_text,
+            "transport_kind": transport_kind,
+            "true_class": true_class,
+            "true_class_name": class_names[true_class] if true_class < len(class_names) else str(true_class),
+            "pred_class": pred_class,
+            "pred_class_name": class_names[pred_class] if pred_class < len(class_names) else str(pred_class),
+            "best_wrong_class": best_wrong_class,
+            "best_wrong_class_name": (
+                class_names[best_wrong_class] if best_wrong_class < len(class_names) else str(best_wrong_class)
+            ),
+            "selected_shot": shot_idx,
+            "correct": int(true_class == pred_class),
+            "true_score": true_score,
+            "best_wrong_score": best_wrong_score,
+            "decision_margin": decision_margin,
+            "expected_mass": expected_mass,
+            "transported_mass": transported_mass,
+            "unmatched_fraction": unmatched_fraction,
+            "evidence_map_source": visual_source,
+            "positive_evidence_total": positive_evidence_total,
+            "pulse_to_pulse_mass_ratio": pulse_to_pulse_mass_ratio,
+            "query_bright_mass_ratio": query_bright_mass_ratio,
+            "support_bright_mass_ratio": support_bright_mass_ratio,
+            "positive_pulse_to_pulse_ratio": positive_pulse_to_pulse_ratio,
+            "transport_cost_threshold": transport_threshold,
+            "top_match_count": top_match_count,
+            "top_match_score_fraction": top_match_score_fraction,
+            "max_match_score_fraction": max_match_score_fraction,
+            "top_match_mass_fraction": top_match_score_fraction,
+            "max_match_mass_fraction": max_match_score_fraction,
+            "evidence_background_mass_ratio": evidence_bg_mass_ratio,
+            "evidence_query_background_mass_ratio": query_bg_mass_ratio,
+            "evidence_support_background_mass_ratio": support_bg_mass_ratio,
+            "noise_sink_mass": sink_mass,
+            "save_path": save_path,
+            "all_class_match_path": all_class_match_path,
+        }
+        row.update(
+            _nr_ot_pair_diagnostics(
+                plot_outputs,
+                query_idx=query_idx,
+                class_idx=true_class,
+            )
         )
+        rows.append(row)
 
         class_positions = np.arange(len(score_np))
         colors = ["#94a3b8"] * len(score_np)
@@ -2339,7 +2455,7 @@ def export_uot_evidence_figure(
     fig.savefig(save_path, dpi=260, bbox_inches="tight")
     plt.close(fig)
     _export_uot_all_class_match_figure(
-        outputs=outputs,
+        outputs=plot_outputs,
         query_images=query_images,
         support_images=support_images,
         logits=logits,

@@ -41,6 +41,7 @@ from net.modules.rival_conditional_ground_cost import (
 )
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
 from net.modules.spatial_context_injection import SpatialContextInjection
+from net.modules.nuisance_referenced_ot import NuisanceReferencedOT
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.modules.utility_contrastive_marginals import UtilityContrastiveMarginals
 from net.modules.verified_region_matching import VerifiedRegionMatchingUOT
@@ -518,6 +519,15 @@ class OursM2(JECOTM2):
             kwargs.pop("global_residual_mode", "residual")
         )
         global_residual_weight = float(kwargs.pop("global_residual_weight", 0.10))
+        enable_nr_ot = _bool_config(kwargs.pop("enable_nr_ot", False))
+        nr_ot_mode = str(kwargs.pop("nr_ot_mode", "standalone")).strip().lower().replace("-", "_")
+        if nr_ot_mode not in {"standalone", "residual"}:
+            raise ValueError(
+                f"Unsupported nr_ot_mode: {nr_ot_mode}. Expected 'standalone' or 'residual'."
+            )
+        nr_ot_weight = float(kwargs.pop("nr_ot_weight", 1.0))
+        nr_ot_novelty_temp = float(kwargs.pop("nr_ot_novelty_temp", 0.5))
+        nr_ot_uniform_reference = _bool_config(kwargs.pop("nr_ot_uniform_reference", True))
         enable_residual_aligned_uot = _bool_config(kwargs.pop("enable_residual_aligned_uot", False))
         rauot_tau = float(kwargs.pop("rauot_tau", 0.50))
         rauot_margin = float(kwargs.pop("rauot_margin", 0.0))
@@ -1171,6 +1181,17 @@ class OursM2(JECOTM2):
         self.enable_global_residual_score = bool(enable_global_residual_score)
         self.global_residual_mode = str(global_residual_mode)
         self.global_residual_weight = float(global_residual_weight)
+        self.enable_nr_ot = bool(enable_nr_ot)
+        self.nr_ot_mode = str(nr_ot_mode)
+        self.nr_ot_weight = float(nr_ot_weight)
+        self.nr_ot_novelty_temp = float(nr_ot_novelty_temp)
+        self.nr_ot_uniform_reference = bool(nr_ot_uniform_reference)
+        if self.enable_nr_ot and self.enable_global_residual_score:
+            raise ValueError(
+                "enable_nr_ot and enable_global_residual_score are mutually exclusive: "
+                "NR-OT is the principled, background-debiased replacement for the naive "
+                "GAP-cosine global residual."
+            )
         self.enable_residual_aligned_uot = bool(enable_residual_aligned_uot)
         self.rauot_tau = float(rauot_tau)
         self.rauot_margin = float(rauot_margin)
@@ -1484,6 +1505,21 @@ class OursM2(JECOTM2):
                 kernel_size=int(sci_kernel_size),
             )
             self._last_sci_diagnostics: dict[str, torch.Tensor] | None = None
+
+        self.enable_nr_ot = bool(getattr(self, "enable_nr_ot", False))
+        self._nr_ot_export_evidence = False
+        if self.enable_nr_ot:
+            self.nuisance_referenced_ot = NuisanceReferencedOT(
+                novelty_temp=self.nr_ot_novelty_temp,
+                threshold_init=float(
+                    torch.as_tensor(self.transport_cost_threshold).detach().clamp_min(self.eps)
+                ),
+                uniform_reference_marginal=self.nr_ot_uniform_reference,
+            )
+            self._last_nr_ot_diagnostics: dict[str, torch.Tensor] | None = None
+
+    def set_nr_ot_evidence_export_context(self, active: bool) -> None:
+        self._nr_ot_export_evidence = bool(active)
 
     @property
     def uses_ours_gap_control(self) -> bool:
@@ -4442,6 +4478,18 @@ class OursM2(JECOTM2):
                 way_num=way_num,
                 shot_num=shot_num,
             )
+        if (
+            getattr(self, "enable_nr_ot", False)
+            and query_tokens is not None
+            and support_tokens is not None
+        ):
+            self._apply_nr_ot_score(
+                payload,
+                query_tokens=query_tokens,
+                support_tokens=support_tokens,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
         return payload
 
     def _global_prototype_logits(
@@ -4507,6 +4555,61 @@ class OursM2(JECOTM2):
         payload["class_scores"] = fused_logits
         payload["global_residual_weight"] = effective_weight.detach()
         payload["global_residual_mode_id"] = mode_id.detach()
+
+    def _apply_nr_ot_score(
+        self,
+        payload: dict[str, torch.Tensor],
+        *,
+        query_tokens: torch.Tensor,
+        support_tokens: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> None:
+        """Fuse the Nuisance-Referenced OT score into the payload.
+
+        ``standalone`` mode replaces the base Ours-Final logits with the
+        background-debiased NR-OT logits; ``residual`` mode adds them, scaled by
+        ``nr_ot_weight``, on top of the base local UOT logits.
+        """
+        base_logits = payload.get("logits")
+        if not torch.is_tensor(base_logits):
+            return
+        nr_logits, diagnostics = self.nuisance_referenced_ot(
+            query_tokens=query_tokens,
+            support_tokens=support_tokens,
+            way_num=int(way_num),
+            shot_num=int(shot_num),
+            score_scale=float(self.score_scale),
+            eps=float(self.sinkhorn_epsilon),
+            tau_q=float(self.tau_q),
+            tau_c=float(self.tau_c),
+            rho=float(self.fixed_mass),
+            sinkhorn_iters=int(self.sinkhorn_iterations),
+            sinkhorn_tol=float(self.sinkhorn_tolerance),
+            return_evidence_payload=bool(getattr(self, "_nr_ot_export_evidence", False)),
+        )
+        nr_logits = nr_logits.to(device=base_logits.device, dtype=base_logits.dtype)
+        if tuple(nr_logits.shape) != tuple(base_logits.shape):
+            raise ValueError(
+                f"NR-OT logits shape {tuple(nr_logits.shape)} does not match base logits "
+                f"{tuple(base_logits.shape)}"
+            )
+        if self.nr_ot_mode == "residual":
+            weight = base_logits.new_tensor(float(self.nr_ot_weight))
+            fused_logits = base_logits + weight * nr_logits
+        else:  # standalone
+            fused_logits = nr_logits
+        payload["local_scores"] = base_logits
+        payload["nr_ot_scores"] = nr_logits
+        payload["logits"] = fused_logits
+        payload["class_scores"] = fused_logits
+        diagnostics["nr_ot/enabled"] = base_logits.new_tensor(1.0).detach()
+        diagnostics["nr_ot/mode_id"] = base_logits.new_tensor(
+            1.0 if self.nr_ot_mode == "residual" else 0.0
+        ).detach()
+        diagnostics["nr_ot/logit_delta_abs"] = (nr_logits - base_logits).abs().mean().detach()
+        self._last_nr_ot_diagnostics = diagnostics
+        payload.update(diagnostics)
 
     def _update_differential_mode_template(self, episode_template: torch.Tensor) -> None:
         if not self.training:
@@ -4798,6 +4901,8 @@ class OursM2(JECOTM2):
             self._last_context_diagnostics = None
         if getattr(self, "enable_sci", False):
             self._last_sci_diagnostics = None
+        if getattr(self, "enable_nr_ot", False):
+            self._last_nr_ot_diagnostics = None
         if use_context_debug:
             self._context_debug_images = []
             self._context_debug_fmaps = []
@@ -4873,6 +4978,8 @@ class OursM2(JECOTM2):
                 outputs.update(self._last_struct_diagnostics)
             if getattr(self, "enable_sci", False) and self._last_sci_diagnostics is not None:
                 outputs.update(self._last_sci_diagnostics)
+            if getattr(self, "enable_nr_ot", False) and self._last_nr_ot_diagnostics is not None:
+                outputs.update(self._last_nr_ot_diagnostics)
         return outputs
 
     def set_rival_conditional_cost_test_context(self, *, is_noise: bool) -> None:
