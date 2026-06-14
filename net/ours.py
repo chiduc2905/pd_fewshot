@@ -521,13 +521,17 @@ class OursM2(JECOTM2):
         global_residual_weight = float(kwargs.pop("global_residual_weight", 0.10))
         enable_nr_ot = _bool_config(kwargs.pop("enable_nr_ot", False))
         nr_ot_mode = str(kwargs.pop("nr_ot_mode", "standalone")).strip().lower().replace("-", "_")
-        if nr_ot_mode not in {"standalone", "residual"}:
+        if nr_ot_mode not in {"standalone", "residual", "gated_residual"}:
             raise ValueError(
-                f"Unsupported nr_ot_mode: {nr_ot_mode}. Expected 'standalone' or 'residual'."
+                f"Unsupported nr_ot_mode: {nr_ot_mode}. Expected 'standalone', "
+                "'residual', or 'gated_residual'."
             )
         nr_ot_weight = float(kwargs.pop("nr_ot_weight", 1.0))
         nr_ot_novelty_temp = float(kwargs.pop("nr_ot_novelty_temp", 0.5))
         nr_ot_uniform_reference = _bool_config(kwargs.pop("nr_ot_uniform_reference", True))
+        nr_ot_eval_only = _bool_config(kwargs.pop("nr_ot_eval_only", False))
+        nr_ot_gate_temperature = float(kwargs.pop("nr_ot_gate_temperature", 1.0))
+        nr_ot_detach = _bool_config(kwargs.pop("nr_ot_detach", False))
         enable_residual_aligned_uot = _bool_config(kwargs.pop("enable_residual_aligned_uot", False))
         rauot_tau = float(kwargs.pop("rauot_tau", 0.50))
         rauot_margin = float(kwargs.pop("rauot_margin", 0.0))
@@ -1186,6 +1190,9 @@ class OursM2(JECOTM2):
         self.nr_ot_weight = float(nr_ot_weight)
         self.nr_ot_novelty_temp = float(nr_ot_novelty_temp)
         self.nr_ot_uniform_reference = bool(nr_ot_uniform_reference)
+        self.nr_ot_eval_only = bool(nr_ot_eval_only)
+        self.nr_ot_gate_temperature = float(nr_ot_gate_temperature)
+        self.nr_ot_detach = bool(nr_ot_detach)
         if self.enable_nr_ot and self.enable_global_residual_score:
             raise ValueError(
                 "enable_nr_ot and enable_global_residual_score are mutually exclusive: "
@@ -1231,12 +1238,16 @@ class OursM2(JECOTM2):
             ("vrm_lambda", self.vrm_lambda),
             ("vrm_rival_margin", self.vrm_rival_margin),
             ("global_residual_weight", self.global_residual_weight),
+            ("nr_ot_weight", self.nr_ot_weight),
+            ("nr_ot_gate_temperature", self.nr_ot_gate_temperature),
             ("rauot_margin", self.rauot_margin),
             ("rauot_cost_weight", self.rauot_cost_weight),
             ("hcuot_cost_weight", self.hcuot_cost_weight),
         ):
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if self.nr_ot_gate_temperature <= 0.0:
+            raise ValueError("nr_ot_gate_temperature must be positive")
         if self.enable_residual_aligned_uot and not self.enable_global_residual_score:
             raise ValueError("enable_residual_aligned_uot requires enable_global_residual_score")
         if self.rauot_tau <= 0.0:
@@ -4569,10 +4580,26 @@ class OursM2(JECOTM2):
 
         ``standalone`` mode replaces the base Ours-Final logits with the
         background-debiased NR-OT logits; ``residual`` mode adds them, scaled by
-        ``nr_ot_weight``, on top of the base local UOT logits.
+        ``nr_ot_weight``, on top of the base local UOT logits.  ``gated_residual``
+        preserves the base decision when the local UOT margin is already high
+        and uses NR-OT as an uncertainty-time verifier.
         """
         base_logits = payload.get("logits")
         if not torch.is_tensor(base_logits):
+            return
+        if self.training and getattr(self, "nr_ot_eval_only", False):
+            payload["local_scores"] = base_logits
+            diagnostics = {
+                "nr_ot/enabled": base_logits.new_tensor(1.0).detach(),
+                "nr_ot/mode_id": base_logits.new_tensor(
+                    2.0 if self.nr_ot_mode == "gated_residual" else (1.0 if self.nr_ot_mode == "residual" else 0.0)
+                ).detach(),
+                "nr_ot/eval_only": base_logits.new_tensor(1.0).detach(),
+                "nr_ot/skipped_train": base_logits.new_tensor(1.0).detach(),
+                "nr_ot/weight": base_logits.new_tensor(float(self.nr_ot_weight)).detach(),
+            }
+            self._last_nr_ot_diagnostics = diagnostics
+            payload.update(diagnostics)
             return
         nr_logits, diagnostics = self.nuisance_referenced_ot(
             query_tokens=query_tokens,
@@ -4594,9 +4621,19 @@ class OursM2(JECOTM2):
                 f"NR-OT logits shape {tuple(nr_logits.shape)} does not match base logits "
                 f"{tuple(base_logits.shape)}"
             )
-        if self.nr_ot_mode == "residual":
-            weight = base_logits.new_tensor(float(self.nr_ot_weight))
-            fused_logits = base_logits + weight * nr_logits
+        nr_term = nr_logits.detach() if getattr(self, "nr_ot_detach", False) else nr_logits
+        weight = base_logits.new_tensor(float(self.nr_ot_weight))
+        gate = base_logits.new_ones((base_logits.shape[0], 1))
+        base_margin = base_logits.new_zeros((base_logits.shape[0],))
+        if self.nr_ot_mode == "gated_residual":
+            if base_logits.shape[1] >= 2:
+                top2 = base_logits.detach().topk(2, dim=1).values
+                base_margin = (top2[:, 0] - top2[:, 1]).clamp_min(0.0)
+            gate = torch.exp(-base_margin / float(self.nr_ot_gate_temperature)).unsqueeze(1)
+            gate = gate.clamp(0.0, 1.0).to(device=base_logits.device, dtype=base_logits.dtype)
+            fused_logits = base_logits + weight * gate * nr_term
+        elif self.nr_ot_mode == "residual":
+            fused_logits = base_logits + weight * nr_term
         else:  # standalone
             fused_logits = nr_logits
         payload["local_scores"] = base_logits
@@ -4605,9 +4642,24 @@ class OursM2(JECOTM2):
         payload["class_scores"] = fused_logits
         diagnostics["nr_ot/enabled"] = base_logits.new_tensor(1.0).detach()
         diagnostics["nr_ot/mode_id"] = base_logits.new_tensor(
-            1.0 if self.nr_ot_mode == "residual" else 0.0
+            2.0 if self.nr_ot_mode == "gated_residual" else (1.0 if self.nr_ot_mode == "residual" else 0.0)
         ).detach()
+        diagnostics["nr_ot/eval_only"] = base_logits.new_tensor(
+            1.0 if getattr(self, "nr_ot_eval_only", False) else 0.0
+        ).detach()
+        diagnostics["nr_ot/skipped_train"] = base_logits.new_tensor(0.0).detach()
+        diagnostics["nr_ot/detached"] = base_logits.new_tensor(
+            1.0 if getattr(self, "nr_ot_detach", False) else 0.0
+        ).detach()
+        diagnostics["nr_ot/weight"] = weight.detach()
+        diagnostics["nr_ot/gate_mean"] = gate.detach().mean()
+        diagnostics["nr_ot/gate_active_frac"] = (gate.detach().squeeze(1) > 0.5).to(base_logits.dtype).mean()
+        diagnostics["nr_ot/base_margin_mean"] = base_margin.detach().mean()
         diagnostics["nr_ot/logit_delta_abs"] = (nr_logits - base_logits).abs().mean().detach()
+        diagnostics["nr_ot/fused_delta_abs"] = (fused_logits - base_logits).abs().mean().detach()
+        diagnostics["nr_ot/fused_pred_change_rate"] = (
+            fused_logits.detach().argmax(dim=1).ne(base_logits.detach().argmax(dim=1)).to(base_logits.dtype).mean()
+        )
         self._last_nr_ot_diagnostics = diagnostics
         payload.update(diagnostics)
 
@@ -5242,6 +5294,18 @@ class OursM2(JECOTM2):
             "rvuot_shot_mass_for_score",
             "local_scores",
             "global_scores",
+            "nr_ot_scores",
+            "nr_ot_class_transport_plan",
+            "nr_ot_class_cost_matrix",
+            "nr_ot_ref_transport_plan",
+            "nr_ot_ref_cost_matrix",
+            "nr_ot_query_marginal",
+            "nr_ot_support_marginal",
+            "nr_ot_class_shot_transported_mass",
+            "nr_ot_class_shot_expected_mass",
+            "nr_ot_class_evidence",
+            "nr_ot_ref_evidence",
+            "nr_ot_debias_gap",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.cat([item[key] for item in batch_outputs], dim=0)
@@ -5269,6 +5333,7 @@ class OursM2(JECOTM2):
             "pot_guide/marginal_q_min",
             "global_residual_weight",
             "global_residual_mode_id",
+            "nr_ot_transport_cost_threshold",
         ):
             if key in batch_outputs[0]:
                 stacked[key] = torch.stack([item[key] for item in batch_outputs]).mean()
@@ -5316,6 +5381,7 @@ class OursM2(JECOTM2):
             "ear_uot/",
             "residual_aligned/",
             "rae_uot/",
+            "nr_ot/",
             "transport_audit/",
             "transport_audit_unverified/",
         ):

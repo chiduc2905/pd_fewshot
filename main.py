@@ -119,6 +119,12 @@ def nr_ot_standalone_enabled(args):
     )
 
 
+def nr_ot_enabled(args):
+    return _is_ours_final_model(args) and _bool_flag(
+        getattr(args, "enable_nr_ot", "false"), default=False
+    )
+
+
 def _uot_auxiliary_figure_paths(path):
     stem, ext = os.path.splitext(str(path))
     ext = ext or ".png"
@@ -534,6 +540,9 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
                 "nr_ot_weight",
                 "nr_ot_novelty_temp",
                 "nr_ot_uniform_reference",
+                "nr_ot_eval_only",
+                "nr_ot_gate_temperature",
+                "nr_ot_detach",
             }
         ),
     ),
@@ -2700,8 +2709,11 @@ def get_args():
         "--nr_ot_mode",
         type=str,
         default="standalone",
-        choices=["standalone", "residual"],
-        help="standalone uses NR-OT logits as the class scores; residual adds them onto base local UOT logits.",
+        choices=["standalone", "residual", "gated_residual"],
+        help=(
+            "standalone uses NR-OT logits as class scores; residual adds them onto base local UOT logits; "
+            "gated_residual applies the residual mainly when the base local margin is low."
+        ),
     )
     parser.add_argument(
         "--nr_ot_weight",
@@ -2722,6 +2734,28 @@ def get_args():
         default="true",
         type=str,
         help="Use a uniform background marginal in the debiasing reference transport (true) or a symmetric novelty marginal (false).",
+    )
+    parser.add_argument(
+        "--nr_ot_eval_only",
+        nargs="?",
+        const="true",
+        default="false",
+        type=str,
+        help="Skip NR-OT during training batches and apply it only in eval/test mode.",
+    )
+    parser.add_argument(
+        "--nr_ot_gate_temperature",
+        type=float,
+        default=1.0,
+        help="Base-margin temperature for nr_ot_mode=gated_residual; larger values let NR-OT affect more confident episodes.",
+    )
+    parser.add_argument(
+        "--nr_ot_detach",
+        nargs="?",
+        const="true",
+        default="false",
+        type=str,
+        help="Detach NR-OT logits before residual fusion during training.",
     )
     parser.add_argument(
         "--enable_token_attention_marginal",
@@ -5372,6 +5406,9 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "nr_ot_weight",
             "nr_ot_novelty_temp",
             "nr_ot_uniform_reference",
+            "nr_ot_eval_only",
+            "nr_ot_gate_temperature",
+            "nr_ot_detach",
             "enable_residual_aligned_uot",
             "rauot_tau",
             "rauot_margin",
@@ -7125,6 +7162,31 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     local_scores = scores.get("local_scores")
     if torch.is_tensor(local_scores) and local_scores.dim() == 2 and local_scores.shape[0] == targets.shape[0]:
         metrics.update(summarize_class_score_tensor(local_scores, targets, prefix="local"))
+        if (
+            torch.is_tensor(nr_ot_scores)
+            and nr_ot_scores.dim() == 2
+            and tuple(nr_ot_scores.shape) == tuple(local_scores.shape)
+            and tuple(logits.shape) == tuple(local_scores.shape)
+        ):
+            fused_pred = logits.argmax(dim=1)
+            local_pred = local_scores.argmax(dim=1)
+            fused_correct = fused_pred.eq(targets)
+            local_correct = local_pred.eq(targets)
+            metrics["nr_ot_vs_local_prediction_agreement"] = _scalar_metric(
+                fused_pred.eq(local_pred).float()
+            )
+            metrics["nr_ot_vs_local_change_rate"] = _scalar_metric(
+                fused_pred.ne(local_pred).float()
+            )
+            metrics["nr_ot_vs_local_fix_rate"] = _scalar_metric(
+                ((~local_correct) & fused_correct).float()
+            )
+            metrics["nr_ot_vs_local_harm_rate"] = _scalar_metric(
+                (local_correct & (~fused_correct)).float()
+            )
+            metrics["nr_ot_vs_local_accuracy_delta"] = _scalar_metric(
+                fused_correct.float() - local_correct.float()
+            )
 
     uot_energy_logits = scores.get("ecot_uot_energy_logits")
     if (
@@ -7842,6 +7904,20 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "nr_ot/debias_gap_mean",
         "nr_ot/novelty_top20_mass_frac",
         "nr_ot/logit_delta_abs",
+        "nr_ot/eval_only",
+        "nr_ot/skipped_train",
+        "nr_ot/detached",
+        "nr_ot/weight",
+        "nr_ot/gate_mean",
+        "nr_ot/gate_active_frac",
+        "nr_ot/base_margin_mean",
+        "nr_ot/fused_delta_abs",
+        "nr_ot/fused_pred_change_rate",
+        "nr_ot_vs_local_prediction_agreement",
+        "nr_ot_vs_local_change_rate",
+        "nr_ot_vs_local_fix_rate",
+        "nr_ot_vs_local_harm_rate",
+        "nr_ot_vs_local_accuracy_delta",
         "pulse/discriminative_gate_mean",
         "pulse/discriminative_gate_low_share",
         "pulse/rival_advantage_mean",
@@ -8297,6 +8373,20 @@ def format_diagnostic_summary(metrics):
         "nr_ot/debias_gap_mean",
         "nr_ot/novelty_top20_mass_frac",
         "nr_ot/logit_delta_abs",
+        "nr_ot/eval_only",
+        "nr_ot/skipped_train",
+        "nr_ot/detached",
+        "nr_ot/weight",
+        "nr_ot/gate_mean",
+        "nr_ot/gate_active_frac",
+        "nr_ot/base_margin_mean",
+        "nr_ot/fused_delta_abs",
+        "nr_ot/fused_pred_change_rate",
+        "nr_ot_vs_local_prediction_agreement",
+        "nr_ot_vs_local_change_rate",
+        "nr_ot_vs_local_fix_rate",
+        "nr_ot_vs_local_harm_rate",
+        "nr_ot_vs_local_accuracy_delta",
         "compact_loss",
         "decorr_loss",
         "entropy_loss",
@@ -9213,7 +9303,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             set_nr_ot_evidence_export_context(
                 net,
                 active=(
-                    nr_ot_standalone_enabled(args)
+                    nr_ot_enabled(args)
                     and uot_evidence_enabled
                     and not uot_evidence_complete
                 ),
@@ -9463,7 +9553,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                                 variant_label=uot_variant_label,
                                 visual_style=uot_evidence_visual_style,
                             )
-                            if rows and uot_transport_kind == "nr_ot":
+                            if rows and nr_ot_enabled(args):
                                 mechanism_rows = export_nr_ot_debiasing_figure(
                                     outputs=scores if isinstance(scores, dict) else {"logits": logits},
                                     query_images=query[0].detach().cpu(),
@@ -9697,7 +9787,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                     variant_label=uot_variant_label,
                     visual_style=uot_evidence_visual_style,
                 )
-                if rows and uot_transport_kind == "nr_ot":
+                if rows and nr_ot_enabled(args):
                     mechanism_rows = export_nr_ot_debiasing_figure(
                         outputs=candidate["outputs"],
                         query_images=candidate["query_images"],

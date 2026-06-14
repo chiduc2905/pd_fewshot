@@ -149,6 +149,50 @@ def test_ours_m2_standalone_changes_logits_and_surfaces_diagnostics():
     assert "nr_ot/threshold" in nr._last_nr_ot_diagnostics
 
 
+def test_nr_ot_eval_only_skips_training_forward_and_preserves_base_logits():
+    query = torch.randn(1, 3, 3, 64, 64)
+    support = torch.randn(1, 3, 1, 3, 64, 64)
+    torch.manual_seed(2)
+    base = _tiny_ours_final()
+    torch.manual_seed(2)
+    nr = _tiny_ours_final(
+        enable_nr_ot=True,
+        nr_ot_mode="gated_residual",
+        nr_ot_eval_only=True,
+        nr_ot_weight=0.1,
+    )
+    nr.load_state_dict(base.state_dict(), strict=False)
+    base.train()
+    nr.train()
+    lb = base(query, support)
+    ln = nr(query, support)
+    lb = lb.logits if hasattr(lb, "logits") else lb["logits"]
+    ln = ln.logits if hasattr(ln, "logits") else ln["logits"]
+    assert torch.allclose(lb, ln, atol=1e-5)
+    assert nr._last_nr_ot_diagnostics is not None
+    assert nr._last_nr_ot_diagnostics["nr_ot/skipped_train"].item() == 1.0
+
+
+def test_nr_ot_gated_residual_surfaces_gate_diagnostics():
+    query = torch.randn(1, 3, 3, 64, 64)
+    support = torch.randn(1, 3, 1, 3, 64, 64)
+    model = _tiny_ours_final(
+        enable_nr_ot=True,
+        nr_ot_mode="gated_residual",
+        nr_ot_weight=0.1,
+        nr_ot_gate_temperature=1.0,
+    )
+    model.eval()
+    with torch.no_grad():
+        outputs = model(query, support)
+    logits = outputs.logits if hasattr(outputs, "logits") else outputs["logits"] if isinstance(outputs, dict) else outputs
+    assert logits.shape == (3, 3)
+    assert model._last_nr_ot_diagnostics is not None
+    assert model._last_nr_ot_diagnostics["nr_ot/mode_id"].item() == 2.0
+    assert 0.0 <= model._last_nr_ot_diagnostics["nr_ot/gate_mean"].item() <= 1.0
+    assert "nr_ot/fused_delta_abs" in model._last_nr_ot_diagnostics
+
+
 def test_nr_ot_mutually_exclusive_with_global_residual():
     with pytest.raises(ValueError, match="mutually exclusive"):
         _tiny_ours_final(enable_nr_ot=True, enable_global_residual_score=True)

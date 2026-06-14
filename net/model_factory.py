@@ -3139,6 +3139,15 @@ def build_model_from_args(args):
                             "nr_ot_uniform_reference": _bool_flag(
                                 getattr(args, "nr_ot_uniform_reference", "true"), default=True
                             ),
+                            "nr_ot_eval_only": _bool_flag(
+                                getattr(args, "nr_ot_eval_only", "false"), default=False
+                            ),
+                            "nr_ot_gate_temperature": float(
+                                getattr(args, "nr_ot_gate_temperature", 1.0)
+                            ),
+                            "nr_ot_detach": _bool_flag(
+                                getattr(args, "nr_ot_detach", "false"), default=False
+                            ),
                         }
                         if is_ours_final_model
                         and _bool_flag(getattr(args, "enable_nr_ot", False), default=False)
