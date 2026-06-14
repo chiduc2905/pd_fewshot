@@ -361,6 +361,10 @@ def validate_dmuot_scope(args) -> None:
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
         raise ValueError("--enable_structural_augmentation is supported only with --model ours_final")
+    if _bool_flag(getattr(args, "enable_sci", False), default=False) and (
+        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+    ):
+        raise ValueError("--enable_sci is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_region_structural_uot", False), default=False) and (
         str(getattr(args, "model", "")).strip().lower() != "ours_final"
     ):
@@ -391,6 +395,14 @@ def validate_dmuot_scope(args) -> None:
     ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
         raise ValueError(
             "--enable_token_attention_marginal is supported only with "
+            "--model ours_final"
+        )
+    if _bool_flag(
+        getattr(args, "enable_verified_region_matching_uot", False),
+        default=False,
+    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+        raise ValueError(
+            "--enable_verified_region_matching_uot is supported only with "
             "--model ours_final"
         )
     marginal_mode = str(
@@ -3025,6 +3037,12 @@ def build_model_from_args(args):
                             "rc_cost_scope": str(
                                 getattr(args, "rc_cost_scope", "always")
                             ),
+                            "enable_sci": _bool_flag(
+                                getattr(args, "enable_sci", "false"),
+                                default=False,
+                            ),
+                            "sci_num_layers": int(getattr(args, "sci_num_layers", 2)),
+                            "sci_kernel_size": int(getattr(args, "sci_kernel_size", 3)),
                         }
                         if is_ours_final_model
                         else {}
@@ -3132,6 +3150,59 @@ def build_model_from_args(args):
                             getattr(
                                 args,
                                 "enable_token_attention_marginal",
+                                False,
+                            ),
+                            default=False,
+                        )
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_verified_region_matching_uot": True,
+                            "vrm_lambda": float(getattr(args, "vrm_lambda", 0.20)),
+                            "vrm_concentration_tau": float(
+                                getattr(args, "vrm_concentration_tau", 0.25)
+                            ),
+                            "vrm_region_tau": float(
+                                getattr(args, "vrm_region_tau", 0.50)
+                            ),
+                            "vrm_region_kernel_size": int(
+                                getattr(args, "vrm_region_kernel_size", 3)
+                            ),
+                            "vrm_use_concentration": _bool_flag(
+                                getattr(args, "vrm_use_concentration", "true"),
+                                default=True,
+                            ),
+                            "vrm_use_region_patch": _bool_flag(
+                                getattr(args, "vrm_use_region_patch", "true"),
+                                default=True,
+                            ),
+                            "vrm_use_rival": _bool_flag(
+                                getattr(args, "vrm_use_rival", "false"),
+                                default=False,
+                            ),
+                            "vrm_rival_tau": float(
+                                getattr(args, "vrm_rival_tau", 0.25)
+                            ),
+                            "vrm_rival_threshold": float(
+                                getattr(args, "vrm_rival_threshold", 0.0)
+                            ),
+                            "vrm_rival_evidence_tau": float(
+                                getattr(args, "vrm_rival_evidence_tau", 0.10)
+                            ),
+                            "vrm_rival_margin": float(
+                                getattr(args, "vrm_rival_margin", 0.50)
+                            ),
+                            "vrm_detach_gate": _bool_flag(
+                                getattr(args, "vrm_detach_gate", "true"),
+                                default=True,
+                            ),
+                        }
+                        if is_ours_final_model
+                        and _bool_flag(
+                            getattr(
+                                args,
+                                "enable_verified_region_matching_uot",
                                 False,
                             ),
                             default=False,

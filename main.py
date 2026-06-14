@@ -529,6 +529,26 @@ _OURS_FINAL_WANDB_OPTIONAL_GROUPS = (
         ),
     ),
     (
+        "enable_verified_region_matching_uot",
+        frozenset(
+            {
+                "enable_verified_region_matching_uot",
+                "vrm_lambda",
+                "vrm_concentration_tau",
+                "vrm_region_tau",
+                "vrm_region_kernel_size",
+                "vrm_use_concentration",
+                "vrm_use_region_patch",
+                "vrm_use_rival",
+                "vrm_rival_tau",
+                "vrm_rival_threshold",
+                "vrm_rival_evidence_tau",
+                "vrm_rival_margin",
+                "vrm_detach_gate",
+            }
+        ),
+    ),
+    (
         "enable_residual_aligned_uot",
         frozenset(
             {
@@ -2645,6 +2665,29 @@ def get_args():
         choices=["true", "false"],
         help="Share the TokenAttentionMarginal scorer across query and support.",
     )
+    parser.add_argument(
+        "--enable_verified_region_matching_uot",
+        nargs="?",
+        const="true",
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: verify local matches before UOT using "
+            "cost concentration and region-context consistency gates."
+        ),
+    )
+    parser.add_argument("--vrm_lambda", type=float, default=0.20)
+    parser.add_argument("--vrm_concentration_tau", type=float, default=0.25)
+    parser.add_argument("--vrm_region_tau", type=float, default=0.50)
+    parser.add_argument("--vrm_region_kernel_size", type=int, default=3)
+    parser.add_argument("--vrm_use_concentration", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--vrm_use_region_patch", type=str, default="true", choices=["true", "false"])
+    parser.add_argument("--vrm_use_rival", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--vrm_rival_tau", type=float, default=0.25)
+    parser.add_argument("--vrm_rival_threshold", type=float, default=0.0)
+    parser.add_argument("--vrm_rival_evidence_tau", type=float, default=0.10)
+    parser.add_argument("--vrm_rival_margin", type=float, default=0.50)
+    parser.add_argument("--vrm_detach_gate", type=str, default="true", choices=["true", "false"])
     parser.add_argument(
         "--enable_residual_aligned_uot",
         nargs="?",
@@ -5290,6 +5333,19 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "tam_uniform_floor",
             "tam_detach_weights",
             "tam_share_qk",
+            "enable_verified_region_matching_uot",
+            "vrm_lambda",
+            "vrm_concentration_tau",
+            "vrm_region_tau",
+            "vrm_region_kernel_size",
+            "vrm_use_concentration",
+            "vrm_use_region_patch",
+            "vrm_use_rival",
+            "vrm_rival_tau",
+            "vrm_rival_threshold",
+            "vrm_rival_evidence_tau",
+            "vrm_rival_margin",
+            "vrm_detach_gate",
         ):
             if checkpoint_args.get(ecot_key) is not None:
                 overrides[ecot_key] = checkpoint_args[ecot_key]
@@ -7476,6 +7532,30 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         "token_marginal/l1_drift",
         "token_marginal/transported_mass_fraction",
         "token_marginal/transported_mass_fraction_min",
+        "verified/enabled",
+        "verified/lambda",
+        "verified/concentration_enabled",
+        "verified/region_patch_enabled",
+        "verified/rival_enabled",
+        "verified/detach_gate",
+        "verified/concentration_score_mean",
+        "verified/concentration_score_max",
+        "verified/patch_consistency_mean",
+        "verified/patch_consistency_max",
+        "verified/rival_specificity_mean",
+        "verified/region_vs_token_consistency_gap",
+        "verified/gate_mean",
+        "verified/gate_min",
+        "verified/gate_max",
+        "verified/gate_class_gap",
+        "verified/cost_delta_ratio",
+        "verified/multiplier_mean",
+        "verified/accepted_mass_ratio",
+        "verified/rejected_mass_ratio",
+        "verified/plan_gate_mean",
+        "verified/plan_gate_correlation",
+        "verified/rival_margin",
+        "verified/class_evidence_std",
         "ours_probe/enabled",
         "ours_probe/common_margin",
         "ours_probe/negative_utility_mass_ratio",

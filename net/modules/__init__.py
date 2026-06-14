@@ -12,6 +12,8 @@ from .hierarchical_reliability_consensus import (
 from .hierarchical_set_v2 import ConsensusClassAggregator, SetConditionedShotRefiner
 from .mspta import MSPTATokenizer
 from .mutual_evidence_attention import MutualEvidenceAttentionMarginal
+from .spatial_context_injection import SpatialContextInjection
+from .verified_region_matching import VerifiedRegionMatchingUOT
 
 __all__ = [
     "AttentiveTokenPool",
@@ -26,5 +28,7 @@ __all__ = [
     "MSPTATokenizer",
     "MutualEvidenceAttentionMarginal",
     "SetConditionedShotRefiner",
+    "SpatialContextInjection",
+    "VerifiedRegionMatchingUOT",
 ]
 

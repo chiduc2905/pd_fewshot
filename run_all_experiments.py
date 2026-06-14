@@ -379,6 +379,7 @@ def get_args():
             "hubness_uot",
             "adaptive_relaxation",
             "tier1_diagnostic",
+            "verified_region",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -402,6 +403,7 @@ def get_args():
             "adaptive_relaxation=scalar UOT versus token-wise evidence-adaptive KL relaxation."
             " tier1_diagnostic=asymmetric UOT relaxation, threshold-init sensitivity, "
             "and learned token-attention marginals on the accepted global residual w=0.1 baseline."
+            " verified_region=parameter-free verified region matching gates before UOT."
         ),
     )
     parser.add_argument(
@@ -1728,6 +1730,93 @@ def build_tier1_diagnostic_variants():
         ]
     )
     return variants
+
+
+def build_ours_final_verified_region_variants():
+    """Verified-region matching gates on the accepted global residual baseline."""
+    base = _ours_final_base_args()
+    global_residual = [
+        "--enable_global_residual_score",
+        "--global_residual_mode",
+        "residual",
+        "--global_residual_weight",
+        "0.1",
+    ]
+    baseline = base + global_residual
+    vrm_base = [
+        "--enable_verified_region_matching_uot",
+        "true",
+        "--vrm_lambda",
+        "0.2",
+    ]
+    return [
+        {
+            "tag": "vrm_baseline",
+            "checkpoint_tag": "vrm_baseline",
+            "label": "Ours-Final + global residual w=0.1 baseline",
+            "extra_args": baseline,
+        },
+        {
+            "tag": "vrm_concentration",
+            "checkpoint_tag": "vrm_concentration",
+            "label": "VRM concentration gate only + global residual w=0.1",
+            "extra_args": baseline
+            + vrm_base
+            + [
+                "--vrm_use_concentration",
+                "true",
+                "--vrm_use_region_patch",
+                "false",
+                "--vrm_use_rival",
+                "false",
+            ],
+        },
+        {
+            "tag": "vrm_patch_region",
+            "checkpoint_tag": "vrm_patch_region",
+            "label": "VRM region-context patch gate only + global residual w=0.1",
+            "extra_args": baseline
+            + vrm_base
+            + [
+                "--vrm_use_concentration",
+                "false",
+                "--vrm_use_region_patch",
+                "true",
+                "--vrm_use_rival",
+                "false",
+            ],
+        },
+        {
+            "tag": "vrm_conc_patch",
+            "checkpoint_tag": "vrm_conc_patch",
+            "label": "VRM concentration + region-context patch gates + global residual w=0.1",
+            "extra_args": baseline
+            + vrm_base
+            + [
+                "--vrm_use_concentration",
+                "true",
+                "--vrm_use_region_patch",
+                "true",
+                "--vrm_use_rival",
+                "false",
+            ],
+        },
+        {
+            "tag": "vrm_full",
+            "checkpoint_tag": "vrm_full",
+            "label": "VRM concentration + region patch + reused rival evidence gate + global residual w=0.1",
+            "extra_args": baseline
+            + vrm_base
+            + [
+                "--vrm_use_concentration",
+                "true",
+                "--vrm_use_region_patch",
+                "true",
+                "--vrm_use_rival",
+                "true",
+            ],
+        },
+    ]
 
 
 def build_ours_final_hubness_uot_variants():
@@ -3542,6 +3631,13 @@ def parse_ours_final_variant_filter(variants_str):
         "t1_tam_floor0p3": "t1_tam_floor0p3",
         "t1_tam_detach": "t1_tam_detach",
         "t1_tam_no_gres": "t1_tam_no_gres",
+        "vrm_baseline": "vrm_baseline",
+        "vrm_concentration": "vrm_concentration",
+        "vrm_conc": "vrm_concentration",
+        "vrm_patch_region": "vrm_patch_region",
+        "vrm_patch": "vrm_patch_region",
+        "vrm_conc_patch": "vrm_conc_patch",
+        "vrm_full": "vrm_full",
     }
 
     parsed = []
@@ -4070,6 +4166,7 @@ def main():
         hubness_uot_variants = build_ours_final_hubness_uot_variants()
         adaptive_relaxation_variants = build_ours_final_adaptive_relaxation_variants()
         tier1_diagnostic_variants = build_tier1_diagnostic_variants()
+        verified_region_variants = build_ours_final_verified_region_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -4117,6 +4214,10 @@ def main():
             tier1_diagnostic_variants,
             ours_final_variant_filter,
         )
+        verified_region_variants = filter_ours_final_variants(
+            verified_region_variants,
+            ours_final_variant_filter,
+        )
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -4149,6 +4250,8 @@ def main():
             ablation_variants = adaptive_relaxation_variants
         elif suite_name == "tier1_diagnostic":
             ablation_variants = tier1_diagnostic_variants
+        elif suite_name == "verified_region":
+            ablation_variants = verified_region_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -4445,6 +4548,26 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in tier1_diagnostic_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "verified_region":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get(
+                        "checkpoint_tag",
+                        variant["tag"],
+                    ),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in verified_region_variants
                 for samples in samples_list
                 for shot in shots
             )

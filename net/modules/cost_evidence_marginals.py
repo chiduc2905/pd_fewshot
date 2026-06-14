@@ -149,6 +149,60 @@ def evidence_to_marginal(
     return rho * prob
 
 
+def compute_rival_discriminative_query_evidence(
+    cost: torch.Tensor,
+    *,
+    way_num: int,
+    shot_num: int,
+    tau_evidence: float,
+    rival_margin: float = 0.5,
+    eps: float = EPS,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Return query evidence after subtracting class-excluded rival evidence.
+
+    This factors out the ``mode='rival_aware'`` query branch so other
+    Ours-Final components can reuse the same discriminative signal without
+    reimplementing the rival aggregation.
+    """
+    if cost.dim() != 4:
+        raise ValueError(
+            f"cost must have shape (Nq, Way*Shot, Lq, Ls), got {tuple(cost.shape)}"
+        )
+    num_query, num_pairs, query_len, _support_len = cost.shape
+    way_num = int(way_num)
+    shot_num = int(shot_num)
+    if way_num <= 1:
+        raise ValueError("rival-aware evidence requires at least two classes")
+    if shot_num <= 0 or num_pairs != way_num * shot_num:
+        raise ValueError(
+            f"cost pair dimension {num_pairs} != way*shot={way_num * shot_num}"
+        )
+    if float(rival_margin) < 0.0:
+        raise ValueError("rival_margin must be non-negative")
+
+    q_evidence = compute_query_evidence(cost, tau_evidence, eps)
+    q_evidence_by_class = q_evidence.reshape(
+        num_query,
+        way_num,
+        shot_num,
+        query_len,
+    )
+    class_evidence = q_evidence_by_class.mean(dim=2)
+    rival_sum = class_evidence.sum(dim=1, keepdim=True) - class_evidence
+    rival_evidence = rival_sum / float(max(way_num - 1, 1))
+    disc_evidence = class_evidence - float(rival_margin) * rival_evidence
+    disc_evidence_expanded = (
+        disc_evidence.unsqueeze(2)
+        .expand(-1, -1, shot_num, -1)
+        .reshape(num_query, num_pairs, query_len)
+    )
+    diagnostics = {
+        "evidence/rival_margin": cost.new_tensor(float(rival_margin)),
+        "evidence/class_evidence_std": class_evidence.std(dim=1).mean().detach(),
+    }
+    return disc_evidence_expanded, diagnostics
+
+
 class CostEvidenceMarginals(nn.Module):
     """Cost-derived evidence marginals for UOT.
 
@@ -261,25 +315,15 @@ class CostEvidenceMarginals(nn.Module):
             q_evidence = compute_query_evidence(c, self.tau_evidence, self.eps)
 
             if self.mode == "rival_aware" and way_num > 1:
-                q_evidence_by_class = q_evidence.reshape(
-                    num_query, way_num, shot_num, query_len
+                q_evidence, rival_diag = compute_rival_discriminative_query_evidence(
+                    c,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    tau_evidence=self.tau_evidence,
+                    rival_margin=self.rival_margin,
+                    eps=self.eps,
                 )
-                class_evidence = q_evidence_by_class.mean(dim=2)
-
-                rival_sum = class_evidence.sum(dim=1, keepdim=True) - class_evidence
-                rival_evidence = rival_sum / float(max(way_num - 1, 1))
-
-                disc_evidence = class_evidence - self.rival_margin * rival_evidence
-
-                disc_evidence_expanded = disc_evidence.unsqueeze(2).expand(
-                    -1, -1, shot_num, -1
-                )
-                q_evidence = disc_evidence_expanded.reshape(
-                    num_query, num_pairs, query_len
-                )
-
-                diagnostics["evidence/rival_margin"] = cost.new_tensor(self.rival_margin)
-                diagnostics["evidence/class_evidence_std"] = class_evidence.std(dim=1).mean().detach()
+                diagnostics.update(rival_diag)
 
             query_marginal = evidence_to_marginal(
                 q_evidence, self.tau_marginal, rho_val, self.eps

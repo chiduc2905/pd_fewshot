@@ -40,8 +40,10 @@ from net.modules.rival_conditional_ground_cost import (
     normalize_rival_cost_scope,
 )
 from net.modules.spatial_context_enrichment import SpatialContextEnrichment, parse_context_kernel_sizes
+from net.modules.spatial_context_injection import SpatialContextInjection
 from net.modules.structural_token_augmentation import StructuralTokenAugmentation
 from net.modules.utility_contrastive_marginals import UtilityContrastiveMarginals
+from net.modules.verified_region_matching import VerifiedRegionMatchingUOT
 from net.jecot_m2 import JECOTM2
 from net.modules.partial_ot import (
     compute_partial_transport_cost,
@@ -383,6 +385,9 @@ class OursM2(JECOTM2):
         evidence_mode: str = "both",
         evidence_rival_margin: float = 0.5,
         evidence_detach: bool = True,
+        enable_sci: bool = False,
+        sci_num_layers: int = 2,
+        sci_kernel_size: int = 3,
         **kwargs,
     ) -> None:
         enable_multiscale_ot = _bool_config(kwargs.pop("enable_multiscale_ot", False))
@@ -493,6 +498,21 @@ class OursM2(JECOTM2):
         rvuot_rival_tau = float(kwargs.pop("rvuot_rival_tau", 0.10))
         rvuot_rival_margin = float(kwargs.pop("rvuot_rival_margin", 0.0))
         rvuot_detach_gate = _bool_config(kwargs.pop("rvuot_detach_gate", True))
+        enable_verified_region_matching_uot = _bool_config(
+            kwargs.pop("enable_verified_region_matching_uot", False)
+        )
+        vrm_lambda = float(kwargs.pop("vrm_lambda", 0.20))
+        vrm_concentration_tau = float(kwargs.pop("vrm_concentration_tau", 0.25))
+        vrm_region_tau = float(kwargs.pop("vrm_region_tau", 0.50))
+        vrm_region_kernel_size = int(kwargs.pop("vrm_region_kernel_size", 3))
+        vrm_use_concentration = _bool_config(kwargs.pop("vrm_use_concentration", True))
+        vrm_use_region_patch = _bool_config(kwargs.pop("vrm_use_region_patch", True))
+        vrm_use_rival = _bool_config(kwargs.pop("vrm_use_rival", False))
+        vrm_rival_tau = float(kwargs.pop("vrm_rival_tau", 0.25))
+        vrm_rival_threshold = float(kwargs.pop("vrm_rival_threshold", 0.0))
+        vrm_rival_evidence_tau = float(kwargs.pop("vrm_rival_evidence_tau", 0.10))
+        vrm_rival_margin = float(kwargs.pop("vrm_rival_margin", 0.50))
+        vrm_detach_gate = _bool_config(kwargs.pop("vrm_detach_gate", True))
         enable_global_residual_score = _bool_config(kwargs.pop("enable_global_residual_score", False))
         global_residual_mode = _normalize_global_residual_score_mode(
             kwargs.pop("global_residual_mode", "residual")
@@ -737,6 +757,58 @@ class OursM2(JECOTM2):
                 raise ValueError("enable_reciprocal_verified_uot cannot be combined with enable_verified_uot_score")
             if self.ours_ablation == "gap":
                 raise ValueError("enable_reciprocal_verified_uot is not supported with ours_ablation='gap'")
+        if enable_verified_region_matching_uot:
+            if self.ours_ablation != "full":
+                raise ValueError(
+                    "enable_verified_region_matching_uot requires ours_ablation='full'"
+                )
+            if self.ours_final_score_mode != "threshold_mass":
+                raise ValueError(
+                    "enable_verified_region_matching_uot requires "
+                    "ours_final_score_mode='threshold_mass'"
+                )
+            conflicts = {
+                "ours_final_marginal_mode": self.ours_final_marginal_mode != "uniform",
+                "marginal_kind": self.marginal_kind != "uniform",
+                "token_g_kind": self.token_g_kind != "none",
+                "enable_evidence_marginals": _bool_config(
+                    enable_evidence_marginals
+                ),
+                "enable_evidence_adaptive_relaxation_uot": (
+                    self.enable_evidence_adaptive_relaxation_uot
+                ),
+                "enable_rival_conditional_cost": self.enable_rival_conditional_cost,
+                "enable_rival_aware_evidence_uot": enable_rival_aware_evidence_uot,
+                "enable_hubness_calibrated_uot": enable_hubness_calibrated_uot,
+                "enable_episode_contrastive_uot": enable_episode_contrastive_uot,
+                "enable_residual_aligned_uot": enable_residual_aligned_uot,
+                "enable_verified_uot_score": enable_verified_uot_score,
+                "enable_reciprocal_verified_uot": enable_reciprocal_verified_uot,
+                "enable_discriminative_uot": enable_discriminative_uot,
+                "enable_region_structural_uot": enable_region_structural_uot,
+                "enable_adaptive_region_uot": enable_adaptive_region_uot,
+                "enable_pulse_region_uot": enable_pulse_region_uot,
+                "enable_multiscale_ot": enable_multiscale_ot,
+                "enable_mspta": enable_mspta,
+                "enable_context_enrichment": enable_context_enrichment,
+                "enable_structural_augmentation": enable_structural_augmentation,
+                "enable_label_ot": enable_label_ot,
+                "enable_pot_guide": enable_pot_guide,
+                "enable_token_attention_marginal": enable_token_attention_marginal,
+                "use_differential_mode": self.use_differential_mode,
+                "pre_transport_shot_pool": _bool_config(
+                    kwargs.get("pre_transport_shot_pool", False)
+                ),
+            }
+            active_conflicts = [
+                name for name, active in conflicts.items() if active
+            ]
+            if active_conflicts:
+                raise ValueError(
+                    "enable_verified_region_matching_uot isolates the "
+                    "pre-transport verification cost and cannot be combined with: "
+                    + ", ".join(active_conflicts)
+                )
         if enable_token_attention_marginal:
             if self.ours_ablation != "full":
                 raise ValueError(
@@ -775,6 +847,7 @@ class OursM2(JECOTM2):
                 "enable_structural_augmentation": enable_structural_augmentation,
                 "enable_label_ot": enable_label_ot,
                 "enable_pot_guide": enable_pot_guide,
+                "enable_verified_region_matching_uot": enable_verified_region_matching_uot,
                 "use_differential_mode": self.use_differential_mode,
                 "pre_transport_shot_pool": _bool_config(
                     kwargs.get("pre_transport_shot_pool", False)
@@ -1080,6 +1153,21 @@ class OursM2(JECOTM2):
         self.rvuot_rival_tau = float(rvuot_rival_tau)
         self.rvuot_rival_margin = float(rvuot_rival_margin)
         self.rvuot_detach_gate = bool(rvuot_detach_gate)
+        self.enable_verified_region_matching_uot = bool(
+            enable_verified_region_matching_uot
+        )
+        self.vrm_lambda = float(vrm_lambda)
+        self.vrm_concentration_tau = float(vrm_concentration_tau)
+        self.vrm_region_tau = float(vrm_region_tau)
+        self.vrm_region_kernel_size = int(vrm_region_kernel_size)
+        self.vrm_use_concentration = bool(vrm_use_concentration)
+        self.vrm_use_region_patch = bool(vrm_use_region_patch)
+        self.vrm_use_rival = bool(vrm_use_rival)
+        self.vrm_rival_tau = float(vrm_rival_tau)
+        self.vrm_rival_threshold = float(vrm_rival_threshold)
+        self.vrm_rival_evidence_tau = float(vrm_rival_evidence_tau)
+        self.vrm_rival_margin = float(vrm_rival_margin)
+        self.vrm_detach_gate = bool(vrm_detach_gate)
         self.enable_global_residual_score = bool(enable_global_residual_score)
         self.global_residual_mode = str(global_residual_mode)
         self.global_residual_weight = float(global_residual_weight)
@@ -1119,6 +1207,8 @@ class OursM2(JECOTM2):
             ("verified_uot_ratio_threshold", self.verified_uot_ratio_threshold),
             ("rvuot_ratio_threshold", self.rvuot_ratio_threshold),
             ("rvuot_rival_margin", self.rvuot_rival_margin),
+            ("vrm_lambda", self.vrm_lambda),
+            ("vrm_rival_margin", self.vrm_rival_margin),
             ("global_residual_weight", self.global_residual_weight),
             ("rauot_margin", self.rauot_margin),
             ("rauot_cost_weight", self.rauot_cost_weight),
@@ -1180,6 +1270,23 @@ class OursM2(JECOTM2):
             raise ValueError("verified_uot_tau must be positive")
         if self.verified_uot_kernel_size < 1 or self.verified_uot_kernel_size % 2 != 1:
             raise ValueError("verified_uot_kernel_size must be an odd positive integer")
+        if self.enable_verified_region_matching_uot:
+            self.verified_region_matching_uot = VerifiedRegionMatchingUOT(
+                penalty_lambda=self.vrm_lambda,
+                concentration_tau=self.vrm_concentration_tau,
+                region_tau=self.vrm_region_tau,
+                region_kernel_size=self.vrm_region_kernel_size,
+                use_concentration=self.vrm_use_concentration,
+                use_region_patch=self.vrm_use_region_patch,
+                use_rival=self.vrm_use_rival,
+                rival_tau=self.vrm_rival_tau,
+                rival_threshold=self.vrm_rival_threshold,
+                rival_evidence_tau=self.vrm_rival_evidence_tau,
+                rival_margin=self.vrm_rival_margin,
+                detach_gate=self.vrm_detach_gate,
+                ground_cost=self.ground_cost,
+                eps=self.eps,
+            )
         if self.enable_reciprocal_verified_uot:
             self.reciprocal_verified_transport = ReciprocalVerifiedTransport(
                 beta=self.rvuot_beta,
@@ -1365,6 +1472,18 @@ class OursM2(JECOTM2):
                 struct_dim=struct_dim,
             )
             self._last_struct_diagnostics: dict[str, torch.Tensor] | None = None
+        self.enable_sci = bool(enable_sci)
+        if self.enable_sci:
+            if int(sci_kernel_size) < 3 or int(sci_kernel_size) % 2 == 0:
+                raise ValueError(f"sci_kernel_size must be odd >= 3, got {sci_kernel_size}")
+            if int(sci_num_layers) < 1:
+                raise ValueError(f"sci_num_layers must be >= 1, got {sci_num_layers}")
+            self.spatial_context_injection = SpatialContextInjection(
+                token_dim=self.token_dim,
+                num_layers=int(sci_num_layers),
+                kernel_size=int(sci_kernel_size),
+            )
+            self._last_sci_diagnostics: dict[str, torch.Tensor] | None = None
 
     @property
     def uses_ours_gap_control(self) -> bool:
@@ -2354,6 +2473,18 @@ class OursM2(JECOTM2):
         self._last_struct_diagnostics = self.structural_augmentation.diagnostics(before, projected)
         return projected
 
+    def _apply_sci(
+        self,
+        projected: torch.Tensor,
+        spatial_hw: tuple[int, int],
+    ) -> torch.Tensor:
+        if not getattr(self, "enable_sci", False):
+            return projected
+        before = projected
+        projected = self.spatial_context_injection(projected, spatial_hw)
+        self._last_sci_diagnostics = self.spatial_context_injection.diagnostics(before, projected)
+        return projected
+
     @property
     def multiscale_transport_cost_thresholds(self) -> torch.Tensor:
         raw_thresholds = getattr(self, "raw_multiscale_transport_cost_thresholds", None)
@@ -2503,6 +2634,7 @@ class OursM2(JECOTM2):
             projected = self._project_backbone_tokens(tokens)
             projected = self._apply_cata(projected)
             projected = self._apply_structural_augmentation(projected, spatial_hw)
+            projected = self._apply_sci(projected, spatial_hw)
             euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
             scale_records.append(
                 {
@@ -2533,6 +2665,7 @@ class OursM2(JECOTM2):
             self.token_g_kind == "token_norm_pre_l2"
             or self.uses_ours_gap_control
             or getattr(self, "enable_structural_augmentation", False)
+            or getattr(self, "enable_sci", False)
             or getattr(self, "enable_pulse_region_uot", False)
             or getattr(self, "enable_adaptive_region_uot", False)
         )
@@ -2551,6 +2684,7 @@ class OursM2(JECOTM2):
         if not self.uses_ours_gap_control:
             projected = self._apply_cata(projected)
         projected = self._apply_structural_augmentation(projected, spatial_hw)
+        projected = self._apply_sci(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         euclidean_tokens, hyperbolic_tokens = self._euclidean_and_hyperbolic_from_projected(projected)
         return euclidean_tokens, hyperbolic_tokens, spatial_hw
@@ -2559,6 +2693,7 @@ class OursM2(JECOTM2):
         need_local = (
             self.token_g_kind == "token_norm_pre_l2"
             or getattr(self, "enable_structural_augmentation", False)
+            or getattr(self, "enable_sci", False)
             or getattr(self, "enable_pulse_region_uot", False)
             or getattr(self, "enable_adaptive_region_uot", False)
         )
@@ -2571,6 +2706,7 @@ class OursM2(JECOTM2):
         projected = self._project_backbone_tokens(tokens)
         projected = self._apply_cata(projected)
         projected = self._apply_structural_augmentation(projected, spatial_hw)
+        projected = self._apply_sci(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         return projected, spatial_hw
 
@@ -2581,6 +2717,7 @@ class OursM2(JECOTM2):
         need_local = (
             self.token_g_kind == "token_norm_pre_l2"
             or getattr(self, "enable_structural_augmentation", False)
+            or getattr(self, "enable_sci", False)
             or getattr(self, "enable_pulse_region_uot", False)
             or getattr(self, "enable_adaptive_region_uot", False)
         )
@@ -2595,6 +2732,7 @@ class OursM2(JECOTM2):
             projected = self._apply_cata(projected)
             pre_proj_norms = projected.norm(p=2, dim=-1).clamp(min=1e-6)
         projected = self._apply_structural_augmentation(projected, spatial_hw)
+        projected = self._apply_sci(projected, spatial_hw)
         self._record_token_g_prenorm(projected)
         euclidean_tokens = (
             F.normalize(projected, p=2, dim=-1, eps=self.eps)
@@ -3738,6 +3876,7 @@ class OursM2(JECOTM2):
         discriminative_payload: dict[str, torch.Tensor] = {}
         region_uot_payload: dict[str, torch.Tensor] = {}
         adaptive_region_payload: dict[str, torch.Tensor] = {}
+        verified_region_payload: dict[str, torch.Tensor] = {}
         token_g_query = None
         token_g_support = None
         cost_for_transport = flat_cost
@@ -3819,6 +3958,22 @@ class OursM2(JECOTM2):
             cost_for_transport = adaptive_guided_cost
             query_weight = self._combine_token_weight(query_weight, adaptive_query_weight)
             support_weight = self._combine_token_weight(support_weight, adaptive_support_weight)
+
+        if getattr(self, "enable_verified_region_matching_uot", False):
+            if query_tokens is None or support_tokens is None or spatial_hw is None:
+                raise ValueError(
+                    "enable_verified_region_matching_uot requires query_tokens, support_tokens, and spatial_hw"
+                )
+            cost_for_transport, verified_region_payload = (
+                self.verified_region_matching_uot(
+                    flat_cost=cost_for_transport,
+                    query_tokens=query_tokens,
+                    support_tokens=support_tokens,
+                    way_num=way_num,
+                    shot_num=shot_num,
+                    spatial_hw=spatial_hw,
+                )
+            )
 
         if (
             getattr(self, "enable_discriminative_uot", False)
@@ -4148,6 +4303,15 @@ class OursM2(JECOTM2):
                     threshold=payload.get("ecot_threshold"),
                 )
             )
+            if verified_region_payload and torch.is_tensor(
+                verified_region_payload.get("verified_region_pair_gate")
+            ):
+                payload.update(
+                    self._verified_region_plan_audit(
+                        plan=payload["transport_plan"],
+                        gate=verified_region_payload["verified_region_pair_gate"],
+                    )
+                )
         if torch.is_tensor(payload.get("rvuot_unverified_transport_plan")):
             payload.update(
                 self._transport_specificity_audit(
@@ -4241,6 +4405,8 @@ class OursM2(JECOTM2):
             payload.update(region_uot_payload)
         if adaptive_region_payload:
             payload.update(adaptive_region_payload)
+        if verified_region_payload:
+            payload.update(verified_region_payload)
         if mspta_payload:
             payload.update(mspta_payload)
         if evidence_payload:
@@ -4625,6 +4791,8 @@ class OursM2(JECOTM2):
         )
         if self.enable_context_enrichment:
             self._last_context_diagnostics = None
+        if getattr(self, "enable_sci", False):
+            self._last_sci_diagnostics = None
         if use_context_debug:
             self._context_debug_images = []
             self._context_debug_fmaps = []
@@ -4682,6 +4850,9 @@ class OursM2(JECOTM2):
             if "hcuot_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["hcuot_guided_cost_matrix"]
+            if "verified_region_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
+                outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
+                outputs["cost_matrix"] = outputs["verified_region_guided_cost_matrix"]
             if "residual_aligned_guided_cost_matrix" in outputs and "cost_matrix" in outputs:
                 outputs.setdefault("base_cost_matrix", outputs["cost_matrix"])
                 outputs["cost_matrix"] = outputs["residual_aligned_guided_cost_matrix"]
@@ -4695,6 +4866,8 @@ class OursM2(JECOTM2):
                 outputs.update(self._last_context_diagnostics)
             if getattr(self, "enable_structural_augmentation", False) and self._last_struct_diagnostics is not None:
                 outputs.update(self._last_struct_diagnostics)
+            if getattr(self, "enable_sci", False) and self._last_sci_diagnostics is not None:
+                outputs.update(self._last_sci_diagnostics)
         return outputs
 
     def set_rival_conditional_cost_test_context(self, *, is_noise: bool) -> None:
@@ -4710,6 +4883,46 @@ class OursM2(JECOTM2):
         if self.rc_cost_scope == "eval_only":
             return True
         return self._rc_cost_noise_test_context
+
+    def _verified_region_plan_audit(
+        self,
+        *,
+        plan: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        gate = gate.to(device=plan.device, dtype=plan.dtype)
+        if tuple(gate.shape) != tuple(plan.shape):
+            raise ValueError(
+                f"VRM gate shape {tuple(gate.shape)} does not match plan shape {tuple(plan.shape)}"
+            )
+        total_mass = plan.sum().clamp_min(float(self.eps))
+        mass_weighted_gate = (plan * gate).sum() / total_mass
+        low_gate_mask = gate < 0.5
+        rejected_mass_ratio = (
+            plan.masked_select(low_gate_mask).sum() / total_mass
+            if low_gate_mask.any()
+            else plan.new_tensor(0.0)
+        )
+        high_gate_mask = gate >= 0.5
+        accepted_mass_ratio = (
+            plan.masked_select(high_gate_mask).sum() / total_mass
+            if high_gate_mask.any()
+            else plan.new_tensor(0.0)
+        )
+        plan_flat = plan.reshape(-1)
+        gate_flat = gate.reshape(-1)
+        plan_centered = plan_flat - plan_flat.mean()
+        gate_centered = gate_flat - gate_flat.mean()
+        denom = (
+            plan_centered.norm() * gate_centered.norm()
+        ).clamp_min(float(self.eps))
+        correlation = (plan_centered * gate_centered).sum() / denom
+        return {
+            "verified/accepted_mass_ratio": accepted_mass_ratio.detach(),
+            "verified/rejected_mass_ratio": rejected_mass_ratio.detach(),
+            "verified/plan_gate_mean": mass_weighted_gate.detach(),
+            "verified/plan_gate_correlation": correlation.detach(),
+        }
 
     def _export_context_debug(self) -> None:
         from net.modules.spatial_context_enrichment import (
@@ -4881,6 +5094,9 @@ class OursM2(JECOTM2):
             "hcuot_pair_specificity",
             "hcuot_query_weight",
             "hcuot_support_weight",
+            "verified_region_pair_gate",
+            "verified_region_cost_matrix",
+            "verified_region_guided_cost_matrix",
             "residual_aligned_pair_evidence",
             "residual_aligned_query_weight",
             "rae_uot_pair_evidence",
@@ -4955,6 +5171,7 @@ class OursM2(JECOTM2):
                     stacked[key] = torch.stack(values, dim=0).mean(dim=0)
         for prefix in (
             "context/",
+            "sci/",
             "struct/",
             "pulse/",
             "discriminative_uot/",
@@ -4968,6 +5185,7 @@ class OursM2(JECOTM2):
             "ours_probe/",
             "rc_cost/",
             "hcuot/",
+            "verified/",
             "ear_uot/",
             "residual_aligned/",
             "rae_uot/",
