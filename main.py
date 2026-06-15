@@ -388,6 +388,16 @@ _OURS_FINAL_WANDB_CORE_KEYS = frozenset(
         "dm_debug",
         "dm_debug_dir",
         "dm_debug_max_episodes",
+        "ucot_threshold_quantile",
+        "ucot_threshold_mix",
+        "ucot_threshold_detach",
+        "ucot_temperature",
+        "ucot_marginal_mix",
+        "ucot_adaptive_mix",
+        "ucot_confidence_power",
+        "ucot_uniform_floor",
+        "ucot_rival_margin",
+        "ucot_ablation",
         "ours_final_dmuot_ablation",
         "ours_final_evidence_ablation",
     }
@@ -2158,6 +2168,32 @@ def get_args():
             "derived from the transport cost matrix. Modes: query_only, support_only, "
             "both, rival_aware."
         ),
+    )
+    parser.add_argument("--ucot_threshold_quantile", type=float, default=0.70)
+    parser.add_argument("--ucot_threshold_mix", type=float, default=1.0)
+    parser.add_argument(
+        "--ucot_threshold_detach",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--ucot_temperature", type=float, default=0.25)
+    parser.add_argument("--ucot_marginal_mix", type=float, default=0.65)
+    parser.add_argument(
+        "--ucot_adaptive_mix",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+    )
+    parser.add_argument("--ucot_confidence_power", type=float, default=1.0)
+    parser.add_argument("--ucot_uniform_floor", type=float, default=0.05)
+    parser.add_argument("--ucot_rival_margin", type=float, default=0.0)
+    parser.add_argument(
+        "--ucot_ablation",
+        type=str,
+        default="full",
+        choices=["full", "threshold_only", "marginal_only", "off"],
+        help="ours_final_ucot only: disable threshold calibration and/or UCOT quota construction.",
     )
     parser.add_argument(
         "--evidence_tau",
@@ -6632,6 +6668,30 @@ def write_ours_final_audit_report(
         "global_vs_local_accuracy_delta",
         "global_vs_local_fix_rate",
         "global_vs_local_harm_rate",
+        "ucot/enabled",
+        "ucot/ablation_id",
+        "ucot/base_threshold",
+        "ucot/calibrated_threshold",
+        "ucot/threshold_ratio",
+        "ucot/threshold_quantile",
+        "ucot/positive_edge_rate",
+        "ucot/query_positive_acceptance_mean",
+        "ucot/edge_positive_acceptance_mean",
+        "ucot/query_specificity_mean",
+        "ucot/query_specificity_peak",
+        "ucot/evidence_confidence",
+        "ucot/effective_mix",
+        "ucot/query_entropy",
+        "ucot/support_entropy",
+        "ucot/query_peak",
+        "ucot/support_peak",
+        "ucot/query_l1_from_uniform",
+        "ucot/support_l1_from_uniform",
+        "ucot/uniform_fallback_query_share",
+        "ucot/uniform_fallback_support_share",
+        "ucot/transported_mass_fraction",
+        "ucot/query_l1_drift",
+        "ucot/support_l1_drift",
         "ours_probe/negative_utility_mass_ratio",
         "ours_probe/common_mass_ratio",
         "ours_probe/dead_query_ratio",
@@ -6646,6 +6706,7 @@ def write_ours_final_audit_report(
         key
         for key in sorted(metrics)
         if key.startswith("audit_")
+        or key.startswith("ucot/")
         or key.startswith("ours_probe")
         or key.startswith("transport_audit")
         or key
@@ -6687,6 +6748,26 @@ def write_ours_final_audit_report(
         handle.write(f"Ours Ablation: {getattr(args, 'ours_ablation', 'full')}\n")
         handle.write(f"Transport Mode: {getattr(args, 'hrot_ecot_transport_mode', 'auto')}\n")
         handle.write(f"Score Mode: {getattr(args, 'ours_final_score_mode', 'threshold_mass')}\n")
+        audit_tau_q = getattr(args, "hrot_tau_q", "auto")
+        audit_tau_c = getattr(args, "hrot_tau_c", "auto")
+        if str(getattr(args, "model", "")).strip().lower() == "ours_final_ucot":
+            if audit_tau_q in {None, "auto"}:
+                audit_tau_q = 0.5
+            if audit_tau_c in {None, "auto"} or float(audit_tau_c) == 0.5:
+                audit_tau_c = 0.8
+        handle.write(
+            "Tau q/c: "
+            f"{audit_tau_q}/"
+            f"{audit_tau_c}\n"
+        )
+        handle.write(
+            "UCOT: "
+            f"enabled={str(getattr(args, 'model', '')).strip().lower() == 'ours_final_ucot'}, "
+            f"ablation={getattr(args, 'ucot_ablation', 'n/a')}, "
+            f"threshold_q={getattr(args, 'ucot_threshold_quantile', 'n/a')}, "
+            f"threshold_mix={getattr(args, 'ucot_threshold_mix', 'n/a')}, "
+            f"marginal_mix={getattr(args, 'ucot_marginal_mix', 'n/a')}\n"
+        )
         handle.write(
             "Global Residual: "
             f"{getattr(args, 'enable_global_residual_score', 'false')} "

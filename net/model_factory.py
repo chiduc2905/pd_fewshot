@@ -71,10 +71,12 @@ OURS_MODEL_NAMES = frozenset({"ours"})
 CANONICAL_OURS_FINAL_MODEL_NAMES = frozenset({"ours_final"})
 OURS_FINAL_VERIFIED_UOT_MODEL_NAMES = frozenset({"ours_final_verified_uot"})
 OURS_FINAL_PARTIAL_OT_MODEL_NAMES = frozenset({"ours_final_partial_ot"})
+OURS_FINAL_UCOT_MODEL_NAMES = frozenset({"ours_final_ucot"})
 OURS_FINAL_MODEL_NAMES = frozenset(
     set(CANONICAL_OURS_FINAL_MODEL_NAMES)
     | set(OURS_FINAL_VERIFIED_UOT_MODEL_NAMES)
     | set(OURS_FINAL_PARTIAL_OT_MODEL_NAMES)
+    | set(OURS_FINAL_UCOT_MODEL_NAMES)
 )
 OURS_ENTRYPOINT_MODEL_NAMES = frozenset(set(OURS_MODEL_NAMES) | set(OURS_FINAL_MODEL_NAMES))
 OURS_CPM_MODEL_NAMES = frozenset({"ours_cpm"})
@@ -386,7 +388,7 @@ def validate_dmuot_scope(args) -> None:
     ):
         raise ValueError("--enable_reciprocal_verified_uot is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_global_residual_score", False), default=False) and (
-        str(getattr(args, "model", "")).strip().lower() != "ours_final"
+        str(getattr(args, "model", "")).strip().lower() not in OURS_FINAL_MODEL_NAMES
     ):
         raise ValueError("--enable_global_residual_score is supported only with --model ours_final")
     if _bool_flag(getattr(args, "enable_nr_ot", False), default=False) and (
@@ -421,7 +423,7 @@ def validate_dmuot_scope(args) -> None:
     if _bool_flag(
         getattr(args, "enable_ours_final_failure_probe", False),
         default=False,
-    ) and str(getattr(args, "model", "")).strip().lower() != "ours_final":
+    ) and str(getattr(args, "model", "")).strip().lower() not in OURS_FINAL_MODEL_NAMES:
         raise ValueError(
             "--enable_ours_final_failure_probe is supported only with --model ours_final"
         )
@@ -850,6 +852,12 @@ MODEL_REGISTRY = {
         "paper_name": "Ours-Final",
         "architecture": "Backbone local descriptors with fixed uniform marginals -> single-budget rho=0.8 UOT -> threshold-mass score T*M-C -> episode-calibrated shot pooling",
         "metric": "Single-Budget Threshold-Mass Token UOT",
+    },
+    "ours_final_ucot": {
+        "display_name": "Ours-Final-UCOT",
+        "paper_name": "Utility-Calibrated Ours-Final UOT",
+        "architecture": "Backbone local descriptors -> episode-calibrated T-D utility -> utility-calibrated query/support quotas -> support-strict rho=0.8 UOT -> threshold-mass local score plus global prototype residual",
+        "metric": "Utility-Calibrated Threshold-Mass UOT",
     },
     "ours_final_verified_uot": {
         "display_name": "Ours-Final Verified-UOT",
@@ -2868,6 +2876,7 @@ def build_model_from_args(args):
         is_ours_final_model = args.model in OURS_FINAL_MODEL_NAMES
         is_ours_final_verified_uot_model = args.model in OURS_FINAL_VERIFIED_UOT_MODEL_NAMES
         is_ours_final_partial_ot_model = args.model in OURS_FINAL_PARTIAL_OT_MODEL_NAMES
+        is_ours_final_ucot_model = args.model in OURS_FINAL_UCOT_MODEL_NAMES
         is_ours_entrypoint_model = args.model in OURS_ENTRYPOINT_MODEL_NAMES
         is_m2_model = args.model in M2_MODEL_NAMES
         is_m2_like_model = args.model in M2_LIKE_MODEL_NAMES
@@ -2880,6 +2889,9 @@ def build_model_from_args(args):
             else
             _load_symbol("net.ours_cpm", "OursCPM")
             if is_ours_cpm_model
+            else
+            _load_symbol("net.ours", "OursFinalUCOT")
+            if is_ours_final_ucot_model
             else
             _load_symbol("net.ours", "OursFinalM2")
             if is_ours_final_model
@@ -2903,6 +2915,16 @@ def build_model_from_args(args):
         if is_m2_like_model and not is_ours_cpm_model and ecot_transport_mode is None:
             ecot_transport_mode = "balanced" if is_m2_full_ot else "unbalanced"
         ecot_enable_egsm_flag = _bool_flag(resolve_hrot_ecot_enable_egsm(args), default=False)
+        tau_q_arg = getattr(args, "hrot_tau_q", None)
+        tau_c_arg = getattr(args, "hrot_tau_c", None)
+        effective_tau_q = 0.5 if is_ours_final_ucot_model and tau_q_arg is None else float(
+            0.5 if tau_q_arg is None else tau_q_arg
+        )
+        effective_tau_c = (
+            0.8
+            if is_ours_final_ucot_model and (tau_c_arg is None or float(tau_c_arg) == 0.5)
+            else float(0.5 if tau_c_arg is None else tau_c_arg)
+        )
         default_m2_ablate_threshold_mass = "false" if is_ours_final_model else (
             "true" if is_m2_like_model else "false"
         )
@@ -3015,9 +3037,9 @@ def build_model_from_args(args):
                                 default=True,
                             ),
                             "enable_ours_final_failure_probe": _bool_flag(
-                                getattr(args, "enable_ours_final_failure_probe", "false"),
-                                default=False,
-                            ),
+                                getattr(args, "enable_ours_final_failure_probe", "true" if is_ours_final_ucot_model else "false"),
+                                default=is_ours_final_ucot_model,
+                            ) or is_ours_final_ucot_model,
                             "ours_probe_common_margin": float(
                                 getattr(args, "ours_probe_common_margin", 0.10)
                             ),
@@ -3049,6 +3071,43 @@ def build_model_from_args(args):
                             "sci_kernel_size": int(getattr(args, "sci_kernel_size", 3)),
                         }
                         if is_ours_final_model
+                        else {}
+                    ),
+                    **(
+                        {
+                            "enable_ucot_calibration": True,
+                            "ucot_threshold_quantile": float(
+                                getattr(args, "ucot_threshold_quantile", 0.70)
+                            ),
+                            "ucot_threshold_mix": float(
+                                getattr(args, "ucot_threshold_mix", 1.0)
+                            ),
+                            "ucot_threshold_detach": _bool_flag(
+                                getattr(args, "ucot_threshold_detach", "true"),
+                                default=True,
+                            ),
+                            "ucot_temperature": float(
+                                getattr(args, "ucot_temperature", 0.25)
+                            ),
+                            "ucot_marginal_mix": float(
+                                getattr(args, "ucot_marginal_mix", 0.65)
+                            ),
+                            "ucot_adaptive_mix": _bool_flag(
+                                getattr(args, "ucot_adaptive_mix", "true"),
+                                default=True,
+                            ),
+                            "ucot_confidence_power": float(
+                                getattr(args, "ucot_confidence_power", 1.0)
+                            ),
+                            "ucot_uniform_floor": float(
+                                getattr(args, "ucot_uniform_floor", 0.05)
+                            ),
+                            "ucot_rival_margin": float(
+                                getattr(args, "ucot_rival_margin", 0.0)
+                            ),
+                            "ucot_ablation": str(getattr(args, "ucot_ablation", "full")),
+                        }
+                        if is_ours_final_ucot_model
                         else {}
                     ),
                     **(resolve_ours_final_dmuot_config(args) if is_ours_final_model else {}),
@@ -3612,8 +3671,8 @@ def build_model_from_args(args):
             projection_scale=float(getattr(args, "hrot_projection_scale", 0.1)),
             token_temperature=float(getattr(args, "hrot_token_temperature", 0.1)),
             score_scale=float(getattr(args, "hrot_score_scale", 16.0)),
-            tau_q=float(getattr(args, "hrot_tau_q", 0.5)),
-            tau_c=float(getattr(args, "hrot_tau_c", 0.5)),
+            tau_q=effective_tau_q,
+            tau_c=effective_tau_c,
             sinkhorn_epsilon=float(getattr(args, "hrot_sinkhorn_epsilon", 0.1)),
             sinkhorn_iterations=int(
                 _first_attr(args, "hrot_sinkhorn_iterations", "hrot_sinkhorn_iters", default=60)

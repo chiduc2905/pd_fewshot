@@ -70,6 +70,7 @@ PULSE_TRAIN_SCHEDULES = frozenset({"constant", "decay", "warmup_decay", "eval_on
 PULSE_EVIDENCE_SCORE_MODES = frozenset({"replace", "mass_mix"})
 GLOBAL_RESIDUAL_SCORE_MODES = frozenset({"residual", "global_only"})
 MSPTA_GUIDANCE_SOURCES = frozenset({"image", "feature", "mixed"})
+UCOT_ABLATIONS = frozenset({"full", "threshold_only", "marginal_only", "off"})
 
 
 def normalize_ours_ablation(value: str | None) -> str:
@@ -294,6 +295,29 @@ def _normalize_global_residual_score_mode(value: str | None) -> str:
         raise ValueError(
             f"Unsupported global_residual_mode: {value}. "
             f"Expected one of {sorted(GLOBAL_RESIDUAL_SCORE_MODES)}"
+        )
+    return name
+
+
+def _normalize_ucot_ablation(value: str | None) -> str:
+    name = "full" if value is None else str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "none": "off",
+        "false": "off",
+        "0": "off",
+        "true": "full",
+        "1": "full",
+        "threshold": "threshold_only",
+        "t_only": "threshold_only",
+        "marginal": "marginal_only",
+        "marginals": "marginal_only",
+        "quota": "marginal_only",
+        "quotas": "marginal_only",
+    }
+    name = aliases.get(name, name)
+    if name not in UCOT_ABLATIONS:
+        raise ValueError(
+            f"Unsupported ucot_ablation: {value}. Expected one of {sorted(UCOT_ABLATIONS)}"
         )
     return name
 
@@ -2978,6 +3002,7 @@ class OursM2(JECOTM2):
         support_tokens: torch.Tensor | None = None,
         query_tokens: torch.Tensor | None = None,
         spatial_hw: tuple[int, int] | None = None,
+        threshold_override: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         del support_tokens, query_tokens, spatial_hw
         if support_weight is not None or query_weight is not None:
@@ -3897,6 +3922,7 @@ class OursM2(JECOTM2):
         support_tokens: torch.Tensor | None = None,
         query_tokens: torch.Tensor | None = None,
         spatial_hw: tuple[int, int] | None = None,
+        threshold_override: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         rc_cost_payload: dict[str, torch.Tensor] = {}
         if self._rival_conditional_cost_is_active():
@@ -3922,6 +3948,7 @@ class OursM2(JECOTM2):
                 support_tokens=support_tokens,
                 query_tokens=query_tokens,
                 spatial_hw=spatial_hw,
+                threshold_override=threshold_override,
             )
         dmuot_payload: dict[str, torch.Tensor] = {}
         pulse_payload: dict[str, torch.Tensor] = {}
@@ -4313,6 +4340,7 @@ class OursM2(JECOTM2):
             score_evidence_mix=score_evidence_mix,
             transport_tau_q=transport_tau_q,
             transport_tau_c=transport_tau_c,
+            threshold_override=threshold_override,
         )
         payload = self._apply_verified_uot_score(
             payload,
@@ -5236,6 +5264,10 @@ class OursM2(JECOTM2):
             "adaptive_region_query_weight",
             "episode_contrast_pair_gate",
             "episode_contrast_query_weight",
+            "ucot_pair_evidence",
+            "ucot_query_weight",
+            "ucot_support_weight",
+            "ucot_query_specificity",
             "score_marginal_pair_evidence",
             "score_marginal_query_weight",
             "score_marginal_support_weight",
@@ -5373,6 +5405,7 @@ class OursM2(JECOTM2):
             "mspta/",
             "rvuot/",
             "episode_contrast/",
+            "ucot/",
             "score_marginal/",
             "ours_probe/",
             "rc_cost/",
@@ -5429,9 +5462,417 @@ class OursFinalM2(OursM2):
         super().__init__(*args, **kwargs)
 
 
+class OursFinalUCOT(OursFinalM2):
+    """Standalone utility-calibrated Ours-Final with global residual and support-strict UOT."""
+
+    _ABLATION_IDS = {
+        "off": 0.0,
+        "threshold_only": 1.0,
+        "marginal_only": 2.0,
+        "full": 3.0,
+    }
+
+    def __init__(self, *args, **kwargs) -> None:
+        enable_ucot_calibration = _bool_config(kwargs.pop("enable_ucot_calibration", True))
+        ucot_threshold_quantile = float(kwargs.pop("ucot_threshold_quantile", 0.70))
+        ucot_threshold_mix = float(kwargs.pop("ucot_threshold_mix", 1.0))
+        ucot_threshold_detach = _bool_config(kwargs.pop("ucot_threshold_detach", True))
+        ucot_temperature = float(kwargs.pop("ucot_temperature", 0.25))
+        ucot_marginal_mix = float(kwargs.pop("ucot_marginal_mix", 0.65))
+        ucot_adaptive_mix = _bool_config(kwargs.pop("ucot_adaptive_mix", True))
+        ucot_confidence_power = float(kwargs.pop("ucot_confidence_power", 1.0))
+        ucot_uniform_floor = float(kwargs.pop("ucot_uniform_floor", 0.05))
+        ucot_rival_margin = float(kwargs.pop("ucot_rival_margin", 0.0))
+        ucot_ablation = _normalize_ucot_ablation(kwargs.pop("ucot_ablation", "full"))
+
+        if _normalize_ours_final_marginal_mode(kwargs.get("ours_final_marginal_mode", "uniform")) != "uniform":
+            raise ValueError("ours_final_ucot owns its utility-calibrated marginals; do not use score_aligned")
+        if str(kwargs.get("ours_final_score_mode", "threshold_mass")).strip().lower().replace("-", "_") != "threshold_mass":
+            raise ValueError("ours_final_ucot requires ours_final_score_mode='threshold_mass'")
+        kwargs["ours_final_marginal_mode"] = "uniform"
+        kwargs["ours_final_score_mode"] = "threshold_mass"
+        kwargs.setdefault("enable_global_residual_score", True)
+        kwargs.setdefault("global_residual_mode", "residual")
+        kwargs.setdefault("global_residual_weight", 0.1)
+        kwargs.setdefault("tau_q", 0.5)
+        kwargs.setdefault("tau_c", 0.8)
+        kwargs.setdefault("ecot_enable_egsm", False)
+        kwargs.setdefault("ecot_m2_ablate_threshold_mass", False)
+        kwargs.setdefault("ecot_m2_cost_per_mass_score", False)
+
+        super().__init__(*args, **kwargs)
+
+        if not 0.0 <= ucot_threshold_quantile <= 1.0:
+            raise ValueError("ucot_threshold_quantile must be in [0, 1]")
+        if not 0.0 <= ucot_threshold_mix <= 1.0:
+            raise ValueError("ucot_threshold_mix must be in [0, 1]")
+        if ucot_temperature <= 0.0:
+            raise ValueError("ucot_temperature must be positive")
+        if not 0.0 <= ucot_marginal_mix <= 1.0:
+            raise ValueError("ucot_marginal_mix must be in [0, 1]")
+        if ucot_confidence_power <= 0.0:
+            raise ValueError("ucot_confidence_power must be positive")
+        if not 0.0 <= ucot_uniform_floor <= 1.0:
+            raise ValueError("ucot_uniform_floor must be in [0, 1]")
+        if ucot_rival_margin < 0.0:
+            raise ValueError("ucot_rival_margin must be non-negative")
+
+        self.enable_ucot_calibration = bool(enable_ucot_calibration)
+        self.ucot_threshold_quantile = float(ucot_threshold_quantile)
+        self.ucot_threshold_mix = float(ucot_threshold_mix)
+        self.ucot_threshold_detach = bool(ucot_threshold_detach)
+        self.ucot_temperature = float(ucot_temperature)
+        self.ucot_marginal_mix = float(ucot_marginal_mix)
+        self.ucot_adaptive_mix = bool(ucot_adaptive_mix)
+        self.ucot_confidence_power = float(ucot_confidence_power)
+        self.ucot_uniform_floor = float(ucot_uniform_floor)
+        self.ucot_rival_margin = float(ucot_rival_margin)
+        self.ucot_ablation = ucot_ablation
+
+    def _ucot_normalize_with_uniform_fallback(
+        self,
+        raw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        total = raw.sum(dim=-1, keepdim=True)
+        normalized = raw / total.clamp_min(self.eps)
+        uniform = torch.full_like(raw, 1.0 / float(max(raw.shape[-1], 1)))
+        fallback = total <= float(self.eps)
+        return torch.where(fallback, uniform, normalized), fallback
+
+    def _compute_ucot_threshold(
+        self,
+        flat_cost: torch.Tensor,
+        way_num: int | None = None,
+        shot_num: int | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if flat_cost.dim() != 4:
+            raise ValueError(
+                "flat_cost must have shape (Nq, Way*Shot, Lq, Ls), "
+                f"got {tuple(flat_cost.shape)}"
+            )
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        if way_num is None:
+            way_num = 1
+            shot_num = int(num_pairs)
+        if shot_num is None:
+            raise ValueError("shot_num must be provided when way_num is provided")
+        expected_pairs = int(way_num) * int(shot_num)
+        if num_pairs != expected_pairs:
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match Way*Shot={expected_pairs}")
+
+        threshold_source = flat_cost.detach() if self.ucot_threshold_detach else flat_cost
+        cost_view = threshold_source.reshape(
+            num_query,
+            int(way_num),
+            int(shot_num),
+            query_len,
+            support_len,
+        )
+        best_edge = cost_view.amin(dim=(1, 2, 4))
+        episode_threshold = torch.quantile(
+            best_edge.flatten(),
+            float(self.ucot_threshold_quantile),
+        )
+        base_threshold = self.transport_cost_threshold.to(
+            device=flat_cost.device,
+            dtype=flat_cost.dtype,
+        )
+        if self.ucot_threshold_detach:
+            base_threshold = base_threshold.detach()
+        mix = flat_cost.new_tensor(float(self.ucot_threshold_mix))
+        threshold = ((1.0 - mix) * base_threshold + mix * episode_threshold).clamp_min(self.eps)
+        payload = {
+            "ucot/base_threshold": base_threshold.detach(),
+            "ucot/calibrated_threshold": threshold.detach(),
+            "ucot/threshold_ratio": (threshold.detach() / base_threshold.detach().clamp_min(self.eps)),
+            "ucot/threshold_quantile": flat_cost.new_tensor(float(self.ucot_threshold_quantile)),
+            "ucot/threshold_mix": flat_cost.new_tensor(float(self.ucot_threshold_mix)),
+            "ucot/positive_edge_rate": (cost_view < threshold.detach()).to(flat_cost.dtype).mean().detach(),
+        }
+        return threshold, payload
+
+    def _compute_ucot_marginals(
+        self,
+        flat_cost: torch.Tensor,
+        threshold: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        if flat_cost.dim() != 4:
+            raise ValueError(
+                "flat_cost must have shape (Nq, Way*Shot, Lq, Ls), "
+                f"got {tuple(flat_cost.shape)}"
+            )
+        num_query, num_pairs, query_len, support_len = flat_cost.shape
+        expected_pairs = int(way_num) * int(shot_num)
+        if num_pairs != expected_pairs:
+            raise ValueError(f"flat_cost pair dimension {num_pairs} does not match Way*Shot={expected_pairs}")
+
+        reference_cost = flat_cost.detach()
+        cost_view = reference_cost.reshape(
+            num_query,
+            int(way_num),
+            int(shot_num),
+            query_len,
+            support_len,
+        )
+        cost_scale = reference_cost.std(dim=(1, 2, 3), keepdim=True, unbiased=False).clamp_min(self.eps)
+        temperature = (float(self.ucot_temperature) * cost_scale).clamp_min(self.eps)
+        temperature_5d = temperature.reshape(num_query, 1, 1, 1, 1)
+        threshold_value = torch.as_tensor(
+            threshold,
+            device=flat_cost.device,
+            dtype=flat_cost.dtype,
+        )
+        if threshold_value.numel() != 1:
+            raise ValueError("UCOT v1 requires a scalar threshold")
+
+        utility = (threshold_value - cost_view) / temperature_5d
+        positive = torch.sigmoid(utility)
+        class_count = max(int(shot_num) * support_len, 1)
+        class_token_cost = -temperature.reshape(num_query, 1, 1) * (
+            torch.logsumexp(-cost_view / temperature_5d, dim=(2, 4))
+            - math.log(float(class_count))
+        )
+        if int(way_num) > 1:
+            rival_cost = torch.stack(
+                [
+                    torch.cat([class_token_cost[:, :idx], class_token_cost[:, idx + 1 :]], dim=1).amin(dim=1)
+                    for idx in range(int(way_num))
+                ],
+                dim=1,
+            )
+            rival_advantage = rival_cost - class_token_cost
+        else:
+            rival_advantage = torch.zeros_like(class_token_cost)
+        specificity = torch.sigmoid(
+            (rival_advantage - float(self.ucot_rival_margin))
+            / temperature.reshape(num_query, 1, 1).clamp_min(self.eps)
+        )
+        query_positive = positive.amax(dim=(1, 2, 4))
+        query_raw = specificity.amax(dim=1) * query_positive
+        query_selective, query_fallback = self._ucot_normalize_with_uniform_fallback(query_raw)
+
+        k = max(1, query_len // 8)
+        confidence = query_raw.topk(k, dim=-1).values.mean(dim=-1, keepdim=True).pow(
+            float(self.ucot_confidence_power)
+        )
+        configured_mix = flat_cost.new_tensor(float(self.ucot_marginal_mix))
+        effective_mix = (
+            configured_mix * confidence
+            if self.ucot_adaptive_mix
+            else configured_mix.expand_as(confidence)
+        ).clamp(0.0, 1.0)
+        query_uniform = torch.full_like(query_selective, 1.0 / float(max(query_len, 1)))
+        query_prob = (1.0 - effective_mix) * query_uniform + effective_mix * query_selective
+
+        floor = flat_cost.new_tensor(float(self.ucot_uniform_floor))
+        query_prob = (1.0 - floor) * query_prob + floor * query_uniform
+        query_prob = query_prob / query_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        row_min = cost_view.amin(dim=-1, keepdim=True)
+        row_affinity = torch.exp(-(cost_view - row_min) / temperature_5d).clamp(0.0, 1.0)
+        pair_evidence = (specificity[:, :, None, :, None] * positive * row_affinity).clamp(0.0, 1.0)
+        support_raw = (query_prob[:, None, None, :, None] * pair_evidence).sum(dim=-2)
+        support_selective, support_fallback = self._ucot_normalize_with_uniform_fallback(support_raw)
+        support_uniform = torch.full_like(support_selective, 1.0 / float(max(support_len, 1)))
+        support_mix = effective_mix[:, None, None, :]
+        support_prob = (1.0 - support_mix) * support_uniform + support_mix * support_selective
+        support_prob = (1.0 - floor) * support_prob + floor * support_uniform
+        support_prob = support_prob / support_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        support_prob = support_prob.reshape(num_query, num_pairs, support_len)
+
+        query_entropy = -(query_prob * query_prob.clamp_min(self.eps).log()).sum(dim=-1)
+        support_entropy = -(support_prob * support_prob.clamp_min(self.eps).log()).sum(dim=-1)
+        query_l1_uniform = (query_prob - query_uniform).abs().sum(dim=-1)
+        support_uniform_flat = support_uniform.reshape(num_query, num_pairs, support_len)
+        support_l1_uniform = (support_prob - support_uniform_flat).abs().sum(dim=-1)
+        payload = {
+            "ucot_query_weight": query_prob.detach(),
+            "ucot_support_weight": support_prob.detach(),
+            "ucot_pair_evidence": pair_evidence.detach(),
+            "ucot_query_specificity": specificity.detach(),
+            "ucot/enabled": flat_cost.new_tensor(1.0),
+            "ucot/ablation_id": flat_cost.new_tensor(self._ABLATION_IDS[self.ucot_ablation]),
+            "ucot/temperature": flat_cost.new_tensor(float(self.ucot_temperature)),
+            "ucot/marginal_mix": configured_mix.detach(),
+            "ucot/adaptive_mix": flat_cost.new_tensor(float(self.ucot_adaptive_mix)),
+            "ucot/confidence_power": flat_cost.new_tensor(float(self.ucot_confidence_power)),
+            "ucot/uniform_floor": floor.detach(),
+            "ucot/rival_margin": flat_cost.new_tensor(float(self.ucot_rival_margin)),
+            "ucot/query_positive_acceptance_mean": query_positive.mean().detach(),
+            "ucot/edge_positive_acceptance_mean": positive.mean().detach(),
+            "ucot/query_specificity_mean": specificity.mean().detach(),
+            "ucot/query_specificity_peak": specificity.amax(dim=1).mean().detach(),
+            "ucot/evidence_confidence": confidence.mean().detach(),
+            "ucot/effective_mix": effective_mix.mean().detach(),
+            "ucot/query_entropy": query_entropy.mean().detach(),
+            "ucot/support_entropy": support_entropy.mean().detach(),
+            "ucot/query_peak": query_prob.amax(dim=-1).mean().detach(),
+            "ucot/support_peak": support_prob.amax(dim=-1).mean().detach(),
+            "ucot/query_l1_from_uniform": query_l1_uniform.mean().detach(),
+            "ucot/support_l1_from_uniform": support_l1_uniform.mean().detach(),
+            "ucot/uniform_fallback_query_share": query_fallback.to(flat_cost.dtype).mean().detach(),
+            "ucot/uniform_fallback_support_share": support_fallback.to(flat_cost.dtype).mean().detach(),
+        }
+        return query_prob, support_prob, payload
+
+    def _apply_ucot_local_flow(
+        self,
+        flat_cost: torch.Tensor,
+        way_num: int,
+        shot_num: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, dict[str, torch.Tensor]]:
+        if not self.enable_ucot_calibration or self.ucot_ablation == "off":
+            base_threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+            return None, None, None, {
+                "ucot/enabled": flat_cost.new_tensor(0.0),
+                "ucot/ablation_id": flat_cost.new_tensor(self._ABLATION_IDS["off"]),
+                "ucot/base_threshold": base_threshold.detach(),
+                "ucot/calibrated_threshold": base_threshold.detach(),
+                "ucot/threshold_ratio": flat_cost.new_tensor(1.0),
+                "ucot/threshold_quantile": flat_cost.new_tensor(float(self.ucot_threshold_quantile)),
+            }
+
+        if self.ucot_ablation == "marginal_only":
+            threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype).detach()
+            threshold_payload = {
+                "ucot/base_threshold": threshold.detach(),
+                "ucot/calibrated_threshold": threshold.detach(),
+                "ucot/threshold_ratio": flat_cost.new_tensor(1.0),
+                "ucot/threshold_quantile": flat_cost.new_tensor(float(self.ucot_threshold_quantile)),
+                "ucot/threshold_mix": flat_cost.new_tensor(0.0),
+                "ucot/positive_edge_rate": (flat_cost.detach() < threshold).to(flat_cost.dtype).mean().detach(),
+            }
+            threshold_override = None
+        else:
+            threshold, threshold_payload = self._compute_ucot_threshold(
+                flat_cost,
+                way_num=way_num,
+                shot_num=shot_num,
+            )
+            threshold_override = threshold
+
+        query_weight = None
+        support_weight = None
+        marginal_payload: dict[str, torch.Tensor] = {}
+        if self.ucot_ablation in {"full", "marginal_only"}:
+            query_weight, support_weight, marginal_payload = self._compute_ucot_marginals(
+                flat_cost,
+                threshold,
+                way_num,
+                shot_num,
+            )
+        elif self.ucot_ablation == "threshold_only":
+            query_len = flat_cost.shape[-2]
+            support_len = flat_cost.shape[-1]
+            query_uniform = flat_cost.new_full((flat_cost.shape[0], query_len), 1.0 / float(max(query_len, 1)))
+            support_uniform = flat_cost.new_full(
+                (flat_cost.shape[0], flat_cost.shape[1], support_len),
+                1.0 / float(max(support_len, 1)),
+            )
+            _, _, marginal_payload = self._compute_ucot_marginals(flat_cost, threshold, way_num, shot_num)
+            marginal_payload["ucot_query_weight"] = query_uniform.detach()
+            marginal_payload["ucot_support_weight"] = support_uniform.detach()
+            marginal_payload["ucot/query_entropy"] = (
+                -(query_uniform * query_uniform.clamp_min(self.eps).log()).sum(dim=-1).mean().detach()
+            )
+            marginal_payload["ucot/support_entropy"] = (
+                -(support_uniform * support_uniform.clamp_min(self.eps).log()).sum(dim=-1).mean().detach()
+            )
+            marginal_payload["ucot/query_peak"] = query_uniform.amax(dim=-1).mean().detach()
+            marginal_payload["ucot/support_peak"] = support_uniform.amax(dim=-1).mean().detach()
+            marginal_payload["ucot/query_l1_from_uniform"] = flat_cost.new_tensor(0.0)
+            marginal_payload["ucot/support_l1_from_uniform"] = flat_cost.new_tensor(0.0)
+
+        payload = {
+            **threshold_payload,
+            **marginal_payload,
+            "ucot/enabled": flat_cost.new_tensor(1.0),
+            "ucot/ablation_id": flat_cost.new_tensor(self._ABLATION_IDS[self.ucot_ablation]),
+        }
+        return query_weight, support_weight, threshold_override, payload
+
+    def _add_ucot_transport_diagnostics(
+        self,
+        payload: dict[str, torch.Tensor],
+        ucot_payload: dict[str, torch.Tensor],
+        *,
+        way_num: int,
+        shot_num: int,
+    ) -> None:
+        plan = payload.get("transport_plan")
+        shot_rho = payload.get("shot_rho")
+        query_weight = ucot_payload.get("ucot_query_weight")
+        support_weight = ucot_payload.get("ucot_support_weight")
+        if not (torch.is_tensor(plan) and torch.is_tensor(shot_rho)):
+            return
+        transported_fraction = payload["shot_transported_mass"] / shot_rho.to(
+            device=plan.device,
+            dtype=plan.dtype,
+        ).clamp_min(self.eps)
+        ucot_payload["ucot/transported_mass_fraction"] = transported_fraction.mean().detach()
+        if not (torch.is_tensor(query_weight) and torch.is_tensor(support_weight)):
+            return
+        query_prob = query_weight.to(device=plan.device, dtype=plan.dtype)
+        support_prob = support_weight.to(device=plan.device, dtype=plan.dtype).reshape(
+            plan.shape[0],
+            int(way_num),
+            int(shot_num),
+            plan.shape[-1],
+        )
+        shot_rho = shot_rho.to(device=plan.device, dtype=plan.dtype)
+        target_query = query_prob[:, None, None, :] * shot_rho[..., None]
+        target_support = support_prob * shot_rho[..., None]
+        query_l1 = (plan.sum(dim=-1) - target_query).abs().sum(dim=-1)
+        support_l1 = (plan.sum(dim=-2) - target_support).abs().sum(dim=-1)
+        ucot_payload["ucot/query_l1_drift"] = query_l1.mean().detach()
+        ucot_payload["ucot/support_l1_drift"] = support_l1.mean().detach()
+
+    def _forward_ecot_budget_bank(
+        self,
+        flat_cost: torch.Tensor,
+        *,
+        way_num: int,
+        shot_num: int,
+        support_weight: torch.Tensor | None = None,
+        query_weight: torch.Tensor | None = None,
+        support_tokens: torch.Tensor | None = None,
+        query_tokens: torch.Tensor | None = None,
+        spatial_hw: tuple[int, int] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if query_weight is not None or support_weight is not None:
+            raise ValueError("ours_final_ucot owns query/support marginals and cannot combine explicit weights")
+        query_weight, support_weight, threshold_override, ucot_payload = self._apply_ucot_local_flow(
+            flat_cost,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+        payload = super()._forward_ecot_budget_bank(
+            flat_cost,
+            way_num=way_num,
+            shot_num=shot_num,
+            support_weight=support_weight,
+            query_weight=query_weight,
+            support_tokens=support_tokens,
+            query_tokens=query_tokens,
+            spatial_hw=spatial_hw,
+            threshold_override=threshold_override,
+        )
+        self._add_ucot_transport_diagnostics(
+            payload,
+            ucot_payload,
+            way_num=way_num,
+            shot_num=shot_num,
+        )
+        payload.update(ucot_payload)
+        return payload
+
+
 __all__ = [
     "OursM2",
     "OursFinalM2",
+    "OursFinalUCOT",
     "apply_ours_design_defaults",
     "OURS_ABLATIONS",
     "normalize_ours_ablation",

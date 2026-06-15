@@ -19,10 +19,12 @@ OURS_FINAL_SAMPLE_COUNTS = SAMPLES_LIST
 OURS_FINAL_MODEL_NAME = "ours_final"
 OURS_FINAL_VERIFIED_UOT_MODEL_NAME = "ours_final_verified_uot"
 OURS_FINAL_PARTIAL_OT_MODEL_NAME = "ours_final_partial_ot"
+OURS_FINAL_UCOT_MODEL_NAME = "ours_final_ucot"
 OURS_FINAL_FAMILY_MODEL_NAMES = {
     OURS_FINAL_MODEL_NAME,
     OURS_FINAL_VERIFIED_UOT_MODEL_NAME,
     OURS_FINAL_PARTIAL_OT_MODEL_NAME,
+    OURS_FINAL_UCOT_MODEL_NAME,
 }
 CFUGET_MODEL_NAME = "cfuget"
 SHOTS_DEFAULT = [1, 5]
@@ -407,6 +409,17 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--ours_final_ucot_ablation_suite",
+        type=str,
+        default="none",
+        choices=["none", "core"],
+        help=(
+            "Expand Utility-Calibrated Ours-Final UOT controls: full, "
+            "threshold_only, marginal_only, and off-equivalent global-residual "
+            "support-strict baseline."
+        ),
+    )
+    parser.add_argument(
         "--ours_final_rho_values",
         type=str,
         default=None,
@@ -685,6 +698,7 @@ FSL_MAMBA_COMPATIBLE_MODELS = {
     OURS_FINAL_MODEL_NAME,
     OURS_FINAL_VERIFIED_UOT_MODEL_NAME,
     OURS_FINAL_PARTIAL_OT_MODEL_NAME,
+    OURS_FINAL_UCOT_MODEL_NAME,
     "mm_spot_fsl",
     "pare_fsl",
     "m2_uot",
@@ -1175,6 +1189,75 @@ def _ours_final_partial_ot_args():
         "unbalanced",
         "--hrot_ot_backend",
         "partial",
+    ]
+
+
+def _ours_final_ucot_base_args():
+    return [
+        "--hrot_tau_q",
+        "0.5",
+        "--hrot_tau_c",
+        "0.8",
+        "--hrot_ecot_rho_bank",
+        "0.8",
+        "--hrot_ecot_base_rho",
+        "0.8",
+        "--hrot_fixed_mass",
+        "0.8",
+        "--hrot_ecot_transport_mode",
+        "unbalanced",
+        "--hrot_ecot_m2_ablate_threshold_mass",
+        "false",
+        "--hrot_ecot_m2_cost_per_mass_score",
+        "false",
+        "--ours_final_score_mode",
+        "threshold_mass",
+        "--enable_ours_final_failure_probe",
+        "true",
+    ]
+
+
+def build_ours_final_ucot_ablation_variants():
+    base = _ours_final_ucot_base_args()
+    global_residual = [
+        "--enable_global_residual_score",
+        "--global_residual_mode",
+        "residual",
+        "--global_residual_weight",
+        "0.1",
+    ]
+    return [
+        {
+            "tag": "ucot_full",
+            "checkpoint_tag": "ucot_full",
+            "label": "UCOT full: calibrated threshold plus utility-calibrated query/support quotas",
+            "model": OURS_FINAL_UCOT_MODEL_NAME,
+            "extra_args": base + ["--ucot_ablation", "full"],
+        },
+        {
+            "tag": "ucot_threshold_only",
+            "checkpoint_tag": "ucot_threshold_only",
+            "label": "UCOT threshold-only: calibrated T with uniform marginals",
+            "model": OURS_FINAL_UCOT_MODEL_NAME,
+            "extra_args": base + ["--ucot_ablation", "threshold_only"],
+        },
+        {
+            "tag": "ucot_marginal_only",
+            "checkpoint_tag": "ucot_marginal_only",
+            "label": "UCOT marginal-only: base T with utility-calibrated quotas",
+            "model": OURS_FINAL_UCOT_MODEL_NAME,
+            "extra_args": base + ["--ucot_ablation", "marginal_only"],
+        },
+        {
+            "tag": "ucot_off_equiv",
+            "checkpoint_tag": "ucot_off_equiv",
+            "label": "Control: Ours-Final plus global residual w=0.1 and support-strict tau",
+            "model": OURS_FINAL_MODEL_NAME,
+            "extra_args": _ours_final_base_args()
+            + ["--hrot_tau_q", "0.5", "--hrot_tau_c", "0.8"]
+            + global_residual
+            + ["--enable_ours_final_failure_probe", "true"],
+        },
     ]
 
 
@@ -4138,6 +4221,7 @@ def main():
             ("--spifce_ablation_suite", args.spifce_ablation_suite),
             ("--ours_ablation_suite", args.ours_ablation_suite),
             ("--ours_final_ablation_suite", args.ours_final_ablation_suite),
+            ("--ours_final_ucot_ablation_suite", args.ours_final_ucot_ablation_suite),
             ("--cfuget_ablation_suite", args.cfuget_ablation_suite),
             ("--spot_ablation_suite", args.spot_ablation_suite),
             ("--pare_ablation_suite", args.pare_ablation_suite),
@@ -4763,6 +4847,66 @@ def main():
             print(f"Noise Root  : {args.noise_test_root}")
             print(f"Noise Splits: {', '.join(noise_test_split_names)}")
         print(format_planned_total(experiments, training_seeds, "ablation experiment(s)", len(dataset_specs)))
+        print("=" * 72)
+    elif args.ours_final_ucot_ablation_suite != "none":
+        if requested_models != [OURS_FINAL_UCOT_MODEL_NAME]:
+            raise ValueError(
+                "`--ours_final_ucot_ablation_suite` currently supports only "
+                f"`--models {OURS_FINAL_UCOT_MODEL_NAME}` (got {requested_models})"
+            )
+        ablation_variants = build_ours_final_ucot_ablation_variants()
+        if args.mode_id is not None:
+            samples_list = [EXPERIMENT_MODES[args.mode_id]]
+        elif parsed_mode_ids is not None:
+            samples_list = [EXPERIMENT_MODES[mode_id] for mode_id in parsed_mode_ids]
+        else:
+            samples_list = list(OURS_FINAL_SAMPLE_COUNTS)
+        experiments = [
+            {
+                "model": variant.get("model", OURS_FINAL_UCOT_MODEL_NAME),
+                "samples": samples,
+                "shot": shot,
+                "variant_args": variant["extra_args"],
+                "experiment_tag": variant["tag"],
+                "checkpoint_tag": variant.get("checkpoint_tag", variant["tag"]),
+                "experiment_label": variant["label"],
+                "extra_test_protocols": args.extra_test_protocols,
+                "extra_noise_test_splits": None,
+            }
+            for variant in ablation_variants
+            for samples in samples_list
+            for shot in shots
+        ]
+        print("=" * 72)
+        print("pulse_fewshot - Ours-Final UCOT Ablation Suite")
+        print("=" * 72)
+        sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
+        print(f"Samples     : {sample_text}")
+        print(f"Models      : {', '.join(requested_models)}")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print(f"Ablation    : {args.ours_final_ucot_ablation_suite}")
+        print("Variants    :")
+        for variant in ablation_variants:
+            variant_model = variant.get("model", OURS_FINAL_UCOT_MODEL_NAME)
+            model_text = f" [{variant_model}]" if variant_model != OURS_FINAL_UCOT_MODEL_NAME else ""
+            print(f"  - {variant['tag']}{model_text}: {variant['label']}")
+        print_dataset_plan(dataset_specs)
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print(format_planned_total(experiments, training_seeds, "UCOT ablation experiment(s)", len(dataset_specs)))
         print("=" * 72)
     elif args.cfuget_ablation_suite != "none":
         if requested_models != [CFUGET_MODEL_NAME]:

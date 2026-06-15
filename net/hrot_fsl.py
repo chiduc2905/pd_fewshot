@@ -3266,6 +3266,7 @@ class HROTFSL(BaseConv64FewShotModel):
         score_evidence_mix: float = 1.0,
         transport_tau_q: torch.Tensor | None = None,
         transport_tau_c: torch.Tensor | None = None,
+        threshold_override: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if self.episode_controller is None:
             raise RuntimeError("ECOT variants require an episode_controller")
@@ -3648,7 +3649,15 @@ class HROTFSL(BaseConv64FewShotModel):
                 lam=self.mncr_lam,
             )
 
-        threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        threshold_overridden = threshold_override is not None
+        if threshold_override is None:
+            threshold = self.transport_cost_threshold.to(device=flat_cost.device, dtype=flat_cost.dtype)
+        else:
+            threshold = torch.as_tensor(
+                threshold_override,
+                device=flat_cost.device,
+                dtype=flat_cost.dtype,
+            ).clamp_min(self.eps)
         noise_query_mass = None
         noise_support_mass = None
         noise_self_mass = None
@@ -4550,7 +4559,10 @@ class HROTFSL(BaseConv64FewShotModel):
             )
         if tau_shot is not None:
             payload["ecot_tau_shot"] = tau_shot
-        if self.ecot_m2_score_mode == "elastic_ot":
+        if threshold_overridden:
+            payload["ecot_threshold"] = threshold.detach()
+            payload["transport_cost_threshold"] = threshold.detach()
+        elif self.ecot_m2_score_mode == "elastic_ot":
             payload["ecot_threshold"] = threshold
         elif raw_delta_threshold is not None:
             payload["ecot_threshold"] = threshold
