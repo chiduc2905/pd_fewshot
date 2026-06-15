@@ -390,6 +390,7 @@ _OURS_FINAL_WANDB_CORE_KEYS = frozenset(
         "dm_debug_max_episodes",
         "ucot_threshold_quantile",
         "ucot_threshold_mix",
+        "ucot_threshold_max_ratio",
         "ucot_threshold_detach",
         "ucot_temperature",
         "ucot_marginal_mix",
@@ -2171,6 +2172,7 @@ def get_args():
     )
     parser.add_argument("--ucot_threshold_quantile", type=float, default=0.70)
     parser.add_argument("--ucot_threshold_mix", type=float, default=1.0)
+    parser.add_argument("--ucot_threshold_max_ratio", type=float, default=2.0)
     parser.add_argument(
         "--ucot_threshold_detach",
         type=str,
@@ -6670,15 +6672,24 @@ def write_ours_final_audit_report(
         "global_vs_local_harm_rate",
         "ucot/enabled",
         "ucot/ablation_id",
+        "ucot/threshold_active",
+        "ucot/marginal_active",
         "ucot/base_threshold",
         "ucot/calibrated_threshold",
+        "ucot/unclamped_threshold",
         "ucot/threshold_ratio",
         "ucot/threshold_quantile",
+        "ucot/threshold_max_ratio",
+        "ucot/threshold_clipped",
+        "ucot/threshold_source_mean",
+        "ucot/threshold_source_std",
         "ucot/positive_edge_rate",
+        "ucot/class_conditional_query",
         "ucot/query_positive_acceptance_mean",
         "ucot/edge_positive_acceptance_mean",
         "ucot/query_specificity_mean",
         "ucot/query_specificity_peak",
+        "ucot/query_class_l1_spread",
         "ucot/evidence_confidence",
         "ucot/effective_mix",
         "ucot/query_entropy",
@@ -6766,12 +6777,20 @@ def write_ours_final_audit_report(
             f"ablation={getattr(args, 'ucot_ablation', 'n/a')}, "
             f"threshold_q={getattr(args, 'ucot_threshold_quantile', 'n/a')}, "
             f"threshold_mix={getattr(args, 'ucot_threshold_mix', 'n/a')}, "
+            f"threshold_max_ratio={getattr(args, 'ucot_threshold_max_ratio', 'n/a')}, "
             f"marginal_mix={getattr(args, 'ucot_marginal_mix', 'n/a')}\n"
+        )
+        is_ucot_model = str(getattr(args, "model", "")).strip().lower() == "ours_final_ucot"
+        effective_global_residual = (
+            True if is_ucot_model else getattr(args, "enable_global_residual_score", "false")
+        )
+        effective_global_weight = (
+            0.1 if is_ucot_model else getattr(args, "global_residual_weight", "n/a")
         )
         handle.write(
             "Global Residual: "
-            f"{getattr(args, 'enable_global_residual_score', 'false')} "
-            f"(w={getattr(args, 'global_residual_weight', 'n/a')})\n"
+            f"{effective_global_residual} "
+            f"(w={effective_global_weight})\n"
         )
         handle.write("\nVERDICT\n")
         handle.write("-" * 72 + "\n")
@@ -8321,6 +8340,12 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
     }
     for key in extra_metric_keys:
         scalar = _scalar_metric(scores.get(key))
+        if scalar is not None:
+            metrics[key] = scalar
+    for key, value in scores.items():
+        if not str(key).startswith("ucot/"):
+            continue
+        scalar = _scalar_metric(value)
         if scalar is not None:
             metrics[key] = scalar
     return metrics

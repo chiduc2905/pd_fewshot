@@ -3082,6 +3082,9 @@ def build_model_from_args(args):
                             "ucot_threshold_mix": float(
                                 getattr(args, "ucot_threshold_mix", 1.0)
                             ),
+                            "ucot_threshold_max_ratio": float(
+                                getattr(args, "ucot_threshold_max_ratio", 2.0)
+                            ),
                             "ucot_threshold_detach": _bool_flag(
                                 getattr(args, "ucot_threshold_detach", "true"),
                                 default=True,
@@ -3176,15 +3179,25 @@ def build_model_from_args(args):
                     **(
                         {
                             "enable_global_residual_score": True,
-                            "global_residual_mode": str(
-                                getattr(args, "global_residual_mode", "residual")
+                            "global_residual_mode": (
+                                "residual"
+                                if is_ours_final_ucot_model
+                                else str(getattr(args, "global_residual_mode", "residual"))
                             ),
-                            "global_residual_weight": float(
-                                getattr(args, "global_residual_weight", 0.10)
+                            "global_residual_weight": (
+                                0.10
+                                if is_ours_final_ucot_model
+                                else float(getattr(args, "global_residual_weight", 0.10))
                             ),
                         }
-                        if is_ours_final_model
-                        and _bool_flag(getattr(args, "enable_global_residual_score", False), default=False)
+                        if is_ours_final_ucot_model
+                        or (
+                            is_ours_final_model
+                            and _bool_flag(
+                                getattr(args, "enable_global_residual_score", False),
+                                default=False,
+                            )
+                        )
                         else {}
                     ),
                     **(

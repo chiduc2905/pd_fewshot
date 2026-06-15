@@ -5476,6 +5476,7 @@ class OursFinalUCOT(OursFinalM2):
         enable_ucot_calibration = _bool_config(kwargs.pop("enable_ucot_calibration", True))
         ucot_threshold_quantile = float(kwargs.pop("ucot_threshold_quantile", 0.70))
         ucot_threshold_mix = float(kwargs.pop("ucot_threshold_mix", 1.0))
+        ucot_threshold_max_ratio = float(kwargs.pop("ucot_threshold_max_ratio", 2.0))
         ucot_threshold_detach = _bool_config(kwargs.pop("ucot_threshold_detach", True))
         ucot_temperature = float(kwargs.pop("ucot_temperature", 0.25))
         ucot_marginal_mix = float(kwargs.pop("ucot_marginal_mix", 0.65))
@@ -5491,9 +5492,9 @@ class OursFinalUCOT(OursFinalM2):
             raise ValueError("ours_final_ucot requires ours_final_score_mode='threshold_mass'")
         kwargs["ours_final_marginal_mode"] = "uniform"
         kwargs["ours_final_score_mode"] = "threshold_mass"
-        kwargs.setdefault("enable_global_residual_score", True)
-        kwargs.setdefault("global_residual_mode", "residual")
-        kwargs.setdefault("global_residual_weight", 0.1)
+        kwargs["enable_global_residual_score"] = True
+        kwargs["global_residual_mode"] = "residual"
+        kwargs["global_residual_weight"] = 0.1
         kwargs.setdefault("tau_q", 0.5)
         kwargs.setdefault("tau_c", 0.8)
         kwargs.setdefault("ecot_enable_egsm", False)
@@ -5506,6 +5507,8 @@ class OursFinalUCOT(OursFinalM2):
             raise ValueError("ucot_threshold_quantile must be in [0, 1]")
         if not 0.0 <= ucot_threshold_mix <= 1.0:
             raise ValueError("ucot_threshold_mix must be in [0, 1]")
+        if ucot_threshold_max_ratio < 1.0:
+            raise ValueError("ucot_threshold_max_ratio must be at least 1")
         if ucot_temperature <= 0.0:
             raise ValueError("ucot_temperature must be positive")
         if not 0.0 <= ucot_marginal_mix <= 1.0:
@@ -5520,6 +5523,7 @@ class OursFinalUCOT(OursFinalM2):
         self.enable_ucot_calibration = bool(enable_ucot_calibration)
         self.ucot_threshold_quantile = float(ucot_threshold_quantile)
         self.ucot_threshold_mix = float(ucot_threshold_mix)
+        self.ucot_threshold_max_ratio = float(ucot_threshold_max_ratio)
         self.ucot_threshold_detach = bool(ucot_threshold_detach)
         self.ucot_temperature = float(ucot_temperature)
         self.ucot_marginal_mix = float(ucot_marginal_mix)
@@ -5568,9 +5572,15 @@ class OursFinalUCOT(OursFinalM2):
             query_len,
             support_len,
         )
-        best_edge = cost_view.amin(dim=(1, 2, 4))
+        cost_scale = threshold_source.std(unbiased=False).clamp_min(self.eps)
+        temperature = (float(self.ucot_temperature) * cost_scale).clamp_min(self.eps)
+        class_token_cost = -temperature * (
+            torch.logsumexp(-cost_view / temperature, dim=(2, 4))
+            - math.log(float(max(int(shot_num) * support_len, 1)))
+        )
+        best_class_token_cost = class_token_cost.amin(dim=1)
         episode_threshold = torch.quantile(
-            best_edge.flatten(),
+            best_class_token_cost.flatten(),
             float(self.ucot_threshold_quantile),
         )
         base_threshold = self.transport_cost_threshold.to(
@@ -5580,13 +5590,26 @@ class OursFinalUCOT(OursFinalM2):
         if self.ucot_threshold_detach:
             base_threshold = base_threshold.detach()
         mix = flat_cost.new_tensor(float(self.ucot_threshold_mix))
-        threshold = ((1.0 - mix) * base_threshold + mix * episode_threshold).clamp_min(self.eps)
+        unclamped_threshold = (1.0 - mix) * base_threshold + mix * episode_threshold
+        max_threshold = base_threshold * float(self.ucot_threshold_max_ratio)
+        threshold = unclamped_threshold.clamp(
+            min=base_threshold,
+            max=max_threshold,
+        ).clamp_min(self.eps)
         payload = {
             "ucot/base_threshold": base_threshold.detach(),
             "ucot/calibrated_threshold": threshold.detach(),
+            "ucot/unclamped_threshold": unclamped_threshold.detach(),
             "ucot/threshold_ratio": (threshold.detach() / base_threshold.detach().clamp_min(self.eps)),
             "ucot/threshold_quantile": flat_cost.new_tensor(float(self.ucot_threshold_quantile)),
             "ucot/threshold_mix": flat_cost.new_tensor(float(self.ucot_threshold_mix)),
+            "ucot/threshold_max_ratio": flat_cost.new_tensor(float(self.ucot_threshold_max_ratio)),
+            "ucot/threshold_clipped": (
+                (unclamped_threshold < base_threshold)
+                | (unclamped_threshold > max_threshold)
+            ).to(flat_cost.dtype).detach(),
+            "ucot/threshold_source_mean": best_class_token_cost.mean().detach(),
+            "ucot/threshold_source_std": best_class_token_cost.std(unbiased=False).detach(),
             "ucot/positive_edge_rate": (cost_view < threshold.detach()).to(flat_cost.dtype).mean().detach(),
         }
         return threshold, payload
@@ -5645,12 +5668,16 @@ class OursFinalUCOT(OursFinalM2):
             rival_advantage = rival_cost - class_token_cost
         else:
             rival_advantage = torch.zeros_like(class_token_cost)
-        specificity = torch.sigmoid(
-            (rival_advantage - float(self.ucot_rival_margin))
+        positive_rival_advantage = (
+            rival_advantage - float(self.ucot_rival_margin)
+        ).clamp_min(0.0)
+        specificity = 1.0 - torch.exp(
+            -positive_rival_advantage
             / temperature.reshape(num_query, 1, 1).clamp_min(self.eps)
         )
-        query_positive = positive.amax(dim=(1, 2, 4))
-        query_raw = specificity.amax(dim=1) * query_positive
+        query_positive = positive.amax(dim=(2, 4))
+        query_specificity = specificity
+        query_raw = query_specificity * query_positive
         query_selective, query_fallback = self._ucot_normalize_with_uniform_fallback(query_raw)
 
         k = max(1, query_len // 8)
@@ -5664,27 +5691,45 @@ class OursFinalUCOT(OursFinalM2):
             else configured_mix.expand_as(confidence)
         ).clamp(0.0, 1.0)
         query_uniform = torch.full_like(query_selective, 1.0 / float(max(query_len, 1)))
-        query_prob = (1.0 - effective_mix) * query_uniform + effective_mix * query_selective
+        query_prob_class = (1.0 - effective_mix) * query_uniform + effective_mix * query_selective
 
         floor = flat_cost.new_tensor(float(self.ucot_uniform_floor))
-        query_prob = (1.0 - floor) * query_prob + floor * query_uniform
-        query_prob = query_prob / query_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        query_prob_class = (1.0 - floor) * query_prob_class + floor * query_uniform
+        query_prob_class = query_prob_class / query_prob_class.sum(
+            dim=-1,
+            keepdim=True,
+        ).clamp_min(self.eps)
+        query_prob = (
+            query_prob_class[:, :, None, :]
+            .expand(-1, -1, int(shot_num), -1)
+            .reshape(num_query, num_pairs, query_len)
+        )
 
         row_min = cost_view.amin(dim=-1, keepdim=True)
         row_affinity = torch.exp(-(cost_view - row_min) / temperature_5d).clamp(0.0, 1.0)
         pair_evidence = (specificity[:, :, None, :, None] * positive * row_affinity).clamp(0.0, 1.0)
-        support_raw = (query_prob[:, None, None, :, None] * pair_evidence).sum(dim=-2)
+        query_prob_view = query_prob.reshape(
+            num_query,
+            int(way_num),
+            int(shot_num),
+            query_len,
+        )
+        support_raw = (query_prob_view[..., None] * pair_evidence).sum(dim=-2)
         support_selective, support_fallback = self._ucot_normalize_with_uniform_fallback(support_raw)
         support_uniform = torch.full_like(support_selective, 1.0 / float(max(support_len, 1)))
-        support_mix = effective_mix[:, None, None, :]
+        support_mix = effective_mix[:, :, None, :]
         support_prob = (1.0 - support_mix) * support_uniform + support_mix * support_selective
         support_prob = (1.0 - floor) * support_prob + floor * support_uniform
         support_prob = support_prob / support_prob.sum(dim=-1, keepdim=True).clamp_min(self.eps)
         support_prob = support_prob.reshape(num_query, num_pairs, support_len)
 
-        query_entropy = -(query_prob * query_prob.clamp_min(self.eps).log()).sum(dim=-1)
+        query_entropy = -(query_prob_class * query_prob_class.clamp_min(self.eps).log()).sum(dim=-1)
         support_entropy = -(support_prob * support_prob.clamp_min(self.eps).log()).sum(dim=-1)
-        query_l1_uniform = (query_prob - query_uniform).abs().sum(dim=-1)
+        query_l1_uniform = (query_prob_class - query_uniform).abs().sum(dim=-1)
+        query_class_center = query_prob_class.mean(dim=1, keepdim=True)
+        query_class_l1_spread = (
+            query_prob_class - query_class_center
+        ).abs().sum(dim=-1).mean()
         support_uniform_flat = support_uniform.reshape(num_query, num_pairs, support_len)
         support_l1_uniform = (support_prob - support_uniform_flat).abs().sum(dim=-1)
         payload = {
@@ -5700,15 +5745,27 @@ class OursFinalUCOT(OursFinalM2):
             "ucot/confidence_power": flat_cost.new_tensor(float(self.ucot_confidence_power)),
             "ucot/uniform_floor": floor.detach(),
             "ucot/rival_margin": flat_cost.new_tensor(float(self.ucot_rival_margin)),
+            "ucot/class_conditional_query": flat_cost.new_tensor(1.0),
             "ucot/query_positive_acceptance_mean": query_positive.mean().detach(),
             "ucot/edge_positive_acceptance_mean": positive.mean().detach(),
+            "ucot/positive_rival_advantage_share": (
+                positive_rival_advantage > self.eps
+            ).to(flat_cost.dtype).mean().detach(),
             "ucot/query_specificity_mean": specificity.mean().detach(),
-            "ucot/query_specificity_peak": specificity.amax(dim=1).mean().detach(),
+            "ucot/query_specificity_peak": query_specificity.amax(dim=1).mean().detach(),
+            "ucot/common_query_share": (
+                query_specificity <= self.eps
+            ).to(flat_cost.dtype).mean().detach(),
+            "ucot/discriminative_query_share": (
+                query_specificity > self.eps
+            ).to(flat_cost.dtype).mean().detach(),
+            "ucot/query_raw_mean": query_raw.mean().detach(),
+            "ucot/query_class_l1_spread": query_class_l1_spread.detach(),
             "ucot/evidence_confidence": confidence.mean().detach(),
             "ucot/effective_mix": effective_mix.mean().detach(),
             "ucot/query_entropy": query_entropy.mean().detach(),
             "ucot/support_entropy": support_entropy.mean().detach(),
-            "ucot/query_peak": query_prob.amax(dim=-1).mean().detach(),
+            "ucot/query_peak": query_prob_class.amax(dim=-1).mean().detach(),
             "ucot/support_peak": support_prob.amax(dim=-1).mean().detach(),
             "ucot/query_l1_from_uniform": query_l1_uniform.mean().detach(),
             "ucot/support_l1_from_uniform": support_l1_uniform.mean().detach(),
@@ -5728,10 +5785,15 @@ class OursFinalUCOT(OursFinalM2):
             return None, None, None, {
                 "ucot/enabled": flat_cost.new_tensor(0.0),
                 "ucot/ablation_id": flat_cost.new_tensor(self._ABLATION_IDS["off"]),
+                "ucot/threshold_active": flat_cost.new_tensor(0.0),
+                "ucot/marginal_active": flat_cost.new_tensor(0.0),
                 "ucot/base_threshold": base_threshold.detach(),
                 "ucot/calibrated_threshold": base_threshold.detach(),
+                "ucot/unclamped_threshold": base_threshold.detach(),
                 "ucot/threshold_ratio": flat_cost.new_tensor(1.0),
                 "ucot/threshold_quantile": flat_cost.new_tensor(float(self.ucot_threshold_quantile)),
+                "ucot/threshold_max_ratio": flat_cost.new_tensor(float(self.ucot_threshold_max_ratio)),
+                "ucot/threshold_clipped": flat_cost.new_tensor(0.0),
             }
 
         if self.ucot_ablation == "marginal_only":
@@ -5739,9 +5801,13 @@ class OursFinalUCOT(OursFinalM2):
             threshold_payload = {
                 "ucot/base_threshold": threshold.detach(),
                 "ucot/calibrated_threshold": threshold.detach(),
+                "ucot/unclamped_threshold": threshold.detach(),
                 "ucot/threshold_ratio": flat_cost.new_tensor(1.0),
                 "ucot/threshold_quantile": flat_cost.new_tensor(float(self.ucot_threshold_quantile)),
                 "ucot/threshold_mix": flat_cost.new_tensor(0.0),
+                "ucot/threshold_max_ratio": flat_cost.new_tensor(float(self.ucot_threshold_max_ratio)),
+                "ucot/threshold_clipped": flat_cost.new_tensor(0.0),
+                "ucot/threshold_active": flat_cost.new_tensor(0.0),
                 "ucot/positive_edge_rate": (flat_cost.detach() < threshold).to(flat_cost.dtype).mean().detach(),
             }
             threshold_override = None
@@ -5751,6 +5817,7 @@ class OursFinalUCOT(OursFinalM2):
                 way_num=way_num,
                 shot_num=shot_num,
             )
+            threshold_payload["ucot/threshold_active"] = flat_cost.new_tensor(1.0)
             threshold_override = threshold
 
         query_weight = None
@@ -5784,12 +5851,18 @@ class OursFinalUCOT(OursFinalM2):
             marginal_payload["ucot/support_peak"] = support_uniform.amax(dim=-1).mean().detach()
             marginal_payload["ucot/query_l1_from_uniform"] = flat_cost.new_tensor(0.0)
             marginal_payload["ucot/support_l1_from_uniform"] = flat_cost.new_tensor(0.0)
+            marginal_payload["ucot/class_conditional_query"] = flat_cost.new_tensor(0.0)
+            marginal_payload["ucot/query_class_l1_spread"] = flat_cost.new_tensor(0.0)
+            marginal_payload["ucot/effective_mix"] = flat_cost.new_tensor(0.0)
 
         payload = {
             **threshold_payload,
             **marginal_payload,
             "ucot/enabled": flat_cost.new_tensor(1.0),
             "ucot/ablation_id": flat_cost.new_tensor(self._ABLATION_IDS[self.ucot_ablation]),
+            "ucot/marginal_active": flat_cost.new_tensor(
+                float(self.ucot_ablation in {"full", "marginal_only"})
+            ),
         }
         return query_weight, support_weight, threshold_override, payload
 
@@ -5815,6 +5888,25 @@ class OursFinalUCOT(OursFinalM2):
         if not (torch.is_tensor(query_weight) and torch.is_tensor(support_weight)):
             return
         query_prob = query_weight.to(device=plan.device, dtype=plan.dtype)
+        if query_prob.dim() == 2:
+            query_prob = query_prob[:, None, None, :].expand(
+                -1,
+                int(way_num),
+                int(shot_num),
+                -1,
+            )
+        elif query_prob.dim() == 3:
+            query_prob = query_prob.reshape(
+                plan.shape[0],
+                int(way_num),
+                int(shot_num),
+                plan.shape[-2],
+            )
+        else:
+            raise ValueError(
+                "UCOT query weights must be shared or pair-conditional, "
+                f"got {tuple(query_prob.shape)}"
+            )
         support_prob = support_weight.to(device=plan.device, dtype=plan.dtype).reshape(
             plan.shape[0],
             int(way_num),
@@ -5822,7 +5914,7 @@ class OursFinalUCOT(OursFinalM2):
             plan.shape[-1],
         )
         shot_rho = shot_rho.to(device=plan.device, dtype=plan.dtype)
-        target_query = query_prob[:, None, None, :] * shot_rho[..., None]
+        target_query = query_prob * shot_rho[..., None]
         target_support = support_prob * shot_rho[..., None]
         query_l1 = (plan.sum(dim=-1) - target_query).abs().sum(dim=-1)
         support_l1 = (plan.sum(dim=-2) - target_support).abs().sum(dim=-1)

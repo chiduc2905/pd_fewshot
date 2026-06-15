@@ -73,13 +73,25 @@ Do not claim novelty for these pieces alone:
 Defensible novelty claim:
 
 > A utility-calibrated fixed-budget UOT model for few-shot partial-discharge
-> scalograms, where a single episode-calibrated `T-D` utility controls
-> threshold calibration, query/support transport quotas, KL-UOT evidence, and
-> final `T*M-C` scoring, with asymmetric query/support KL relaxation and a
+> scalograms, where a trust-region episode threshold and class-conditional
+> positive-rival utility jointly control query/support transport capacities
+> and final `T*M-C` scoring, with asymmetric query/support KL relaxation and a
 > small global residual head.
 
 This must remain a measured architecture-level claim, not a claim that
 "weighted marginals" are new.
+
+Internal novelty check:
+
+- Relative to `ours_final`, UCOT adds label-free soft matched threshold
+  calibration and pair-conditional query/support capacities.
+- It is not equivalent to the existing episode-contrast module: that module
+  adds a rival-derived cost penalty and only shapes query mass, whereas UCOT
+  leaves ground cost unchanged and jointly shapes both transport marginals
+  using threshold-positive evidence.
+- It is not equivalent to RAE-UOT: RAE is an optional generic evidence module;
+  UCOT owns the standalone model contract, threshold trust region, strict
+  relaxation profile, residual head, and audit acceptance criteria.
 
 References to cite in notes/paper:
 
@@ -130,9 +142,10 @@ New UCOT flow:
 
 ```text
 tokens -> cost D
-       -> episode-calibrated threshold T_cal
+       -> soft matched class-token costs
+       -> trust-region episode threshold T_cal
        -> utility U = T_cal - D
-       -> utility-specific query/support quotas
+       -> class-conditional utility/novelty query-support quotas
        -> support-strict UOT plan P
        -> score = scale * sum(P * U)
        -> local logits + 0.1 * global residual
@@ -162,15 +175,16 @@ Implement a scalar episode threshold first. Do not start with per-class or
 per-query thresholds; those make logits harder to compare and are unnecessary
 for the first model.
 
-Recommended formula:
+Implemented formula:
 
 ```python
 cost_view = flat_cost.detach().reshape(Nq, Way, Shot, Lq, Ls)
-best_edge_per_query_token = cost_view.amin(dim=(1, 2, 4))  # (Nq, Lq)
-episode_threshold = quantile(best_edge_per_query_token.flatten(), q)
+class_token_cost = softmin(cost_view, dim=(shot, support_token))
+best_class_token_cost = class_token_cost.amin(dim=class)
+episode_threshold = quantile(best_class_token_cost.flatten(), q)
 base_threshold = self.transport_cost_threshold.detach()
-T_cal = (1 - mix) * base_threshold + mix * episode_threshold
-T_cal = T_cal.clamp_min(self.eps)
+unclamped = (1 - mix) * base_threshold + mix * episode_threshold
+T_cal = clamp(unclamped, base_threshold, max_ratio * base_threshold)
 ```
 
 Initial defaults:
@@ -178,6 +192,7 @@ Initial defaults:
 ```text
 ucot_threshold_quantile = 0.70
 ucot_threshold_mix = 1.0
+ucot_threshold_max_ratio = 2.0
 ucot_threshold_detach = true
 ```
 
@@ -185,6 +200,10 @@ Rationale:
 
 - It is label-free.
 - It calibrates `T` to the current episode's feature/cost scale.
+- Soft matching is closer to transported cost geometry than an absolute
+  minimum edge.
+- The trust region prevents calibration from replacing the learned baseline
+  score geometry when episode costs are badly scaled.
 - It avoids directly using true class labels.
 - It fixes the audit failure mode before marginal selection.
 
@@ -212,15 +231,17 @@ Class-specific query evidence:
 class_token_cost = softmin over shot/support for each class and query token
 rival_cost = min class_token_cost over other classes
 rival_advantage = rival_cost - class_token_cost
-specificity = sigmoid((rival_advantage - ucot_rival_margin) / temp_query)
+positive_advantage = max(rival_advantage - ucot_rival_margin, 0)
+specificity = 1 - exp(-positive_advantage / temp_query)
 ```
 
-Shared query quota:
+Class-conditional query quota:
 
 ```python
-query_raw_i = max_c specificity[c, i] * max_{c,k,j} positive[c,k,i,j]
-query_selective = normalize(query_raw, uniform fallback)
-query_prob = (1 - effective_mix) * uniform + effective_mix * query_selective
+query_raw[c, i] = specificity[c, i] * max_{k,j} positive[c,k,i,j]
+query_selective[c] = normalize(query_raw[c], uniform fallback)
+query_prob[c] = (1 - effective_mix[c]) * uniform \
+              + effective_mix[c] * query_selective[c]
 ```
 
 Support quota:
@@ -228,7 +249,7 @@ Support quota:
 ```python
 row_affinity = exp(-(D - row_min(D)) / temp)
 pair_evidence = specificity[:, :, None, :, None] * positive * row_affinity
-support_raw[c,k,j] = sum_i query_prob[i] * pair_evidence[c,k,i,j]
+support_raw[c,k,j] = sum_i query_prob[c,i] * pair_evidence[c,k,i,j]
 support_selective = normalize(support_raw, uniform fallback)
 support_prob = (1 - effective_mix) * uniform + effective_mix * support_selective
 ```
@@ -761,3 +782,75 @@ Fail conditions:
 - Preserve `ours_final` byte path unless the user explicitly asks to change it.
 - Every new component must expose diagnostics that show whether it actually
   changed transport behavior.
+
+## Seed42 1-Shot Failure Audit
+
+Observed on
+`audit_ours_final_knee_aug_split_ours_final_ucot_60samples_1shot_seed42.txt`:
+
+- Accuracy fell from `0.805000` to `0.778333`.
+- The audit header reported global residual as disabled because it read the
+  generic CLI flag instead of the model's effective configuration. Runtime
+  diagnostics (`global_residual_weight`, fix rate, and harm rate) show that
+  residual weight `0.1` was active. This metadata bug does not explain the
+  accuracy regression.
+- Threshold calibration improved coverage:
+  `audit_true_avg_cost_below_threshold` rose from `0.001667` to `0.165000`,
+  negative-utility mass fell from `0.971481` to `0.772497`, and dead-query
+  ratio fell from `0.948100` to `0.730050`.
+- The old marginal rule damaged discrimination:
+  cost gap fell from `0.180122` to `0.136969`, common mass rose from
+  `0.360466` to `0.472446`, transport common mass rose from `0.838372` to
+  `0.874062`, and specific mass fell from `0.067779` to `0.042571`.
+
+Root cause in the old marginal rule:
+
+```text
+specificity = sigmoid(rival_advantage / temperature)
+```
+
+This assigns specificity `0.5` to a token with zero rival advantage, so common
+tokens remain eligible for quota amplification. The corrected rule is:
+
+```text
+positive_advantage = max(rival_advantage - margin, 0)
+specificity = 1 - exp(-positive_advantage / temperature)
+```
+
+Zero or negative class novelty now produces zero specificity. The corrected
+implementation also logs `ucot/common_query_share`,
+`ucot/discriminative_query_share`, and
+`ucot/positive_rival_advantage_share`.
+
+The full-flow audit exposed two structural risks in the original implementation:
+
+- Threshold calibration uses the episode distribution of each query token's
+  minimum edge cost, while `T*M-C` is governed by transported class-level
+  average cost. In the failed run, calibrated `T=0.195848` remained below the
+  true transported average cost `0.296511`, leaving `83.5%` of true-class
+  utilities negative.
+- Query quota was shared across all candidate classes after taking maximum
+  specificity over classes. A token distinctive for one candidate was
+  therefore emphasized in every wrong-class transport.
+
+Both are addressed in the revised implementation:
+
+- Threshold source is now soft matched class-token cost and is clamped to
+  `[T_base, 2*T_base]`.
+- Query weights now have shape `(Nq, Way*Shot, Lq)` and are passed through the
+  existing pair-conditional marginal contract in the transport solver.
+- `ucot/query_class_l1_spread` verifies that candidate classes receive
+  meaningfully different query quotas.
+- `ucot/threshold_clipped` and `ucot/unclamped_threshold` expose whether the
+  trust region is actively protecting baseline geometry.
+- `ucot/threshold_active` and `ucot/marginal_active` identify which mechanism
+  actually reached transport/scoring in every ablation.
+
+Required rerun order:
+
+1. `threshold_only` to verify whether calibrated utility alone preserves the
+   global-residual baseline accuracy.
+2. `marginal_only` to isolate the corrected novelty quota.
+3. `full` only after both mechanisms are interpretable independently.
+4. Do not tune marginal mix from this failed audit because the original audit
+   omitted all `ucot/*` scalar diagnostics.

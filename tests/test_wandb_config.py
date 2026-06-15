@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 import torch
 
 from main import (
@@ -263,6 +264,23 @@ def test_dcr_prediction_comparison_metrics_use_same_examples():
     assert metrics["dcr_harm_rate"] == 0.25
     assert metrics["dcr_prediction_change_rate"] == 0.75
     assert metrics["dcr_accuracy_delta"] == 0.25
+
+
+def test_score_diagnostics_preserve_ucot_scalar_metrics():
+    logits = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    targets = torch.tensor([0, 1])
+
+    metrics = summarize_score_diagnostics(
+        {
+            "ucot/common_query_share": torch.tensor(0.625),
+            "ucot/discriminative_query_share": torch.tensor(0.375),
+        },
+        logits,
+        targets,
+    )
+
+    assert metrics["ucot/common_query_share"] == pytest.approx(0.625)
+    assert metrics["ucot/discriminative_query_share"] == pytest.approx(0.375)
 
 
 def test_ours_final_wandb_config_hides_other_model_flags_and_keeps_global_residual():
