@@ -524,6 +524,12 @@ MODEL_REGISTRY = {
         "architecture": "ResNet12 local descriptors + transport matching",
         "metric": "Earth Mover's Distance",
     },
+    "ecot_fsl": {
+        "display_name": "ECOT-FSL",
+        "paper_name": "Episode-Competitive Optimal Transport for Few-Shot Learning",
+        "architecture": "ResNet12 local descriptors + one N-way semi-relaxed transport plan with shared query mass",
+        "metric": "Episode-Competitive Class Mass",
+    },
     "evidence_deepemd": {
         "display_name": "Evidence-DeepEMD",
         "architecture": "DeepEMD local descriptors + class-stable evidence masses + support-shot reliability aggregation",
@@ -974,6 +980,7 @@ PAPER_BASELINE_BACKBONE_MODELS = frozenset(
     {
         "feat",
         "deepemd",
+        "ecot_fsl",
         "evidence_deepemd",
         "dice_emd",
         "transport_recon_emd",
@@ -983,7 +990,7 @@ PAPER_BASELINE_BACKBONE_MODELS = frozenset(
         "deepbdc",
     }
 )
-RESNET12_ONLY_MODELS = frozenset({"transport_recon_emd", "tardis_emd"})
+RESNET12_ONLY_MODELS = frozenset({"ecot_fsl", "transport_recon_emd", "tardis_emd"})
 HIGH_DIM_FEWSHOT_BACKBONES = frozenset({"resnet12", "fsl_mamba"})
 EBOT_MODEL_NAMES = frozenset({"evidence_budget_ot", "evidence_budgeted_ot", "ebot", "ebot_scalogram"})
 MM_SPOT_MODEL_NAMES = frozenset({"mm_spot_fsl"})
@@ -1168,6 +1175,19 @@ def build_model_from_args(args):
             sfc_bs=int(getattr(args, "deepemd_sfc_bs", 4)),
             fewshot_backbone=fewshot_backbone,
             device=device,
+        )
+    if args.model == "ecot_fsl":
+        EpisodeCompetitiveOT = _load_symbol("net.ecot_fsl", "EpisodeCompetitiveOT")
+        return EpisodeCompetitiveOT(
+            image_size=image_size,
+            fewshot_backbone=fewshot_backbone,
+            epsilon=float(getattr(args, "ecot_epsilon", 0.05)),
+            target_relaxation=float(getattr(args, "ecot_target_relaxation", 0.10)),
+            sinkhorn_iterations=int(getattr(args, "ecot_sinkhorn_iterations", 60)),
+            sinkhorn_tolerance=float(getattr(args, "ecot_sinkhorn_tolerance", 1e-6)),
+            logit_scale=float(getattr(args, "ecot_logit_scale", 1.0)),
+            claim_margin=float(getattr(args, "ecot_claim_margin", 0.05)),
+            numerical_eps=float(getattr(args, "ecot_numerical_eps", 1e-8)),
         )
     if args.model == "evidence_deepemd":
         EvidenceDeepEMD = _load_symbol("net.evidence_deepemd", "EvidenceDeepEMD")

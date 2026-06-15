@@ -3917,6 +3917,13 @@ def get_args():
     )
     parser.add_argument("--deepemd_debug_signal_quantile", type=float, default=0.70)
     parser.add_argument("--deepemd_debug_common_margin", type=float, default=0.05)
+    parser.add_argument("--ecot_epsilon", type=float, default=0.05)
+    parser.add_argument("--ecot_target_relaxation", type=float, default=0.10)
+    parser.add_argument("--ecot_sinkhorn_iterations", type=int, default=60)
+    parser.add_argument("--ecot_sinkhorn_tolerance", type=float, default=1e-6)
+    parser.add_argument("--ecot_logit_scale", type=float, default=1.0)
+    parser.add_argument("--ecot_claim_margin", type=float, default=0.05)
+    parser.add_argument("--ecot_numerical_eps", type=float, default=1e-8)
     parser.add_argument("--use_evidence_weight", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--use_shot_reliability", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--evidence_eps", type=float, default=1e-3)
@@ -4049,6 +4056,17 @@ def get_model(args):
             f"sfc_lr={getattr(args, 'deepemd_sfc_lr', 0.1)}, "
             f"sfc_steps={getattr(args, 'deepemd_sfc_update_step', 15)}, "
             f"sfc_bs={getattr(args, 'deepemd_sfc_bs', 4)}{override_suffix})"
+        )
+    if args.model == "ecot_fsl":
+        print(
+            "  ecot_fsl: one joint source-constrained, target-KL-relaxed transport "
+            "plan over all labelled support tokens "
+            f"(epsilon={getattr(args, 'ecot_epsilon', 0.05)}, "
+            f"target_relaxation={getattr(args, 'ecot_target_relaxation', 0.10)}, "
+            f"sinkhorn_iters={getattr(args, 'ecot_sinkhorn_iterations', 60)}, "
+            f"sinkhorn_tol={getattr(args, 'ecot_sinkhorn_tolerance', 1e-6)}, "
+            f"logit_scale={getattr(args, 'ecot_logit_scale', 1.0)}, "
+            f"claim_margin={getattr(args, 'ecot_claim_margin', 0.05)})"
         )
     if args.model == "evidence_deepemd":
         print(
@@ -7130,6 +7148,14 @@ def forward_scores(
                 support_targets=support_targets,
             )
         return net(query, support, return_aux=collect_diagnostics)
+    if args.model == "ecot_fsl":
+        return net(
+            query,
+            support,
+            query_targets=query_targets,
+            support_targets=support_targets,
+            return_aux=collect_diagnostics,
+        )
     if args.model in {"transport_recon_emd", "tardis_emd"}:
         return net(
             query,
@@ -8556,7 +8582,7 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         if scalar is not None:
             metrics[key] = scalar
     for key, value in scores.items():
-        if str(key).startswith("deepemd/"):
+        if str(key).startswith(("deepemd/", "ecot/")):
             scalar = _scalar_metric(value)
             if scalar is not None:
                 metrics[key] = scalar
