@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from scipy.optimize import linprog
 
 from net.encoders.smnet_conv64f_encoder import build_resnet12_family_encoder
+from net.modules.deepemd_diagnostics import compute_deepemd_diagnostics
 from net.modules.partial_ot import compute_partial_transported_mass, solve_partial_transport
 from net.modules.unbalanced_ot import compute_transported_mass, sinkhorn_unbalanced_log
 
@@ -294,13 +295,22 @@ class DeepEMD(nn.Module):
             return torch.minimum(requested, max_mass)
         return self.partial_mass_fraction * max_mass
 
-    def get_emd_distance(self, similarity_map: torch.Tensor, weight1: torch.Tensor, weight2: torch.Tensor, solver: str) -> torch.Tensor:
+    def get_emd_distance(
+        self,
+        similarity_map: torch.Tensor,
+        weight1: torch.Tensor,
+        weight2: torch.Tensor,
+        solver: str,
+        *,
+        return_flow: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_query = similarity_map.shape[0]
         num_proto = similarity_map.shape[1]
         num_node = weight1.shape[-1]
 
         if solver == "opencv":
             weighted_similarity = similarity_map.clone()
+            flows = torch.zeros_like(similarity_map) if return_flow else None
             for query_idx in range(num_query):
                 for class_idx in range(num_proto):
                     flow = emd_inference_opencv(
@@ -310,7 +320,10 @@ class DeepEMD(nn.Module):
                     )
                     flow_t = torch.from_numpy(flow).to(device=similarity_map.device, dtype=similarity_map.dtype)
                     weighted_similarity[query_idx, class_idx] = weighted_similarity[query_idx, class_idx] * flow_t
-            return weighted_similarity.sum(dim=-1).sum(dim=-1) * (self.temperature / num_node)
+                    if flows is not None:
+                        flows[query_idx, class_idx] = flow_t
+            logits = weighted_similarity.sum(dim=-1).sum(dim=-1) * (self.temperature / num_node)
+            return (logits, flows) if return_flow else logits
 
         if solver == "qpth":
             weight2 = weight2.permute(1, 0, 2)
@@ -325,12 +338,21 @@ class DeepEMD(nn.Module):
                 l2_strength=self.qpth_l2_strength,
             )
             logits = (flows * flat_similarity).reshape(num_query, num_proto, flows.shape[-2], flows.shape[-1])
-            return logits.sum(dim=-1).sum(dim=-1) * (self.temperature / num_node)
+            logits = logits.sum(dim=-1).sum(dim=-1) * (self.temperature / num_node)
+            reshaped_flows = flows.reshape(
+                num_query,
+                num_proto,
+                flows.shape[-2],
+                flows.shape[-1],
+            )
+            return (logits, reshaped_flows) if return_flow else logits
 
         if solver == "linprog":
             logits = []
+            flows = []
             for query_idx in range(num_query):
                 class_scores = []
+                class_flows = []
                 for class_idx in range(num_proto):
                     flow = emd_inference_linprog(
                         1 - similarity_map[query_idx, class_idx],
@@ -338,8 +360,12 @@ class DeepEMD(nn.Module):
                         weight2[class_idx, query_idx],
                     ).to(device=similarity_map.device, dtype=similarity_map.dtype)
                     class_scores.append((flow * similarity_map[query_idx, class_idx]).sum() * (self.temperature / num_node))
+                    class_flows.append(flow)
                 logits.append(torch.stack(class_scores))
-            return torch.stack(logits, dim=0)
+                flows.append(torch.stack(class_flows))
+            logits = torch.stack(logits, dim=0)
+            flow_tensor = torch.stack(flows, dim=0)
+            return (logits, flow_tensor) if return_flow else logits
 
         if solver == "sinkhorn":
             weight2 = weight2.permute(1, 0, 2)
@@ -359,7 +385,9 @@ class DeepEMD(nn.Module):
                 num_node,
                 normalize_by_mass=False,
             )
-            return scores.reshape(num_query, num_proto)
+            logits = scores.reshape(num_query, num_proto)
+            reshaped_flow = flow.reshape(num_query, num_proto, flow.shape[-2], flow.shape[-1])
+            return (logits, reshaped_flow) if return_flow else logits
 
         if solver in UOT_SOLVERS:
             weight2 = weight2.permute(1, 0, 2)
@@ -386,7 +414,9 @@ class DeepEMD(nn.Module):
                 num_node,
                 normalize_by_mass=self.uot_score_normalize,
             )
-            return scores.reshape(num_query, num_proto)
+            logits = scores.reshape(num_query, num_proto)
+            reshaped_flow = flow.reshape(num_query, num_proto, flow.shape[-2], flow.shape[-1])
+            return (logits, reshaped_flow) if return_flow else logits
 
         if solver in PARTIAL_OT_SOLVERS:
             weight2 = weight2.permute(1, 0, 2)
@@ -416,18 +446,67 @@ class DeepEMD(nn.Module):
                 num_node,
                 normalize_by_mass=self.partial_score_normalize,
             )
-            return scores.reshape(num_query, num_proto)
+            logits = scores.reshape(num_query, num_proto)
+            reshaped_flow = flow.reshape(num_query, num_proto, flow.shape[-2], flow.shape[-1])
+            return (logits, reshaped_flow) if return_flow else logits
 
         raise ValueError(f"Unsupported DeepEMD solver: {solver}")
 
-    def emd_forward(self, proto: torch.Tensor, query: torch.Tensor, solver: str) -> torch.Tensor:
+    def emd_forward(
+        self,
+        proto: torch.Tensor,
+        query: torch.Tensor,
+        solver: str,
+        *,
+        return_aux: bool = False,
+        query_images: torch.Tensor | None = None,
+        support_images: torch.Tensor | None = None,
+        signal_quantile: float = 0.70,
+        common_margin: float = 0.05,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
         weight1 = self.get_weight_vector(query, proto)
         weight2 = self.get_weight_vector(proto, query)
 
         proto = self.normalize_feature(proto)
         query = self.normalize_feature(query)
         similarity_map = self.get_similarity_map(proto, query)
-        return self.get_emd_distance(similarity_map, weight1, weight2, solver=solver)
+        if not return_aux:
+            return self.get_emd_distance(similarity_map, weight1, weight2, solver=solver)
+        if query_images is None or support_images is None:
+            raise ValueError("DeepEMD diagnostics require query_images and support_images")
+        logits, flow = self.get_emd_distance(
+            similarity_map,
+            weight1,
+            weight2,
+            solver=solver,
+            return_flow=True,
+        )
+        uniform_weight_logits = self.get_emd_distance(
+            similarity_map,
+            torch.ones_like(weight1),
+            torch.ones_like(weight2),
+            solver=solver,
+        )
+        normalize_by_mass = solver in UOT_SOLVERS and self.uot_score_normalize
+        normalize_by_mass = normalize_by_mass or (
+            solver in PARTIAL_OT_SOLVERS and self.partial_score_normalize
+        )
+        diagnostics = compute_deepemd_diagnostics(
+            similarity=similarity_map,
+            flow=flow,
+            query_weights=weight1,
+            support_weights=weight2,
+            query_images=query_images,
+            support_images=support_images,
+            logits=logits,
+            uniform_weight_logits=uniform_weight_logits,
+            temperature=self.temperature,
+            normalize_score_by_mass=normalize_by_mass,
+            signal_quantile=signal_quantile,
+            common_margin=common_margin,
+            eps=self.eps,
+        )
+        return {"logits": logits, **diagnostics}
 
     def get_sfc(
         self,
@@ -468,7 +547,10 @@ class DeepEMD(nn.Module):
         exact: bool | None = None,
         sfc_update_step_override: int | None = None,
         sfc_bs_override: int | None = None,
-    ) -> torch.Tensor:
+        return_aux: bool = False,
+        debug_signal_quantile: float = 0.70,
+        debug_common_margin: float = 0.05,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
         batch_size, num_query, channels, height, width = query.size()
         _, way_num, shot_num, _, _, _ = support.size()
         solver = self._resolve_solver(exact=exact)
@@ -482,6 +564,7 @@ class DeepEMD(nn.Module):
         support_feat = support_feat.reshape(batch_size, way_num, shot_num, self.feat_dim, feat_h, feat_w)
 
         outputs = []
+        diagnostic_outputs: dict[str, list[torch.Tensor]] = {}
         for batch_idx in range(batch_size):
             proto = support_feat[batch_idx].mean(dim=1)
             if refine_proto and shot_num > 1:
@@ -491,10 +574,37 @@ class DeepEMD(nn.Module):
                     sfc_update_step=sfc_update_step_override,
                     sfc_bs=sfc_bs_override,
                 )
-            logits = self.emd_forward(proto, query_feat[batch_idx], solver=solver)
-            outputs.append(logits)
+            result = self.emd_forward(
+                proto,
+                query_feat[batch_idx],
+                solver=solver,
+                return_aux=return_aux,
+                query_images=query[batch_idx],
+                support_images=support[batch_idx],
+                signal_quantile=debug_signal_quantile,
+                common_margin=debug_common_margin,
+            )
+            if isinstance(result, dict):
+                outputs.append(result["logits"])
+                for key, value in result.items():
+                    if key == "logits":
+                        continue
+                    diagnostic_outputs.setdefault(key, []).append(value)
+            else:
+                outputs.append(result)
 
-        return torch.cat(outputs, dim=0)
+        logits = torch.cat(outputs, dim=0)
+        if not return_aux:
+            return logits
+        merged = {}
+        for key, values in diagnostic_outputs.items():
+            if key.startswith("deepemd/"):
+                merged[key] = torch.stack(
+                    [value.reshape(()) for value in values]
+                ).mean()
+            else:
+                merged[key] = torch.cat(values, dim=0)
+        return {"logits": logits, **merged}
 
 
 DeepEMDSimple = DeepEMD

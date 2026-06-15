@@ -296,6 +296,9 @@ _WANDB_COMMON_ARG_KEYS = frozenset(
         "uot_evidence_artifacts",
         "uot_evidence_visual_style",
         "export_dataset_profile",
+        "deepemd_debug",
+        "deepemd_debug_signal_quantile",
+        "deepemd_debug_common_margin",
         "save_last_checkpoint",
         "checkpoint_tag",
         "skip_final_test",
@@ -3902,6 +3905,18 @@ def get_args():
     parser.add_argument("--deepemd_sfc_lr", type=float, default=0.1)
     parser.add_argument("--deepemd_sfc_update_step", type=int, default=15)
     parser.add_argument("--deepemd_sfc_bs", type=int, default=4)
+    parser.add_argument(
+        "--deepemd_debug",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "DeepEMD only: collect observational transport, foreground/background, "
+            "cross-reference weight, and counterfactual score diagnostics."
+        ),
+    )
+    parser.add_argument("--deepemd_debug_signal_quantile", type=float, default=0.70)
+    parser.add_argument("--deepemd_debug_common_margin", type=float, default=0.05)
     parser.add_argument("--use_evidence_weight", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--use_shot_reliability", type=str, default="true", choices=["true", "false"])
     parser.add_argument("--evidence_eps", type=float, default=1e-3)
@@ -6055,6 +6070,143 @@ def is_dcr_debug_metric(key: str) -> bool:
     return str(key).startswith(_DCR_DEBUG_PREFIXES)
 
 
+def deepemd_debug_enabled(args) -> bool:
+    return (
+        str(getattr(args, "model", "")).strip().lower() == "deepemd"
+        and _bool_flag(getattr(args, "deepemd_debug", "false"), default=False)
+    )
+
+
+def write_deepemd_debug_report(
+    args,
+    test_diag,
+    *,
+    accuracy,
+    current_test_name=None,
+):
+    if not deepemd_debug_enabled(args):
+        return None
+
+    samples_stem = (
+        f"{args.training_samples}samples"
+        if getattr(args, "training_samples", None)
+        else "allsamples"
+    )
+    experiment_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    tag_suffix = f"_{sanitize_result_tag(experiment_tag)}" if experiment_tag else ""
+    protocol_suffix = get_test_protocol_suffix(args)
+    path = os.path.join(
+        args.path_results,
+        (
+            f"debug_deepemd_{args.dataset_name}_{args.model}_{samples_stem}_"
+            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt"
+        ),
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    active_acc = float(test_diag.get("pred_acc", accuracy))
+    signal_acc = test_diag.get("deepemd_signal_only_pred_acc")
+    background_acc = test_diag.get("deepemd_background_only_pred_acc")
+    query_background_acc = test_diag.get("deepemd_query_background_pred_acc")
+    uniform_weight_acc = test_diag.get("deepemd_uniform_weight_pred_acc")
+    chance = 1.0 / max(1, int(getattr(args, "way_num", 1)))
+    signal_drop = None if signal_acc is None else active_acc - float(signal_acc)
+
+    if signal_acc is None or background_acc is None:
+        verdict = "INCOMPLETE"
+        reason = "Counterfactual foreground/background scores are missing."
+    elif float(background_acc) >= chance + 0.10 or signal_drop > 0.05:
+        verdict = "STRUCTURED_BACKGROUND_EVIDENCE"
+        reason = (
+            "Background-only matching is predictive or removing background causes a "
+            "material accuracy drop; the background is not behaving as pure nuisance."
+        )
+    elif abs(signal_drop) <= 0.02 and float(background_acc) <= chance + 0.05:
+        verdict = "FOREGROUND_DOMINANT"
+        reason = (
+            "Foreground-only matching preserves DeepEMD accuracy while background-only "
+            "matching is near chance."
+        )
+    else:
+        verdict = "MIXED_EVIDENCE"
+        reason = (
+            "Both foreground and background-involved matches affect predictions; compare "
+            "the clean and SNR-specific reports before changing the architecture."
+        )
+
+    metric_keys = [
+        key
+        for key in sorted(test_diag)
+        if key.startswith("deepemd") or key in {"pred_acc", "logit_margin"}
+    ]
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("DEEPEMD FOREGROUND/BACKGROUND TRANSPORT DEBUG REPORT\n")
+        handle.write("=" * 72 + "\n")
+        handle.write(f"Dataset: {args.dataset_name}\n")
+        handle.write(f"Training Samples: {getattr(args, 'training_samples', None) or 'All'}\n")
+        handle.write(f"Shot: {args.shot_num}\n")
+        handle.write(f"Training Seed: {getattr(args, 'seed', 'unknown')}\n")
+        handle.write(f"Final Test Seed: {getattr(args, 'final_test_seed', 'unknown')}\n")
+        handle.write(
+            "Test Protocol: "
+            f"{getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        handle.write(f"Signal Quantile: {getattr(args, 'deepemd_debug_signal_quantile', 0.70)}\n")
+        handle.write(f"Common-token Margin: {getattr(args, 'deepemd_debug_common_margin', 0.05)}\n")
+        handle.write("\nMECHANISM VERDICT\n")
+        handle.write("-" * 72 + "\n")
+        handle.write(f"Active Accuracy: {active_acc:.6f}\n")
+        handle.write(f"Chance Accuracy: {chance:.6f}\n")
+        if signal_acc is not None:
+            handle.write(f"Foreground-only Accuracy: {float(signal_acc):.6f}\n")
+            handle.write(f"Foreground-only Drop: {signal_drop:+.6f}\n")
+        if background_acc is not None:
+            handle.write(f"Background-only Accuracy: {float(background_acc):.6f}\n")
+        if query_background_acc is not None:
+            handle.write(f"Query-background Accuracy: {float(query_background_acc):.6f}\n")
+        if uniform_weight_acc is not None:
+            handle.write(f"Uniform-node-weight Accuracy: {float(uniform_weight_acc):.6f}\n")
+            handle.write(
+                "Cross-reference Accuracy Gain: "
+                f"{active_acc - float(uniform_weight_acc):+.6f}\n"
+            )
+        handle.write(f"Verdict: {verdict}\n")
+        handle.write(f"Reason: {reason}\n")
+        handle.write("\nHOW TO READ\n")
+        handle.write("-" * 72 + "\n")
+        handle.write(
+            "query/support_weight_signal measures whether DeepEMD cross-reference weights "
+            "prefer high-intensity scalogram regions.\n"
+        )
+        handle.write(
+            "fg_fg_mass measures transport directly between high-intensity query/support "
+            "tokens; common_query_mass measures transport through class-ambiguous tokens.\n"
+        )
+        handle.write(
+            "The signal mask is an image-intensity proxy, not a ground-truth PD segmentation. "
+            "Validate conclusions across clean, 15 dB, 10 dB, and 5 dB reports.\n"
+        )
+        handle.write("\nNOVELTY CHECK\n")
+        handle.write("-" * 72 + "\n")
+        handle.write(
+            "This probe is observational and adds no model novelty. DeepEMD remains the "
+            "balanced dense-transport baseline with cross-reference weights.\n"
+        )
+        handle.write(
+            "A standalone Ours-Final novelty claim requires a mechanism beyond DeepEMD and "
+            "matched gains over DeepEMD, not only a background-removal motivation.\n"
+        )
+        handle.write("\nALL DEEPEMD DEBUG METRICS\n")
+        handle.write("-" * 72 + "\n")
+        for key in metric_keys:
+            value = test_diag[key]
+            if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+                handle.write(f"{key}: {float(value):.6f}\n")
+    return path
+
+
 def ours_final_audit_enabled(args) -> bool:
     return _is_ours_final_model(args)
 
@@ -6890,6 +7042,25 @@ def forward_scores(
         smoothing = effective_label_smoothing(args, train=train)
         return net(query, support, label_smoothing=smoothing)
     if args.model in {"deepemd", "evidence_deepemd"}:
+        deepemd_debug = (
+            args.model == "deepemd"
+            and phase == "test"
+            and collect_diagnostics
+            and _bool_flag(getattr(args, "deepemd_debug", "false"), default=False)
+        )
+        debug_kwargs = (
+            {
+                "return_aux": deepemd_debug,
+                "debug_signal_quantile": float(
+                    getattr(args, "deepemd_debug_signal_quantile", 0.70)
+                ),
+                "debug_common_margin": float(
+                    getattr(args, "deepemd_debug_common_margin", 0.05)
+                ),
+            }
+            if args.model == "deepemd"
+            else {}
+        )
         if phase == "train":
             refine_proto = _bool_flag(args.deepemd_train_sfc, default=False)
             return net(
@@ -6899,15 +7070,28 @@ def forward_scores(
                 exact=False,
                 sfc_update_step_override=getattr(args, "deepemd_train_sfc_update_step", None),
                 sfc_bs_override=getattr(args, "deepemd_train_sfc_bs", None),
+                **debug_kwargs,
             )
         if phase == "val":
             fast_val = _bool_flag(args.deepemd_fast_val, default=True)
-            return net(query, support, refine_proto=not fast_val, exact=not fast_val)
+            return net(
+                query,
+                support,
+                refine_proto=not fast_val,
+                exact=not fast_val,
+                **debug_kwargs,
+            )
         if phase == "test":
             exact = _bool_flag(args.deepemd_test_exact, default=False)
             refine_proto = _bool_flag(args.deepemd_test_sfc, default=False)
-            return net(query, support, refine_proto=refine_proto, exact=exact)
-        return net(query, support)
+            return net(
+                query,
+                support,
+                refine_proto=refine_proto,
+                exact=exact,
+                **debug_kwargs,
+            )
+        return net(query, support, **debug_kwargs)
     if args.model == "dice_emd":
         if phase == "train":
             refine_proto = _bool_flag(args.deepemd_train_sfc, default=False)
@@ -7297,6 +7481,35 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
 
     if not isinstance(scores, dict):
         return metrics
+
+    for key, prefix in (
+        ("deepemd_signal_only_score", "deepemd_signal_only"),
+        ("deepemd_uniform_weight_score", "deepemd_uniform_weight"),
+        ("deepemd_background_only_score", "deepemd_background_only"),
+        ("deepemd_background_involved_score", "deepemd_background_involved"),
+        ("deepemd_query_background_score", "deepemd_query_background"),
+    ):
+        value = scores.get(key)
+        if torch.is_tensor(value) and value.dim() == 2 and value.shape[0] == targets.shape[0]:
+            metrics.update(summarize_class_score_tensor(value, targets, prefix=prefix))
+
+    for key, prefix in (
+        ("deepemd_fg_fg_mass_ratio", "deepemd_fg_fg_mass"),
+        ("deepemd_bg_bg_mass_ratio", "deepemd_bg_bg_mass"),
+        ("deepemd_background_involved_mass_ratio", "deepemd_background_involved_mass"),
+        ("deepemd_common_query_mass_ratio", "deepemd_common_query_mass"),
+        ("deepemd_query_weight_signal_ratio", "deepemd_query_weight_signal"),
+        ("deepemd_support_weight_signal_ratio", "deepemd_support_weight_signal"),
+        ("deepemd_query_transport_signal_ratio", "deepemd_query_transport_signal"),
+        ("deepemd_support_transport_signal_ratio", "deepemd_support_transport_signal"),
+        ("deepemd_query_transport_entropy", "deepemd_query_transport_entropy"),
+        ("deepemd_support_transport_entropy", "deepemd_support_transport_entropy"),
+        ("deepemd_query_weight_entropy", "deepemd_query_weight_entropy"),
+        ("deepemd_support_weight_entropy", "deepemd_support_weight_entropy"),
+    ):
+        value = scores.get(key)
+        if torch.is_tensor(value) and value.dim() == 2 and value.shape[0] == targets.shape[0]:
+            metrics.update(summarize_budget_tensor(value, targets, prefix=prefix))
 
     total_distance = scores.get("total_distance")
     if torch.is_tensor(total_distance) and total_distance.dim() == 2 and total_distance.shape[0] == targets.shape[0]:
@@ -8343,6 +8556,11 @@ def summarize_score_diagnostics(scores, logits, targets, cls_loss=None, aux_loss
         if scalar is not None:
             metrics[key] = scalar
     for key, value in scores.items():
+        if str(key).startswith("deepemd/"):
+            scalar = _scalar_metric(value)
+            if scalar is not None:
+                metrics[key] = scalar
+            continue
         if not str(key).startswith("ucot/"):
             continue
         scalar = _scalar_metric(value)
@@ -9785,6 +10003,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             egsm_test_diagnostics = False
     collect_test_diagnostics = (
         q1_enabled
+        or deepemd_debug_enabled(args)
         or args.model == "crj_fsl"
         or egsm_test_diagnostics
         or ours_final_audit_enabled(args)
@@ -10564,6 +10783,14 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     )
     if dcr_debug_path is not None:
         print(f"DCR debug report saved to {dcr_debug_path}")
+    deepemd_debug_path = write_deepemd_debug_report(
+        args,
+        test_diag,
+        accuracy=acc_micro,
+        current_test_name=current_test_name,
+    )
+    if deepemd_debug_path is not None:
+        print(f"DeepEMD debug report saved to {deepemd_debug_path}")
 
     txt_path = os.path.join(
         args.path_results,
