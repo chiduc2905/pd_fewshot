@@ -6017,6 +6017,10 @@ def is_dcr_debug_metric(key: str) -> bool:
     return str(key).startswith(_DCR_DEBUG_PREFIXES)
 
 
+def ours_final_audit_enabled(args) -> bool:
+    return _is_ours_final_model(args)
+
+
 def write_elastic_ot_debug_report(
     args,
     test_diag,
@@ -6457,6 +6461,268 @@ def write_uot_energy_debug_report(
             if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
                 handle.write(f"{key}: {float(value):.6f}\n")
 
+    return path
+
+
+def _audit_metric(metrics: dict, key: str):
+    value = metrics.get(key)
+    if isinstance(value, (float, int, np.floating, np.integer)) and np.isfinite(value):
+        return float(value)
+    return None
+
+
+def _audit_fmt(metrics: dict, key: str, missing: str = "missing") -> str:
+    value = _audit_metric(metrics, key)
+    if value is None:
+        return missing
+    return f"{value:.6f}"
+
+
+def _audit_bottleneck_lines(metrics: dict) -> list[str]:
+    lines: list[str] = []
+    cost_gap = _audit_metric(metrics, "audit_avg_cost_gap_vs_logit_runner")
+    low_cost_acc = _audit_metric(metrics, "audit_low_cost_winner_acc")
+    true_below_t = _audit_metric(metrics, "audit_true_avg_cost_below_threshold")
+    true_neg_rate = _audit_metric(metrics, "audit_true_negative_utility_rate")
+    mass_acc = _audit_metric(metrics, "audit_mass_winner_acc")
+    logit_mass_agree = _audit_metric(metrics, "audit_logit_mass_winner_agreement")
+    local_gap = _audit_metric(metrics, "local_score_gap")
+    global_gap = _audit_metric(metrics, "global_score_gap")
+    global_delta = _audit_metric(metrics, "global_vs_local_accuracy_delta")
+    common_mass = _audit_metric(metrics, "ours_probe/common_mass_ratio")
+    dead_query = _audit_metric(metrics, "ours_probe/dead_query_ratio")
+    harm_share = _audit_metric(metrics, "ours_probe/harm_share")
+
+    if cost_gap is None:
+        lines.append("INCOMPLETE: transport cost/mass tensors were not available in model outputs.")
+        return lines
+    if cost_gap <= 0.0 or (low_cost_acc is not None and low_cost_acc < 0.55):
+        lines.append(
+            "Descriptor/cost bottleneck: true-class average cost is not reliably lower than the best wrong class."
+        )
+    if true_below_t is not None and true_below_t < 0.65:
+        lines.append(
+            "Threshold bottleneck: many true-class transports have average cost above T, so T*M-C gives weak or negative evidence."
+        )
+    if true_neg_rate is not None and true_neg_rate > 0.35:
+        lines.append(
+            "Negative-utility pressure: a large share of true-class aggregate evidence has T*M-C < 0."
+        )
+    if (
+        mass_acc is not None
+        and low_cost_acc is not None
+        and mass_acc + 0.05 < low_cost_acc
+        and logit_mass_agree is not None
+        and logit_mass_agree > 0.50
+    ):
+        lines.append(
+            "Mass bias: logits often follow transported mass more than the lowest average-cost class."
+        )
+    if (
+        global_delta is not None
+        and global_delta > 0.02
+        or (
+            local_gap is not None
+            and global_gap is not None
+            and local_gap <= 0.0
+            and global_gap > 0.0
+        )
+    ):
+        lines.append(
+            "Global-residual dependence: the global branch is correcting decisions that local UOT does not separate."
+        )
+    if common_mass is not None and common_mass > 0.50:
+        lines.append(
+            "Common-token transport: exact failure probe shows much mass on class-common query tokens."
+        )
+    if dead_query is not None and dead_query > 0.35:
+        lines.append(
+            "Dead-query evidence: exact failure probe shows many query tokens have no positive-utility edge."
+        )
+    if harm_share is not None and harm_share > 0.35:
+        lines.append(
+            "Harmful transport: exact failure probe shows negative-utility edges occupy a large score share."
+        )
+    if not lines:
+        lines.append(
+            "No dominant local-transport bottleneck from aggregate metrics; inspect per-class examples or enable the failure probe."
+        )
+    return lines
+
+
+def write_ours_final_audit_report(
+    args,
+    test_diag,
+    audit_diag,
+    *,
+    accuracy,
+    current_test_name=None,
+):
+    if not ours_final_audit_enabled(args):
+        return None
+
+    samples_stem = (
+        f"{args.training_samples}samples"
+        if getattr(args, "training_samples", None)
+        else "allsamples"
+    )
+    experiment_tag = str(getattr(args, "experiment_tag", "") or "").strip()
+    tag_suffix = f"_{sanitize_result_tag(experiment_tag)}" if experiment_tag else ""
+    protocol_suffix = get_test_protocol_suffix(args)
+    path = os.path.join(
+        args.path_results,
+        (
+            f"audit_ours_final_{args.dataset_name}_{args.model}_{samples_stem}_"
+            f"{args.shot_num}shot{tag_suffix}{protocol_suffix}.txt"
+        ),
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    metrics = dict(test_diag or {})
+    metrics.update(audit_diag or {})
+    active_acc = float(metrics.get("pred_acc", accuracy))
+    transport_available = _audit_metric(metrics, "audit_transport_available")
+    if transport_available is None:
+        verdict = "INCOMPLETE"
+        verdict_reason = "No class-level transport cost/mass tensors were available for audit."
+    else:
+        bottlenecks = _audit_bottleneck_lines(metrics)
+        if any(line.startswith("No dominant") for line in bottlenecks):
+            verdict = "LOCAL-UOT-PLAUSIBLE"
+            verdict_reason = "Aggregate cost, mass, and threshold signals do not expose a dominant failure."
+        elif any("Descriptor/cost" in line or "Global-residual" in line for line in bottlenecks):
+            verdict = "LOCAL-UOT-BOTTLENECK"
+            verdict_reason = "The local transport branch lacks enough standalone class separation."
+        else:
+            verdict = "CALIBRATION-BOTTLENECK"
+            verdict_reason = "Transport exists, but threshold/mass scoring appears poorly calibrated."
+
+    important_keys = [
+        "pred_acc",
+        "logit_margin",
+        "correct_logit_margin",
+        "wrong_logit_margin",
+        "audit_true_logit",
+        "audit_best_wrong_logit",
+        "audit_logit_gap",
+        "audit_true_mass",
+        "audit_best_logit_wrong_mass",
+        "audit_mass_gap_vs_logit_runner",
+        "audit_true_avg_cost",
+        "audit_best_logit_wrong_avg_cost",
+        "audit_avg_cost_gap_vs_logit_runner",
+        "audit_threshold",
+        "audit_true_threshold_margin",
+        "audit_best_wrong_threshold_margin",
+        "audit_true_avg_cost_below_threshold",
+        "audit_best_wrong_avg_cost_below_threshold",
+        "audit_true_utility",
+        "audit_best_wrong_utility",
+        "audit_utility_gap",
+        "audit_true_negative_utility_rate",
+        "audit_best_wrong_positive_utility_rate",
+        "audit_low_cost_winner_acc",
+        "audit_mass_winner_acc",
+        "audit_logit_low_cost_winner_agreement",
+        "audit_logit_mass_winner_agreement",
+        "local_pred_acc",
+        "local_score_gap",
+        "global_pred_acc",
+        "global_score_gap",
+        "global_vs_local_accuracy_delta",
+        "global_vs_local_fix_rate",
+        "global_vs_local_harm_rate",
+        "ours_probe/negative_utility_mass_ratio",
+        "ours_probe/common_mass_ratio",
+        "ours_probe/dead_query_ratio",
+        "ours_probe/harm_share",
+        "ours_probe/query_mass_entropy",
+        "ours_probe/effective_query_fraction",
+        "transport_audit/common_mass_ratio",
+        "transport_audit/specific_mass_ratio",
+        "transport_audit/cost_per_mass",
+    ]
+    debug_keys = [
+        key
+        for key in sorted(metrics)
+        if key.startswith("audit_")
+        or key.startswith("ours_probe")
+        or key.startswith("transport_audit")
+        or key
+        in {
+            "pred_acc",
+            "logit_margin",
+            "correct_logit_margin",
+            "wrong_logit_margin",
+            "local_pred_acc",
+            "local_score_gap",
+            "global_pred_acc",
+            "global_score_gap",
+            "global_vs_local_accuracy_delta",
+            "global_vs_local_fix_rate",
+            "global_vs_local_harm_rate",
+            "global_residual_weight",
+            "m2_mean_true_avg_cost",
+            "m2_mean_best_wrong_avg_cost",
+            "m2_mean_logit_margin",
+        }
+    ]
+
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("OURS-FINAL LOCAL TRANSPORT AUDIT\n")
+        handle.write("=" * 72 + "\n")
+        handle.write(f"Model: {args.model}\n")
+        handle.write(f"Dataset: {args.dataset_name}\n")
+        handle.write(f"Training Samples: {getattr(args, 'training_samples', None) or 'All'}\n")
+        handle.write(f"Shot: {args.shot_num}\n")
+        handle.write(f"Training Seed: {getattr(args, 'seed', 'unknown')}\n")
+        handle.write(f"Final Test Seed: {getattr(args, 'final_test_seed', 'unknown')}\n")
+        handle.write(
+            "Test Protocol: "
+            f"{getattr(args, 'effective_test_protocol', getattr(args, 'test_protocol', 'clean'))}\n"
+        )
+        if current_test_name:
+            handle.write(f"Test Split: {current_test_name}\n")
+        handle.write(f"Experiment Tag: {experiment_tag or 'none'}\n")
+        handle.write(f"Ours Ablation: {getattr(args, 'ours_ablation', 'full')}\n")
+        handle.write(f"Transport Mode: {getattr(args, 'hrot_ecot_transport_mode', 'auto')}\n")
+        handle.write(f"Score Mode: {getattr(args, 'ours_final_score_mode', 'threshold_mass')}\n")
+        handle.write(
+            "Global Residual: "
+            f"{getattr(args, 'enable_global_residual_score', 'false')} "
+            f"(w={getattr(args, 'global_residual_weight', 'n/a')})\n"
+        )
+        handle.write("\nVERDICT\n")
+        handle.write("-" * 72 + "\n")
+        handle.write(f"Accuracy: {active_acc:.6f}\n")
+        handle.write(f"Verdict: {verdict}\n")
+        handle.write(f"Reason: {verdict_reason}\n")
+        handle.write("\nBOTTLENECK READ\n")
+        handle.write("-" * 72 + "\n")
+        for line in _audit_bottleneck_lines(metrics):
+            handle.write(f"- {line}\n")
+        handle.write("\nHOW TO READ THIS FILE\n")
+        handle.write("-" * 72 + "\n")
+        handle.write("Positive avg-cost gap means true class has lower transported cost per mass than the best wrong logit class.\n")
+        handle.write("Positive threshold margin means aggregate T*M-C utility is positive for that class.\n")
+        handle.write("Low-cost winner accuracy tests the cost matrix alone; mass winner accuracy tests whether transported mass alone selects the label.\n")
+        handle.write("If global_score_gap is healthy but local_score_gap is weak, global residual is carrying the decision.\n")
+        handle.write("Probe metrics are exact edge-level checks and appear when --enable_ours_final_failure_probe true is enabled.\n")
+        handle.write("\nNOVELTY CHECK\n")
+        handle.write("-" * 72 + "\n")
+        handle.write("DeepEMD baseline: dense balanced OT/EMD alignment, usually full-mass local similarity.\n")
+        handle.write("Ours-Final claim: shot-decomposed fixed-budget UOT plus threshold-mass evidence T*M-C.\n")
+        handle.write("This audit supports the claim only when local UOT has positive cost/utility gaps without relying solely on global residual.\n")
+        handle.write("\nKEY METRICS\n")
+        handle.write("-" * 72 + "\n")
+        for key in important_keys:
+            if _audit_metric(metrics, key) is not None:
+                handle.write(f"{key}: {_audit_fmt(metrics, key)}\n")
+        handle.write("\nALL AUDIT/TRANSPORT DEBUG METRICS\n")
+        handle.write("-" * 72 + "\n")
+        for key in debug_keys:
+            if _audit_metric(metrics, key) is not None:
+                handle.write(f"{key}: {_audit_fmt(metrics, key)}\n")
     return path
 
 
@@ -8008,6 +8274,134 @@ def finalize_diagnostics(metric_sums, total_weight):
     return finalized
 
 
+def _mean_finite_tensor(value):
+    if not torch.is_tensor(value) or value.numel() == 0:
+        return None
+    finite = value.detach().float().reshape(-1)
+    finite = finite[torch.isfinite(finite)]
+    if finite.numel() == 0:
+        return None
+    return float(finite.mean().item())
+
+
+def _transport_threshold_scalar(scores: dict, reference: torch.Tensor):
+    value = _mean_finite_tensor(scores.get("transport_cost_threshold"))
+    if value is None:
+        return None
+    return reference.new_tensor(value)
+
+
+def summarize_ours_final_audit_batch(scores, logits, targets, eps=1e-8):
+    if not isinstance(scores, dict):
+        return {}
+    transport_cost = scores.get("transport_cost")
+    transported_mass = scores.get("transported_mass")
+    if (
+        not torch.is_tensor(transport_cost)
+        or not torch.is_tensor(transported_mass)
+        or transport_cost.dim() != 2
+        or transported_mass.dim() != 2
+        or tuple(transport_cost.shape) != tuple(transported_mass.shape)
+        or tuple(logits.shape) != tuple(transport_cost.shape)
+        or targets.numel() != transport_cost.shape[0]
+    ):
+        return {}
+
+    with torch.no_grad():
+        y = targets.long()
+        way_num = transport_cost.shape[1]
+        if way_num < 2:
+            return {}
+        mask = F.one_hot(y, num_classes=way_num).bool()
+        mass = transported_mass.detach()
+        cost = transport_cost.detach()
+        active_logits = logits.detach()
+        avg_cost = cost / mass.clamp_min(float(eps))
+
+        true_mass = mass.gather(1, y.unsqueeze(1)).squeeze(1)
+        true_cost = cost.gather(1, y.unsqueeze(1)).squeeze(1)
+        true_avg_cost = avg_cost.gather(1, y.unsqueeze(1)).squeeze(1)
+        true_logit = active_logits.gather(1, y.unsqueeze(1)).squeeze(1)
+
+        wrong_logits = active_logits.masked_fill(mask, float("-inf"))
+        best_wrong_logit, best_wrong_idx = wrong_logits.max(dim=1)
+        best_wrong_mass = mass.gather(1, best_wrong_idx.unsqueeze(1)).squeeze(1)
+        best_wrong_cost = cost.gather(1, best_wrong_idx.unsqueeze(1)).squeeze(1)
+        best_wrong_avg_cost = avg_cost.gather(1, best_wrong_idx.unsqueeze(1)).squeeze(1)
+
+        low_cost_winner = avg_cost.argmin(dim=1)
+        mass_winner = mass.argmax(dim=1)
+        logit_winner = active_logits.argmax(dim=1)
+        low_cost_correct = low_cost_winner.eq(y)
+        mass_correct = mass_winner.eq(y)
+
+        metrics = {
+            "audit_transport_available": 1.0,
+            "audit_true_mass": _scalar_metric(true_mass),
+            "audit_best_logit_wrong_mass": _scalar_metric(best_wrong_mass),
+            "audit_mass_gap_vs_logit_runner": _scalar_metric(true_mass - best_wrong_mass),
+            "audit_true_cost": _scalar_metric(true_cost),
+            "audit_best_logit_wrong_cost": _scalar_metric(best_wrong_cost),
+            "audit_true_avg_cost": _scalar_metric(true_avg_cost),
+            "audit_best_logit_wrong_avg_cost": _scalar_metric(best_wrong_avg_cost),
+            "audit_avg_cost_gap_vs_logit_runner": _scalar_metric(best_wrong_avg_cost - true_avg_cost),
+            "audit_true_logit": _scalar_metric(true_logit),
+            "audit_best_wrong_logit": _scalar_metric(best_wrong_logit),
+            "audit_logit_gap": _scalar_metric(true_logit - best_wrong_logit),
+            "audit_low_cost_winner_acc": _scalar_metric(low_cost_correct.float()),
+            "audit_mass_winner_acc": _scalar_metric(mass_correct.float()),
+            "audit_logit_low_cost_winner_agreement": _scalar_metric(logit_winner.eq(low_cost_winner).float()),
+            "audit_logit_mass_winner_agreement": _scalar_metric(logit_winner.eq(mass_winner).float()),
+            "audit_low_cost_correct_but_logit_wrong_rate": _scalar_metric(
+                (low_cost_correct & logit_winner.ne(y)).float()
+            ),
+            "audit_mass_correct_but_logit_wrong_rate": _scalar_metric(
+                (mass_correct & logit_winner.ne(y)).float()
+            ),
+        }
+
+        threshold = _transport_threshold_scalar(scores, cost)
+        if threshold is not None:
+            true_utility = threshold * true_mass - true_cost
+            best_wrong_utility = threshold * best_wrong_mass - best_wrong_cost
+            metrics.update(
+                {
+                    "audit_threshold": float(threshold.item()),
+                    "audit_true_threshold_margin": _scalar_metric(threshold - true_avg_cost),
+                    "audit_best_wrong_threshold_margin": _scalar_metric(threshold - best_wrong_avg_cost),
+                    "audit_true_avg_cost_below_threshold": _scalar_metric((true_avg_cost < threshold).float()),
+                    "audit_best_wrong_avg_cost_below_threshold": _scalar_metric(
+                        (best_wrong_avg_cost < threshold).float()
+                    ),
+                    "audit_true_utility": _scalar_metric(true_utility),
+                    "audit_best_wrong_utility": _scalar_metric(best_wrong_utility),
+                    "audit_utility_gap": _scalar_metric(true_utility - best_wrong_utility),
+                    "audit_true_negative_utility_rate": _scalar_metric((true_utility < 0.0).float()),
+                    "audit_best_wrong_positive_utility_rate": _scalar_metric((best_wrong_utility > 0.0).float()),
+                }
+            )
+
+        local_scores = scores.get("local_scores")
+        if torch.is_tensor(local_scores) and tuple(local_scores.shape) == tuple(active_logits.shape):
+            local_pred = local_scores.detach().argmax(dim=1)
+            active_correct = logit_winner.eq(y)
+            local_correct = local_pred.eq(y)
+            metrics.update(
+                {
+                    "audit_local_pred_acc": _scalar_metric(local_correct.float()),
+                    "audit_active_vs_local_fix_rate": _scalar_metric(((~local_correct) & active_correct).float()),
+                    "audit_active_vs_local_harm_rate": _scalar_metric((local_correct & (~active_correct)).float()),
+                }
+            )
+
+        global_scores = scores.get("global_scores")
+        if torch.is_tensor(global_scores) and tuple(global_scores.shape) == tuple(active_logits.shape):
+            global_pred = global_scores.detach().argmax(dim=1)
+            metrics["audit_global_pred_acc"] = _scalar_metric(global_pred.eq(y).float())
+
+        return metrics
+
+
 def _unwrap_data_parallel(net):
     return net.module if hasattr(net, "module") else net
 
@@ -9268,6 +9662,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     support_summary_count = 0.0
     test_diag_sums = defaultdict(float)
     test_diag_total = 0.0
+    ours_final_audit_sums = defaultdict(float)
+    ours_final_audit_total = 0.0
     exported_q1 = 0
     exported_uot_evidence = 0
     uot_evidence_seen_classes = set()
@@ -9285,6 +9681,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         q1_enabled
         or args.model == "crj_fsl"
         or egsm_test_diagnostics
+        or ours_final_audit_enabled(args)
         or _bool_flag(
             getattr(args, "enable_ours_final_failure_probe", "false"),
             default=False,
@@ -9388,6 +9785,15 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             batch_metrics = summarize_score_diagnostics(scores=scores, logits=logits, targets=targets)
             accumulate_diagnostics(test_diag_sums, batch_metrics, weight=targets.size(0))
             test_diag_total += float(targets.size(0))
+            if ours_final_audit_enabled(args):
+                audit_metrics = summarize_ours_final_audit_batch(
+                    scores,
+                    logits,
+                    targets,
+                    eps=_jecot_m2_transport_eps(net),
+                )
+                accumulate_diagnostics(ours_final_audit_sums, audit_metrics, weight=targets.size(0))
+                ours_final_audit_total += float(targets.size(0))
 
             if save_aux_artifacts and args.shot_num > 1:
                 support_rows_episode, support_summary = compute_support_episode_distribution(
@@ -9680,6 +10086,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         print(f"  Max outlier score      : {support_summary_sums['support_outlier_score_max'] / support_summary_count:.4f}")
         print(f"  Mean entropy std       : {support_summary_sums['support_entropy_std_mean'] / support_summary_count:.4f}")
     test_diag = finalize_diagnostics(test_diag_sums, test_diag_total)
+    ours_final_audit_diag = finalize_diagnostics(ours_final_audit_sums, ours_final_audit_total)
     test_diag_summary = format_diagnostic_summary(test_diag)
     if test_diag_summary:
         print(f"  TestDiag: {test_diag_summary}")
@@ -10008,6 +10415,16 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
                     wandb.log({"tsne_plot": wandb.Image(f"{tsne_path}_tsne.png")})
             except RuntimeError as exc:
                 print(f"Skipping t-SNE plot: {exc}")
+
+    ours_final_audit_path = write_ours_final_audit_report(
+        args,
+        test_diag,
+        ours_final_audit_diag,
+        accuracy=acc_micro,
+        current_test_name=current_test_name,
+    )
+    if ours_final_audit_path is not None:
+        print(f"Ours-Final audit report saved to {ours_final_audit_path}")
 
     uot_energy_debug_path = write_uot_energy_debug_report(
         args,

@@ -13,9 +13,11 @@ from main import (
     finalize_diagnostics,
     is_dcr_debug_metric,
     is_uot_energy_debug_metric,
+    summarize_ours_final_audit_batch,
     summarize_score_diagnostics,
     write_dcr_debug_report,
     write_elastic_ot_debug_report,
+    write_ours_final_audit_report,
     write_uot_energy_debug_report,
 )
 
@@ -33,6 +35,58 @@ def test_diagnostic_metrics_use_per_key_denominators():
 
     assert result["always"] == 3.0
     assert result["probe"] == 1.0
+
+
+def test_ours_final_audit_report_summarizes_transport_bottleneck(tmp_path):
+    output_dir = tmp_path / f"ours_final_audit_{uuid4().hex}"
+    output_dir.mkdir(parents=True)
+    args = SimpleNamespace(
+        model="ours_final",
+        dataset_name="knee_aug_split",
+        training_samples=60,
+        shot_num=1,
+        seed=42,
+        final_test_seed=42,
+        test_protocol="clean",
+        effective_test_protocol="clean",
+        current_test_name="",
+        experiment_tag="audit_smoke",
+        path_results=str(output_dir),
+        ours_ablation="full",
+        hrot_ecot_transport_mode="unbalanced",
+        ours_final_score_mode="threshold_mass",
+        enable_global_residual_score="true",
+        global_residual_weight=0.1,
+    )
+    targets = torch.tensor([0, 1])
+    logits = torch.tensor([[0.2, 0.9], [0.1, 0.8]])
+    scores = {
+        "logits": logits,
+        "transport_cost": torch.tensor([[0.30, 0.10], [0.35, 0.12]]),
+        "transported_mass": torch.tensor([[0.80, 0.80], [0.80, 0.80]]),
+        "transport_cost_threshold": torch.tensor(0.20),
+    }
+
+    try:
+        audit_diag = summarize_ours_final_audit_batch(scores, logits, targets, eps=1e-8)
+        path = write_ours_final_audit_report(
+            args,
+            {"pred_acc": 0.5, "local_score_gap": -0.1, "global_score_gap": 0.2},
+            audit_diag,
+            accuracy=0.5,
+        )
+
+        assert path is not None
+        text = Path(path).read_text(encoding="utf-8")
+        assert "OURS-FINAL LOCAL TRANSPORT AUDIT" in text
+        assert "Verdict: LOCAL-UOT-BOTTLENECK" in text
+        assert "Descriptor/cost bottleneck" in text
+        assert "audit_avg_cost_gap_vs_logit_runner" in text
+        assert "NOVELTY CHECK" in text
+    finally:
+        for file_path in output_dir.iterdir():
+            file_path.unlink()
+        output_dir.rmdir()
 
 
 def test_uot_energy_debug_report_is_separate_and_seeded(tmp_path):

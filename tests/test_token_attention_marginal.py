@@ -11,6 +11,8 @@ from net.ours import OursFinalM2
 from run_all_experiments import (
     build_tier1_diagnostic_variants,
     filter_ours_final_variants,
+    ours_final_tau_profile_args,
+    parse_ours_final_tau_profile,
     parse_ours_final_variant_filter,
 )
 
@@ -111,6 +113,17 @@ def test_tier1_suite_has_15_unique_configs_and_global_residual_baseline():
     default_alias = parse_ours_final_variant_filter("t1_T_init_default")
     selected = filter_ours_final_variants(variants, default_alias)
     assert [variant["tag"] for variant in selected] == ["t1_tau_sym_0p5"]
+
+
+def test_ours_final_tau_profile_support_strict_builds_single_override_flag():
+    assert parse_ours_final_tau_profile("support_strict") == (0.5, 0.8)
+    assert parse_ours_final_tau_profile("0.3,0.8") == (0.3, 0.8)
+    assert ours_final_tau_profile_args("t1_tau_c_strict") == [
+        "--hrot_tau_q",
+        "0.5",
+        "--hrot_tau_c",
+        "0.8",
+    ]
 
 
 def test_ours_final_factory_wires_token_attention_marginal():

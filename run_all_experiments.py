@@ -416,6 +416,16 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--ours_final_tau_profile",
+        type=str,
+        default="none",
+        help=(
+            "Ours-Final convenience override appended after variant args. "
+            "Profiles: none, sym_0p5, query_loose, support_strict, asym_best, "
+            "tight, loose_both; or pass one pair like 0.5,0.8."
+        ),
+    )
+    parser.add_argument(
         "--ours_final_ablation_variants",
         type=str,
         default="all",
@@ -2891,6 +2901,7 @@ def run_experiment(
     noise_test_splits,
     passthrough_args=None,
     variant_args=None,
+    final_override_args=None,
     experiment_tag=None,
     checkpoint_tag=None,
     experiment_label=None,
@@ -2908,6 +2919,8 @@ def run_experiment(
     print(f"Model       : {model}")
     if experiment_label:
         print(f"Variant     : {experiment_label}")
+    if final_override_args:
+        print(f"Overrides   : {' '.join(final_override_args)}")
     if experiment_tag:
         print(f"Tag         : {experiment_tag}")
     if checkpoint_tag and checkpoint_tag != experiment_tag:
@@ -3120,6 +3133,8 @@ def run_experiment(
         cmd.extend(passthrough_args)
     if variant_args:
         cmd.extend(variant_args)
+    if final_override_args:
+        cmd.extend(final_override_args)
     if experiment_tag:
         cmd.extend(["--experiment_tag", experiment_tag])
     if checkpoint_tag:
@@ -3436,6 +3451,70 @@ def parse_rho_values(rho_values_str):
     if not parsed:
         return None
     return parsed
+
+
+OURS_FINAL_TAU_PROFILES = {
+    "sym_0p5": (0.5, 0.5),
+    "t1_tau_sym_0p5": (0.5, 0.5),
+    "baseline": (0.5, 0.5),
+    "query_loose": (0.3, 0.5),
+    "q_loose": (0.3, 0.5),
+    "t1_tau_q_loose": (0.3, 0.5),
+    "support_strict": (0.5, 0.8),
+    "support_side_strict": (0.5, 0.8),
+    "strict_support": (0.5, 0.8),
+    "class_strict": (0.5, 0.8),
+    "c_strict": (0.5, 0.8),
+    "tau_c_strict": (0.5, 0.8),
+    "t1_tau_c_strict": (0.5, 0.8),
+    "asym_best": (0.3, 0.8),
+    "asymmetric_best": (0.3, 0.8),
+    "t1_tau_asym_best": (0.3, 0.8),
+    "tight": (0.8, 0.8),
+    "both_strict": (0.8, 0.8),
+    "t1_tau_tight": (0.8, 0.8),
+    "loose_both": (0.3, 0.3),
+    "both_loose": (0.3, 0.3),
+    "t1_tau_loose_both": (0.3, 0.3),
+}
+
+
+def parse_ours_final_tau_profile(profile):
+    raw = str(profile or "").strip()
+    if not raw or raw.lower().replace("-", "_") in {"none", "off", "false", "default"}:
+        return None
+
+    name = raw.lower().replace("-", "_")
+    if name in OURS_FINAL_TAU_PROFILES:
+        tau_q, tau_c = OURS_FINAL_TAU_PROFILES[name]
+    else:
+        delimiter = "," if "," in raw else ":" if ":" in raw else None
+        if delimiter is None:
+            valid = ", ".join(sorted(OURS_FINAL_TAU_PROFILES))
+            raise ValueError(
+                f"Unknown --ours_final_tau_profile={raw!r}. "
+                f"Use one of: none, {valid}; or pass a pair like 0.5,0.8."
+            )
+        parts = [part.strip() for part in raw.split(delimiter) if part.strip()]
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid --ours_final_tau_profile={raw!r}; expected exactly two values like 0.5,0.8."
+            )
+        tau_q, tau_c = (float(parts[0]), float(parts[1]))
+
+    if tau_q <= 0.0 or tau_c <= 0.0:
+        raise ValueError(
+            f"Invalid --ours_final_tau_profile={raw!r}; tau values must be positive."
+        )
+    return (float(tau_q), float(tau_c))
+
+
+def ours_final_tau_profile_args(profile):
+    parsed = parse_ours_final_tau_profile(profile)
+    if parsed is None:
+        return []
+    tau_q, tau_c = parsed
+    return ["--hrot_tau_q", f"{tau_q:g}", "--hrot_tau_c", f"{tau_c:g}"]
 
 
 def parse_ours_final_variant_filter(variants_str):
@@ -4044,6 +4123,9 @@ def main():
     invalid_models = [model for model in requested_models if model not in valid_models]
     if invalid_models:
         raise ValueError(f"Unsupported models: {invalid_models}. Valid choices: {sorted(valid_models)}")
+    ours_final_tau_override_args = ours_final_tau_profile_args(
+        getattr(args, "ours_final_tau_profile", "none")
+    )
 
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("results", exist_ok=True)
@@ -4619,6 +4701,8 @@ def main():
         print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
         print(f"Backbone    : {args.fewshot_backbone}")
         print(f"Ablation    : {args.ours_final_ablation_suite}")
+        if ours_final_tau_override_args:
+            print(f"Tau Profile : {args.ours_final_tau_profile} -> {' '.join(ours_final_tau_override_args)}")
         if ours_final_variant_filter is not None:
             print(f"Variant Pick: {', '.join(sorted(ours_final_variant_filter))}")
         print("Variants    :")
@@ -5284,6 +5368,11 @@ def main():
                     noise_test_splits=args.noise_test_splits,
                     passthrough_args=args.passthrough_args,
                     variant_args=experiment["variant_args"],
+                    final_override_args=(
+                        ours_final_tau_override_args
+                        if model == OURS_FINAL_MODEL_NAME
+                        else None
+                    ),
                     experiment_tag=experiment_tag,
                     checkpoint_tag=checkpoint_tag,
                     experiment_label=experiment["experiment_label"],
