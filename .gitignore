@@ -265,4 +265,6 @@ __marimo__/
 # Markdown notes
 *.md
 *.MD
+*.markdown
+*.MARKDOWN
 

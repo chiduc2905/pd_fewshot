@@ -65,6 +65,14 @@ DEFAULT_DATASET_ROOT = PurePosixPath("/workspace/pd_fewshot")
 BASE_SCALOGRAM_DATASET = "scalogram_27_1"
 MOTHERWAVE_DATASET_FOLDERS = ("scalogram_27_1_cgau4", "scalogram_27_1_fbsp3")
 NOISE_BENCHMARK_SUFFIX = "_pd_noise_benchmark_test_moderate"
+UOT_LOCAL_TOKEN_NOISE_DATASET = "scalogram_27_1_uot_local_token_benchmark"
+UOT_LOCAL_TOKEN_NOISE_SPLITS = (
+    "test_snr20db_local_patch_outlier_mild",
+    "test_snr15db_local_patch_outlier_medium",
+    "test_snr10db_local_patch_outlier_heavy",
+)
+UOT_LOCAL_TOKEN_NOISE_MODELS = ("dn4", "deepbdc", "deepemd", "frn", OURS_FINAL_MODEL_NAME)
+UOT_LOCAL_TOKEN_NOISE_TEST_SEED = 300042
 
 
 def default_dataset_path(dataset_folder=BASE_SCALOGRAM_DATASET):
@@ -73,6 +81,10 @@ def default_dataset_path(dataset_folder=BASE_SCALOGRAM_DATASET):
 
 def default_noise_test_root(dataset_folder=BASE_SCALOGRAM_DATASET):
     return str(DEFAULT_DATASET_ROOT / f"{dataset_folder}{NOISE_BENCHMARK_SUFFIX}")
+
+
+def default_uot_local_token_noise_root():
+    return str(DEFAULT_DATASET_ROOT / UOT_LOCAL_TOKEN_NOISE_DATASET)
 
 
 def motherwave_dataset_name(base_dataset_name, dataset_folder):
@@ -170,6 +182,17 @@ def get_args():
         allow_abbrev=False,
     )
     parser.add_argument("--project", type=str, default="pulse_fewshot", help="WandB project name")
+    parser.add_argument(
+        "--benchmark_preset",
+        type=str,
+        default="none",
+        choices=["none", "uot_local_token_noise"],
+        help=(
+            "Convenience benchmark preset. uot_local_token_noise trains on the clean dataset, "
+            "then tests DN4/DeepBDC/DeepEMD/FRN and Ours-Final global-residual w=0.1 on "
+            "the three local-token SNR splits."
+        ),
+    )
     parser.add_argument(
         "--dataset_path",
         type=str,
@@ -841,7 +864,10 @@ def dataset_has_noise_benchmark_layout(dataset_path):
 def infer_training_dataset_path(noise_test_root):
     root = Path(noise_test_root)
     name = root.name
-    base_name = name.split("_pd_noise_benchmark_test")[0]
+    if name.endswith("_uot_local_token_benchmark"):
+        base_name = name[: -len("_uot_local_token_benchmark")]
+    else:
+        base_name = name.split("_pd_noise_benchmark_test")[0]
     if not base_name or base_name == name:
         return None
     candidate = root.parent / base_name
@@ -3490,6 +3516,39 @@ def parse_requested_models(models_str):
     return requested
 
 
+def cli_flag_was_provided(*flags):
+    provided = set(flags)
+    for token in sys.argv[1:]:
+        option = token.split("=", 1)[0]
+        if option in provided:
+            return True
+    return False
+
+
+def apply_benchmark_preset_defaults(args):
+    preset = str(getattr(args, "benchmark_preset", "none") or "none").strip().lower()
+    if preset == "none":
+        return
+    if preset != "uot_local_token_noise":
+        raise ValueError(f"Unsupported benchmark preset: {preset}")
+
+    if not cli_flag_was_provided("--models"):
+        args.models = ",".join(UOT_LOCAL_TOKEN_NOISE_MODELS)
+    if not cli_flag_was_provided("--test_protocol"):
+        args.test_protocol = "noise"
+    if not cli_flag_was_provided("--noise_test_root"):
+        args.noise_test_root = default_uot_local_token_noise_root()
+    if not cli_flag_was_provided("--noise_test_splits"):
+        args.noise_test_splits = ",".join(UOT_LOCAL_TOKEN_NOISE_SPLITS)
+    if not cli_flag_was_provided("--final_test_seed", "--final_test_seeds"):
+        args.final_test_seed = UOT_LOCAL_TOKEN_NOISE_TEST_SEED
+    if not cli_flag_was_provided("--result_artifacts"):
+        args.result_artifacts = "all"
+        args.passthrough_args = set_cli_option(args.passthrough_args, "--result_artifacts", "all")
+        args.passthrough_args = remove_cli_option(args.passthrough_args, "--save_last_checkpoint")
+        args.passthrough_args = remove_cli_option(args.passthrough_args, "--jecot_m2_val_save_hist_fig")
+
+
 def format_training_seed_line(training_seeds):
     if len(training_seeds) == 1:
         return f"Train Seed  : seed={training_seeds[0]}"
@@ -4126,6 +4185,7 @@ def print_extra_test_protocol_line(args):
 
 def main():
     args = get_args()
+    apply_benchmark_preset_defaults(args)
     training_seed_arg = getattr(args, "seeds", None) if getattr(args, "seeds", None) is not None else args.seed
     training_seeds = parse_training_seeds(training_seed_arg)
     args.training_seeds = training_seeds
@@ -4240,7 +4300,82 @@ def main():
     if len(active_ablation_suites) > 1:
         raise ValueError(f"Use only one ablation suite at a time: {', '.join(active_ablation_suites)}.")
 
-    if args.ours_ablation_suite != "none":
+    if args.benchmark_preset == "uot_local_token_noise" and not active_ablation_suites:
+        if args.mode_id is not None:
+            samples_list = [EXPERIMENT_MODES[args.mode_id]]
+        elif parsed_mode_ids is not None:
+            samples_list = [EXPERIMENT_MODES[mode_id] for mode_id in parsed_mode_ids]
+        else:
+            samples_list = list(SAMPLES_LIST)
+        global_residual_w0p1 = [
+            variant
+            for variant in build_ours_final_global_residual_variants()
+            if variant["tag"] == "ours_final_global_res_w0p1"
+        ][0]
+        experiments = []
+        for model in requested_models:
+            for samples in samples_list:
+                for shot in shots:
+                    if model == OURS_FINAL_MODEL_NAME:
+                        experiments.append(
+                            {
+                                "model": OURS_FINAL_MODEL_NAME,
+                                "samples": samples,
+                                "shot": shot,
+                                "variant_args": global_residual_w0p1["extra_args"],
+                                "experiment_tag": global_residual_w0p1["tag"],
+                                "checkpoint_tag": global_residual_w0p1.get(
+                                    "checkpoint_tag",
+                                    global_residual_w0p1["tag"],
+                                ),
+                                "experiment_label": global_residual_w0p1["label"],
+                                "extra_test_protocols": args.extra_test_protocols,
+                                "extra_noise_test_splits": None,
+                            }
+                        )
+                    else:
+                        experiments.append(
+                            {
+                                "model": model,
+                                "samples": samples,
+                                "shot": shot,
+                                "variant_args": None,
+                                "experiment_tag": None,
+                                "checkpoint_tag": None,
+                                "experiment_label": None,
+                                "extra_test_protocols": args.extra_test_protocols,
+                                "extra_noise_test_splits": None,
+                            }
+                        )
+        print("=" * 72)
+        print("pulse_fewshot - UOT Local-Token Noise Benchmark")
+        print("=" * 72)
+        sample_text = ", ".join(str(sample) if sample is not None else "All" for sample in samples_list)
+        print(f"Samples     : {sample_text}")
+        print(f"Models      : {', '.join(requested_models)}")
+        print("Ours Variant: ours_final_global_res_w0p1 (global residual weight=0.1)")
+        print(f"Shots       : {', '.join(f'{shot}-shot' for shot in shots)}")
+        print(f"Backbone    : {args.fewshot_backbone}")
+        print_dataset_plan(dataset_specs)
+        print(f"Test Proto  : {effective_test_protocol}")
+        print(format_final_test_seed_line(args))
+        print_extra_test_protocol_line(args)
+        if effective_test_protocol == "noise":
+            print(f"Noise Root  : {args.noise_test_root}")
+            print(f"Noise Splits: {', '.join(noise_test_split_names)}")
+        print("Diagnostics : result_artifacts=all; Ours-Final exports UOT evidence artifacts by default")
+        print("Novelty     : compare Ours-Final w=0.1 against DN4/DeepBDC/DeepEMD/FRN baselines")
+        print(f"GPU         : {args.gpu_id}")
+        print(
+            f"Runtime     : workers={args.num_workers}, pin_memory={args.pin_memory}, "
+            f"persistent_workers={args.persistent_workers}, "
+            f"cudnn(det={FIXED_CUDNN_DETERMINISTIC}, bench={FIXED_CUDNN_BENCHMARK})"
+        )
+        if args.passthrough_args:
+            print(f"Forwarded   : {' '.join(args.passthrough_args)}")
+        print(format_planned_total(experiments, training_seeds, "benchmark experiment(s)", len(dataset_specs)))
+        print("=" * 72)
+    elif args.ours_ablation_suite != "none":
         if requested_models != ["ours"]:
             raise ValueError(
                 "`--ours_ablation_suite` currently supports only `--models ours` "
