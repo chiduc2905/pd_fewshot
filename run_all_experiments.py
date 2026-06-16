@@ -430,7 +430,7 @@ def get_args():
             " tier1_diagnostic=asymmetric UOT relaxation, threshold-init sensitivity, "
             "and learned token-attention marginals on the accepted global residual w=0.1 baseline."
             " verified_region=parameter-free verified region matching gates before UOT."
-            " pect=PECT final ablations: support-strict global-residual weight/rho/OT/pooling/cost controls."
+            " pect=PECT final ablations: default-tau global-residual weight/rho/OT/pooling/cost controls."
         ),
     )
     parser.add_argument(
@@ -1749,12 +1749,12 @@ def build_ours_final_global_residual_variants():
 
 
 def build_ours_final_pect_variants():
-    """PECT final ablations: Ours-Final + support-strict tau + global residual controls."""
-    strict_tau = ["--hrot_tau_q", "0.5", "--hrot_tau_c", "0.8"]
+    """PECT final ablations: Ours-Final + default tau + global residual controls."""
+    normal_tau = ["--hrot_tau_q", "0.5", "--hrot_tau_c", "0.5"]
     failure_probe = ["--enable_ours_final_failure_probe", "true"]
 
     def residual(weight, base_args=None):
-        return list(base_args or _ours_final_base_args()) + strict_tau + [
+        return list(base_args or _ours_final_base_args()) + normal_tau + [
             "--enable_global_residual_score",
             "--global_residual_mode",
             "residual",
@@ -1766,8 +1766,8 @@ def build_ours_final_pect_variants():
         {
             "tag": "pect_no_global",
             "checkpoint_tag": "pect_no_global",
-            "label": "PECT control: support-strict Ours-Final without the global residual head",
-            "extra_args": _ours_final_base_args() + strict_tau + failure_probe,
+            "label": "PECT control: default-tau Ours-Final without the global residual head",
+            "extra_args": _ours_final_base_args() + normal_tau + failure_probe,
         }
     ]
 
@@ -1777,7 +1777,7 @@ def build_ours_final_pect_variants():
             {
                 "tag": f"pect_global_res_w{tag_value}",
                 "checkpoint_tag": f"pect_global_res_w{tag_value}",
-                "label": f"PECT weight grid: support-strict Ours-Final + global residual w={weight}",
+                "label": f"PECT weight grid: default-tau Ours-Final + global residual w={weight}",
                 "extra_args": residual(weight),
             }
         )
@@ -1788,7 +1788,7 @@ def build_ours_final_pect_variants():
             "checkpoint_tag": "pect_global_only",
             "label": "PECT global-only: global prototype classifier without local UOT logits",
             "extra_args": _ours_final_base_args()
-            + strict_tau
+            + normal_tau
             + [
                 "--enable_global_residual_score",
                 "--global_residual_mode",
@@ -1806,7 +1806,7 @@ def build_ours_final_pect_variants():
             {
                 "tag": f"pect_rho_{tag_value}",
                 "checkpoint_tag": f"pect_rho_{tag_value}",
-                "label": f"PECT rho grid: support-strict global residual w=0.1 with UOT rho={rho}",
+                "label": f"PECT rho grid: default-tau global residual w=0.1 with UOT rho={rho}",
                 "extra_args": residual("0.1", _ours_final_base_args(rho)),
             }
         )
