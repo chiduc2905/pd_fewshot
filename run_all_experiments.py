@@ -136,11 +136,17 @@ def build_dataset_specs(args):
     dataset_folders = parse_motherwave_dataset_folders(
         getattr(args, "motherwave_dataset_folders", ",".join(MOTHERWAVE_DATASET_FOLDERS))
     )
+    explicit_noise_test_root = (
+        str(args.noise_test_root)
+        if cli_flag_was_provided("--noise_test_root")
+        else None
+    )
     return [
         {
             "path": str(dataset_root / dataset_folder),
             "name": motherwave_dataset_name(args.dataset_name, dataset_folder),
-            "noise_test_root": str(dataset_root / f"{dataset_folder}{NOISE_BENCHMARK_SUFFIX}"),
+            "noise_test_root": explicit_noise_test_root
+            or str(dataset_root / f"{dataset_folder}{NOISE_BENCHMARK_SUFFIX}"),
         }
         for dataset_folder in dataset_folders
     ]
