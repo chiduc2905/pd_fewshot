@@ -2975,7 +2975,7 @@ def filter_sgpot_variants(variants, allowed_tags):
 
 
 def restricted_ours_final_rho_grid_pairs(samples_list, shots):
-    allowed_pairs = {(60, 5), (240, 1)}
+    allowed_pairs = {(60, 1), (60, 5), (240, 1)}
     return [
         (samples, shot)
         for samples in samples_list
@@ -5042,7 +5042,8 @@ def main():
             rho_grid_pairs = restricted_ours_final_rho_grid_pairs(samples_list, shots)
             if suite_name == "rho_grid" and not rho_grid_pairs:
                 raise ValueError(
-                    "Ours-Final rho_grid is restricted to 60-sample/5-shot and 240-sample/1-shot. "
+                    "Ours-Final rho_grid is restricted to 60-sample/1-shot, "
+                    "60-sample/5-shot, and 240-sample/1-shot. "
                     "Requested modes/shots do not include either pair."
                 )
             experiments.extend(
