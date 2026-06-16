@@ -2927,6 +2927,27 @@ def build_model_from_args(args):
         m2_default_rho = 1.0 if is_m2_full_ot else 0.80
         ecot_rho_bank = getattr(args, "hrot_ecot_rho_bank", None)
         ecot_base_rho = getattr(args, "hrot_ecot_base_rho", None)
+        enable_ours_final_latent_rho = _bool_flag(
+            getattr(args, "enable_ours_final_latent_rho", "false"),
+            default=False,
+        )
+        if enable_ours_final_latent_rho and not is_ours_final_model:
+            raise ValueError("--enable_ours_final_latent_rho is supported only with Ours-Final models")
+        ecot_budget_prior_init = str(
+            getattr(args, "hrot_ecot_budget_prior_init", "base")
+        ).strip().lower().replace("-", "_")
+        if enable_ours_final_latent_rho:
+            latent_bank = getattr(
+                args,
+                "ours_final_latent_rho_bank",
+                "0.5,0.6,0.7,0.8,0.9",
+            )
+            if ecot_rho_bank is None or str(ecot_rho_bank).strip() in {"", "0.8", "0.80"}:
+                ecot_rho_bank = latent_bank
+            if ecot_base_rho is None:
+                ecot_base_rho = float(getattr(args, "ours_final_latent_base_rho", 0.8))
+            if ecot_budget_prior_init == "base":
+                ecot_budget_prior_init = "uniform"
         if is_m2_like_model and not is_ours_cpm_model and ecot_rho_bank is None:
             ecot_rho_bank = f"{m2_default_rho:.6g}"
         if is_m2_like_model and not is_ours_cpm_model and ecot_base_rho is None:
@@ -3732,8 +3753,14 @@ def build_model_from_args(args):
             ecot_base_rho=ecot_base_rho,
             ecot_budget_tau=float(getattr(args, "hrot_ecot_budget_tau", 1.0)),
             ecot_max_lambda=float(getattr(args, "hrot_ecot_max_lambda", 1.0)),
-            ecot_lambda_init=float(getattr(args, "hrot_ecot_lambda_init", -8.0)),
+            ecot_lambda_init=(
+                4.0
+                if enable_ours_final_latent_rho
+                and float(getattr(args, "hrot_ecot_lambda_init", -8.0)) == -8.0
+                else float(getattr(args, "hrot_ecot_lambda_init", -8.0))
+            ),
             ecot_controller_hidden=int(getattr(args, "hrot_ecot_controller_hidden", 32)),
+            ecot_budget_prior_init=ecot_budget_prior_init,
             ecot_uniform_budget_policy=_bool_flag(
                 getattr(args, "hrot_ecot_uniform_budget_policy", "false"),
                 default=False,

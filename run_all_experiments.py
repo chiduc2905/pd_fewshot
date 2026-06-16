@@ -436,7 +436,7 @@ def get_args():
             " tier1_diagnostic=asymmetric UOT relaxation, threshold-init sensitivity, "
             "and learned token-attention marginals on the accepted global residual w=0.1 baseline."
             " verified_region=parameter-free verified region matching gates before UOT."
-            " pect=PECT final ablations: default-tau global-residual weight/rho/OT/pooling/cost controls."
+            " pect=PECT final ablations: default-tau global-residual weight/rho/latent-rho/OT/pooling/cost controls."
         ),
     )
     parser.add_argument(
@@ -477,7 +477,7 @@ def get_args():
             "Comma-separated Ours-Final variant subset for --ours_final_ablation_suite. "
             "Aliases: full/original/uot, ccem_uot/evidence, full_ot/ot/balanced_ot, "
             "partial_ot/fast_partial_ot, gap, mass_off, class_pooled, fixed_shot_pooling, "
-            "tau_shot_off, rho_<value>, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
+            "tau_shot_off, rho_<value>, pect_latent_rho, global_res_w0p1_<full_ot|partial_ot|mass_off>, "
             "score_marginal, score_mix0p35, score_mix0p65, score_mix0p85, "
             "probe_uniform, probe_fixed, probe_adaptive, score_threshold, score_uot_energy, "
             "score_elastic_ot, score_dustbin_ot, score_dcr, "
@@ -1768,6 +1768,21 @@ def build_ours_final_pect_variants():
             str(weight),
         ] + failure_probe
 
+    latent_rho_args = [
+        "--enable_ours_final_latent_rho",
+        "true",
+        "--hrot_ecot_rho_bank",
+        "0.5,0.6,0.7,0.8,0.9",
+        "--hrot_ecot_base_rho",
+        "0.8",
+        "--hrot_ecot_budget_prior_init",
+        "uniform",
+        "--hrot_ecot_lambda_init",
+        "4.0",
+        "--hrot_ecot_identity_reg",
+        "0.0",
+    ]
+
     variants = [
         {
             "tag": "pect_no_global",
@@ -1816,6 +1831,18 @@ def build_ours_final_pect_variants():
                 "extra_args": residual("0.1", _ours_final_base_args(rho)),
             }
         )
+
+    variants.append(
+        {
+            "tag": "pect_latent_rho",
+            "checkpoint_tag": "pect_latent_rho",
+            "label": (
+                "PECT latent rho: default-tau global residual w=0.1 with "
+                "episode-level posterior over UOT rho bank"
+            ),
+            "extra_args": residual("0.1") + latent_rho_args,
+        }
+    )
 
     variants.extend(
         [
@@ -3883,6 +3910,10 @@ def parse_ours_final_variant_filter(variants_str):
         "global_residual_w0p3": "ours_final_global_res_w0p3",
         "global_residual_w0p30": "ours_final_global_res_w0p3",
         "global_residual": "ours_final_global_res_w0p1",
+        "latent_rho": "pect_latent_rho",
+        "latent_budget": "pect_latent_rho",
+        "pect_latent": "pect_latent_rho",
+        "pect_latent_rho": "pect_latent_rho",
         "uniform_marginal": "ours_final_uniform_marginal",
         "score_marginal": "ours_final_score_marginal_mix0p65",
         "score_mix0p35": "ours_final_score_marginal_mix0p35",
@@ -4007,7 +4038,7 @@ def parse_ours_final_variant_filter(variants_str):
                 f"Invalid --ours_final_ablation_variants token '{token}'. "
                 "Use full, ccem_uot, partial_ot, full_ot, gap, mass_off, class_pooled, "
                 "fixed_shot_pooling, tau_shot_off, mass_scaled_b*, mass_consensus_a*, "
-                "rho_<value>, dmuot_<name>, score_marginal, score_mix0p35, "
+                "rho_<value>, pect_latent_rho, dmuot_<name>, score_marginal, score_mix0p35, "
                 "score_mix0p65, score_mix0p85, probe_uniform, probe_fixed, "
                 "probe_adaptive, score_threshold, score_uot_energy, score_elastic_ot, "
                 "score_dustbin_ot, score_dcr, "

@@ -15,6 +15,7 @@ from run_all_experiments import (
     build_ours_final_ablation_variants,
     build_ours_final_failure_probe_variants,
     build_ours_final_objective_score_variants,
+    build_ours_final_pect_variants,
     build_ours_final_rival_cost_variants,
     filter_ours_final_variants,
     parse_ours_final_variant_filter,
@@ -81,6 +82,68 @@ def test_ours_final_factory_permanently_excludes_egsm():
         build_model_from_args(
             SimpleNamespace(model="ours_final", ours_ablation="no_egsm", **common)
         )
+
+
+def test_ours_final_latent_rho_factory_uses_uniform_budget_posterior():
+    torch.manual_seed(1301)
+    common = dict(
+        device="cpu",
+        image_size=64,
+        fewshot_backbone="conv64f",
+        hrot_token_dim=8,
+        hrot_eam_hidden_dim=16,
+        hrot_sinkhorn_iterations=4,
+        hrot_sinkhorn_tolerance=1e-5,
+        enable_ours_final_latent_rho="true",
+    )
+
+    model = build_model_from_args(
+        SimpleNamespace(model="ours_final", ours_ablation="full", **common)
+    )
+
+    assert isinstance(model, OursFinalM2)
+    assert tuple(model.ecot_rho_bank) == (0.5, 0.6, 0.7, 0.8, 0.9)
+    assert model.ecot_budget_prior_init == "uniform"
+    assert model.ecot_base_rho == pytest.approx(0.8)
+    assert model.ecot_lambda.item() > 0.95
+
+    query, support = _episode(shot=1)
+    with torch.no_grad():
+        outputs = model(query, support, return_aux=True)
+
+    assert outputs["ecot_pi_budget"].shape == (5,)
+    assert torch.allclose(
+        outputs["ecot_pi_budget"],
+        torch.full_like(outputs["ecot_pi_budget"], 0.2),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert outputs["ecot_effective_rho"].item() == pytest.approx(0.7, abs=1e-6)
+    assert outputs["ecot_budget_shift_from_base"].item() == pytest.approx(-0.1, abs=1e-6)
+    assert "ecot_policy_entropy_normalized" in outputs
+    assert outputs["ecot_policy_entropy_normalized"].item() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_pect_suite_exposes_latent_rho_variant_with_global_residual_contract():
+    variants = build_ours_final_pect_variants()
+    selected = filter_ours_final_variants(
+        variants,
+        parse_ours_final_variant_filter("pect_latent_rho"),
+    )
+
+    assert len(selected) == 1
+    variant = selected[0]
+    args = variant["extra_args"]
+
+    def last_arg(flag: str) -> str:
+        return args[len(args) - 1 - args[::-1].index(flag) + 1]
+
+    assert variant["tag"] == "pect_latent_rho"
+    assert last_arg("--enable_ours_final_latent_rho") == "true"
+    assert last_arg("--global_residual_weight") == "0.1"
+    assert last_arg("--hrot_ecot_rho_bank") == "0.5,0.6,0.7,0.8,0.9"
+    assert last_arg("--hrot_ecot_budget_prior_init") == "uniform"
+    assert last_arg("--hrot_ecot_lambda_init") == "4.0"
 
 
 def test_ours_final_runner_no_longer_passes_egsm_flags():

@@ -332,6 +332,7 @@ class EpisodeBudgetController(nn.Module):
         tau_shot_min: float,
         tau_shot_max: float,
         enable_threshold_offset: bool,
+        budget_prior_init: str = "base",
     ) -> None:
         super().__init__()
         if input_dim <= 0:
@@ -344,6 +345,9 @@ class EpisodeBudgetController(nn.Module):
             raise ValueError("ECOT base_idx must select an entry in the budget bank")
         if tau_shot_min <= 0.0 or tau_shot_max <= tau_shot_min:
             raise ValueError("ECOT tau_shot bounds must satisfy 0 < min < max")
+        budget_prior_init = str(budget_prior_init).strip().lower().replace("-", "_")
+        if budget_prior_init not in {"base", "uniform"}:
+            raise ValueError("ECOT budget_prior_init must be 'base' or 'uniform'")
 
         self.input_dim = int(input_dim)
         self.budget_count = int(budget_count)
@@ -352,6 +356,7 @@ class EpisodeBudgetController(nn.Module):
         self.tau_shot_min = float(tau_shot_min)
         self.tau_shot_max = float(tau_shot_max)
         self.enable_threshold_offset = bool(enable_threshold_offset)
+        self.budget_prior_init = budget_prior_init
 
         output_dim = self.budget_count
         self.tau_offset = None
@@ -375,7 +380,8 @@ class EpisodeBudgetController(nn.Module):
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
         with torch.no_grad():
-            final.bias[self.base_idx] = 4.0
+            if self.budget_prior_init == "base":
+                final.bias[self.base_idx] = 4.0
             if self.tau_offset is not None:
                 unit = (1.0 - self.tau_shot_min) / (self.tau_shot_max - self.tau_shot_min)
                 unit = min(max(unit, 1e-4), 1.0 - 1e-4)
@@ -487,6 +493,7 @@ class HROTFSL(BaseConv64FewShotModel):
         ecot_max_lambda: float = 1.0,
         ecot_lambda_init: float = -8.0,
         ecot_controller_hidden: int = 32,
+        ecot_budget_prior_init: str = "base",
         ecot_uniform_budget_policy: bool = False,
         ecot_enable_tau_shot: bool = True,
         ecot_tau_shot_min: float = 0.5,
@@ -718,6 +725,9 @@ class HROTFSL(BaseConv64FewShotModel):
             raise ValueError("ecot_identity_reg must be non-negative")
         if ecot_policy_entropy_reg < 0.0:
             raise ValueError("ecot_policy_entropy_reg must be non-negative")
+        ecot_budget_prior_init = str(ecot_budget_prior_init).strip().lower().replace("-", "_")
+        if ecot_budget_prior_init not in {"base", "uniform"}:
+            raise ValueError("ecot_budget_prior_init must be 'base' or 'uniform'")
         if ecot_consensus_tau <= 0.0:
             raise ValueError("ecot_consensus_tau must be positive")
         if ecot_nncs_beta <= 0.0:
@@ -1004,6 +1014,7 @@ class HROTFSL(BaseConv64FewShotModel):
         self.ecot_budget_tau = float(ecot_budget_tau)
         self.ecot_max_lambda = float(ecot_max_lambda)
         self.ecot_controller_hidden = int(ecot_controller_hidden)
+        self.ecot_budget_prior_init = ecot_budget_prior_init
         self.ecot_uniform_budget_policy = bool(ecot_uniform_budget_policy)
         self.ecot_enable_tau_shot = bool(ecot_enable_tau_shot)
         self.ecot_tau_shot_min = float(ecot_tau_shot_min)
@@ -1326,6 +1337,7 @@ class HROTFSL(BaseConv64FewShotModel):
                 tau_shot_min=self.ecot_tau_shot_min,
                 tau_shot_max=self.ecot_tau_shot_max,
                 enable_threshold_offset=self.ecot_enable_threshold_offset,
+                budget_prior_init=self.ecot_budget_prior_init,
             )
             if self.uses_ecot
             else None
@@ -4287,6 +4299,9 @@ class HROTFSL(BaseConv64FewShotModel):
         plan_diag = (pi_view.unsqueeze(-1).unsqueeze(-1) * plan_bank).sum(dim=3)
         shot_rho = base_rho.expand(num_query, way_num, shot_num).clone()
         policy_entropy = -(pi_budget.clamp_min(self.eps) * pi_budget.clamp_min(self.eps).log()).sum()
+        normalized_policy_entropy = policy_entropy / math.log(float(max(budget_count, 2)))
+        effective_rho = (pi_budget * rho_bank).sum()
+        peak_rho = rho_bank[torch.argmax(pi_budget)]
         crs_aux_loss = crs_payload.get("crs_aux_loss", identity_loss.new_zeros(()))
         mea_aux_loss = mea_payload.get("mea_aux_loss", identity_loss.new_zeros(()))
         ccdm_aux_loss = ccdm_payload.get("ccdm_aux_loss", identity_loss.new_zeros(()))
@@ -4311,6 +4326,11 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_lambda": lambda_ecot,
             "ecot_base_idx": flat_cost.new_tensor(base_idx, dtype=torch.long),
             "ecot_rho_bank": rho_bank,
+            "ecot_effective_rho": effective_rho,
+            "ecot_peak_rho": peak_rho,
+            "ecot_base_rho": base_rho.detach(),
+            "ecot_budget_shift_from_base": effective_rho - base_rho,
+            "ecot_budget_base_weight": pi_budget[base_idx],
             "ecot_base_score": base_score,
             "ecot_score": ecot_score,
             "ecot_budget_scores": budget_scores,
@@ -4326,6 +4346,7 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_diagnostics": diagnostics,
             "ecot_identity_loss": identity_loss,
             "ecot_policy_entropy": policy_entropy,
+            "ecot_policy_entropy_normalized": normalized_policy_entropy,
             "ecot_policy_entropy_loss": -self.ecot_policy_entropy_reg * policy_entropy,
             "ecot_aux_loss": ecot_aux_loss,
             "uot_energy/enabled": flat_cost.new_tensor(
@@ -6303,8 +6324,14 @@ class HROTFSL(BaseConv64FewShotModel):
             "ecot_raw_delta_threshold",
             "ecot_identity_loss",
             "ecot_policy_entropy",
+            "ecot_policy_entropy_normalized",
             "ecot_policy_entropy_loss",
             "ecot_aux_loss",
+            "ecot_effective_rho",
+            "ecot_peak_rho",
+            "ecot_base_rho",
+            "ecot_budget_shift_from_base",
+            "ecot_budget_base_weight",
             "ecot_lambda_k",
             "ecot_tau_k",
             "mean_ecot_m2_swts_w_entropy",

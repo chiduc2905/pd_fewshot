@@ -359,6 +359,7 @@ _OURS_FINAL_WANDB_CORE_KEYS = frozenset(
         "hrot_ecot_max_lambda",
         "hrot_ecot_lambda_init",
         "hrot_ecot_controller_hidden",
+        "hrot_ecot_budget_prior_init",
         "hrot_ecot_uniform_budget_policy",
         "hrot_ecot_enable_tau_shot",
         "hrot_ecot_tau_shot_min",
@@ -383,6 +384,9 @@ _OURS_FINAL_WANDB_CORE_KEYS = frozenset(
         "hrot_ecot_consensus_tau_mode",
         "hrot_ecot_consensus_tau",
         "hrot_ecot_transport_mode",
+        "enable_ours_final_latent_rho",
+        "ours_final_latent_rho_bank",
+        "ours_final_latent_base_rho",
         "hrot_ecot_episode_feature_normalize",
         "hrot_ecot_episode_feature_norm_eps",
         "ours_ablation",
@@ -2003,6 +2007,35 @@ def get_args():
         default=-8.0,
     )
     parser.add_argument("--hrot_ecot_controller_hidden", type=int, default=32)
+    parser.add_argument(
+        "--hrot_ecot_budget_prior_init",
+        type=str,
+        default="base",
+        choices=["base", "uniform"],
+        help="Initialize ECOT budget posterior at the base rho or uniformly over the rho bank.",
+    )
+    parser.add_argument(
+        "--enable_ours_final_latent_rho",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help=(
+            "Ours-Final only: infer a latent episode-level posterior over a rho bank "
+            "instead of using the single fixed rho budget."
+        ),
+    )
+    parser.add_argument(
+        "--ours_final_latent_rho_bank",
+        type=str,
+        default="0.5,0.6,0.7,0.8,0.9",
+        help="Default rho bank used by --enable_ours_final_latent_rho when no explicit hrot_ecot_rho_bank is supplied.",
+    )
+    parser.add_argument(
+        "--ours_final_latent_base_rho",
+        type=float,
+        default=0.8,
+        help="Reference rho for diagnostics/homotopy when --enable_ours_final_latent_rho is active.",
+    )
     parser.add_argument(
         "--hrot_ecot_uniform_budget_policy",
         "--ecot_uniform_budget_policy",
@@ -4732,7 +4765,10 @@ def get_model(args):
             f"ecot_budget_tau={getattr(args, 'hrot_ecot_budget_tau', 1.0)}, "
             f"ecot_lambda_init={getattr(args, 'hrot_ecot_lambda_init', -8.0)}, "
             f"ecot_controller_hidden={getattr(args, 'hrot_ecot_controller_hidden', 32)}, "
+            f"ecot_budget_prior_init={getattr(args, 'hrot_ecot_budget_prior_init', 'base')}, "
             f"ecot_uniform_budget_policy={getattr(args, 'hrot_ecot_uniform_budget_policy', 'false')}, "
+            f"latent_rho={getattr(args, 'enable_ours_final_latent_rho', 'false')}, "
+            f"latent_rho_bank={getattr(args, 'ours_final_latent_rho_bank', '0.5,0.6,0.7,0.8,0.9')}, "
             f"ecot_tau_shot={getattr(args, 'hrot_ecot_enable_tau_shot', 'true')}, "
             f"ecot_consensus_tau_mode={getattr(args, 'hrot_ecot_consensus_tau_mode', 'fixed')}, "
             f"ecot_consensus_tau={getattr(args, 'hrot_ecot_consensus_tau', 1.0)}, "
@@ -5296,6 +5332,7 @@ def infer_hrot_arch_overrides_from_state_dict(state_dict, checkpoint_args=None):
             "hrot_ecot_max_lambda",
             "hrot_ecot_lambda_init",
             "hrot_ecot_controller_hidden",
+            "hrot_ecot_budget_prior_init",
             "hrot_ecot_uniform_budget_policy",
             "hrot_ecot_enable_tau_shot",
             "hrot_ecot_tau_shot_min",
