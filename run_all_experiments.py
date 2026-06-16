@@ -405,6 +405,7 @@ def get_args():
             "adaptive_relaxation",
             "tier1_diagnostic",
             "verified_region",
+            "pect",
         ],
         help=(
             "Expand Ours-Final runs with tagged variants. "
@@ -429,6 +430,7 @@ def get_args():
             " tier1_diagnostic=asymmetric UOT relaxation, threshold-init sensitivity, "
             "and learned token-attention marginals on the accepted global residual w=0.1 baseline."
             " verified_region=parameter-free verified region matching gates before UOT."
+            " pect=PECT final ablations: support-strict global-residual weight/rho/OT/pooling/cost controls."
         ),
     )
     parser.add_argument(
@@ -1740,6 +1742,115 @@ def build_ours_final_global_residual_variants():
                 "checkpoint_tag": "global_res_w0p1_mass_off",
                 "label": "Ours-Final global residual weight=0.1 with threshold-mass reward removed",
                 "extra_args": _ours_final_base_args(ablate_threshold_mass="true") + global_residual_w0p1,
+            },
+        ]
+    )
+    return variants
+
+
+def build_ours_final_pect_variants():
+    """PECT final ablations: Ours-Final + support-strict tau + global residual controls."""
+    strict_tau = ["--hrot_tau_q", "0.5", "--hrot_tau_c", "0.8"]
+    failure_probe = ["--enable_ours_final_failure_probe", "true"]
+
+    def residual(weight, base_args=None):
+        return list(base_args or _ours_final_base_args()) + strict_tau + [
+            "--enable_global_residual_score",
+            "--global_residual_mode",
+            "residual",
+            "--global_residual_weight",
+            str(weight),
+        ] + failure_probe
+
+    variants = [
+        {
+            "tag": "pect_no_global",
+            "checkpoint_tag": "pect_no_global",
+            "label": "PECT control: support-strict Ours-Final without the global residual head",
+            "extra_args": _ours_final_base_args() + strict_tau + failure_probe,
+        }
+    ]
+
+    for weight in ("0.05", "0.1", "0.15", "0.2"):
+        tag_value = weight.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"pect_global_res_w{tag_value}",
+                "checkpoint_tag": f"pect_global_res_w{tag_value}",
+                "label": f"PECT weight grid: support-strict Ours-Final + global residual w={weight}",
+                "extra_args": residual(weight),
+            }
+        )
+
+    variants.append(
+        {
+            "tag": "pect_global_only",
+            "checkpoint_tag": "pect_global_only",
+            "label": "PECT global-only: global prototype classifier without local UOT logits",
+            "extra_args": _ours_final_base_args()
+            + strict_tau
+            + [
+                "--enable_global_residual_score",
+                "--global_residual_mode",
+                "global_only",
+                "--global_residual_weight",
+                "1.0",
+            ]
+            + failure_probe,
+        }
+    )
+
+    for rho in ("0.6", "0.7", "0.9"):
+        tag_value = rho.replace(".", "p")
+        variants.append(
+            {
+                "tag": f"pect_rho_{tag_value}",
+                "checkpoint_tag": f"pect_rho_{tag_value}",
+                "label": f"PECT rho grid: support-strict global residual w=0.1 with UOT rho={rho}",
+                "extra_args": residual("0.1", _ours_final_base_args(rho)),
+            }
+        )
+
+    variants.extend(
+        [
+            {
+                "tag": "pect_full_ot",
+                "checkpoint_tag": "pect_full_ot",
+                "label": "PECT transport family: balanced full OT with global residual w=0.1",
+                "extra_args": residual(
+                    "0.1",
+                    _ours_final_base_args(
+                        "1.0",
+                        ablation="full_ot",
+                        transport_mode="balanced",
+                        fixed_mass="0.8",
+                    ),
+                ),
+            },
+            {
+                "tag": "pect_partial_ot",
+                "checkpoint_tag": "pect_partial_ot",
+                "label": "PECT transport family: fast Partial OT + cost-per-mass score with global residual w=0.1",
+                "model": OURS_FINAL_PARTIAL_OT_MODEL_NAME,
+                "extra_args": residual("0.1", _ours_final_partial_ot_args()),
+            },
+            {
+                "tag": "pect_class_pooled",
+                "checkpoint_tag": "pect_class_pooled",
+                "label": "PECT pooling control: class-pooled support tokens before OT",
+                "extra_args": residual("0.1")
+                + [
+                    "--hrot_pre_transport_shot_pool",
+                    "true",
+                    "--hrot_pre_transport_shot_pool_mode",
+                    "concat",
+                ],
+            },
+            {
+                "tag": "pect_cost_only",
+                "checkpoint_tag": "pect_cost_only",
+                "label": "PECT score control: cost-only decision with threshold-mass reward removed",
+                "extra_args": residual("0.1", _ours_final_base_args(ablate_threshold_mass="true")),
             },
         ]
     )
@@ -4476,6 +4587,7 @@ def main():
         adaptive_relaxation_variants = build_ours_final_adaptive_relaxation_variants()
         tier1_diagnostic_variants = build_tier1_diagnostic_variants()
         verified_region_variants = build_ours_final_verified_region_variants()
+        pect_variants = build_ours_final_pect_variants()
         if suite_name == "dmuot" and ours_final_variant_filter is None:
             dmuot_variants = [
                 variant
@@ -4527,6 +4639,7 @@ def main():
             verified_region_variants,
             ours_final_variant_filter,
         )
+        pect_variants = filter_ours_final_variants(pect_variants, ours_final_variant_filter)
         if suite_name == "rho_grid":
             ablation_variants = rho_grid_variants
         elif suite_name == "tau_shot_off":
@@ -4561,6 +4674,8 @@ def main():
             ablation_variants = tier1_diagnostic_variants
         elif suite_name == "verified_region":
             ablation_variants = verified_region_variants
+        elif suite_name == "pect":
+            ablation_variants = pect_variants
         elif suite_name == "partial_ot":
             ablation_variants = [
                 variant for variant in contrib_variants if variant["tag"] == "ours_final_partial_ot"
@@ -4877,6 +4992,26 @@ def main():
                     "extra_noise_test_splits": None,
                 }
                 for variant in verified_region_variants
+                for samples in samples_list
+                for shot in shots
+            )
+        if suite_name == "pect":
+            experiments.extend(
+                {
+                    "model": variant.get("model", OURS_FINAL_MODEL_NAME),
+                    "samples": samples,
+                    "shot": shot,
+                    "variant_args": variant["extra_args"],
+                    "experiment_tag": variant["tag"],
+                    "checkpoint_tag": variant.get(
+                        "checkpoint_tag",
+                        variant["tag"],
+                    ),
+                    "experiment_label": variant["label"],
+                    "extra_test_protocols": args.extra_test_protocols,
+                    "extra_noise_test_splits": None,
+                }
+                for variant in pect_variants
                 for samples in samples_list
                 for shot in shots
             )

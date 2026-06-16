@@ -7,6 +7,7 @@
 
 # Documentation (LaTeX/temp files)
 docs/
+*.tex
 
 # Data folders (scalogram images)
 scalogram/
