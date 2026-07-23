@@ -162,6 +162,17 @@ def save_auxiliary_result_artifacts(args):
     return str(getattr(args, "result_artifacts", "figures_only")).lower() == "all"
 
 
+def save_training_result_artifacts(args):
+    return str(getattr(args, "result_artifacts", "figures_only")).lower() in {
+        "all",
+        "training_only",
+    }
+
+
+def save_final_result_figures(args):
+    return str(getattr(args, "result_artifacts", "figures_only")).lower() != "training_only"
+
+
 def _sanitize_wandb_project(name):
     """Map characters W&B rejects in project names (see wandb_settings.validate_project)."""
     raw = str(name or "").strip()
@@ -3835,8 +3846,12 @@ def get_args():
         "--result_artifacts",
         type=str,
         default="figures_only",
-        choices=["figures_only", "all"],
-        help="figures_only keeps results_*.txt and only saves confusion-matrix and t-SNE PNG/PDF files under path_results.",
+        choices=["figures_only", "training_only", "all"],
+        help=(
+            "figures_only saves final confusion-matrix/t-SNE figures; "
+            "training_only saves only train/validation curves and learned-T-over-epoch; "
+            "all enables every auxiliary artifact."
+        ),
     )
     parser.add_argument("--save_misclf_report", action="store_true")
     parser.add_argument("--misclf_topk", type=int, default=30)
@@ -9830,7 +9845,7 @@ def train_loop(net, train_X, train_y, selection_X, selection_y, args):
 
     samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
     tag_suffix = f"_{args.experiment_tag}" if getattr(args, "experiment_tag", "") else ""
-    if save_auxiliary_result_artifacts(args):
+    if save_training_result_artifacts(args):
         curves_path = os.path.join(
             args.path_results,
             f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot{tag_suffix}",
@@ -10032,6 +10047,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     set_rival_cost_test_context(net, active=rc_noise_test_active)
     net.eval()
     save_aux_artifacts = save_auxiliary_result_artifacts(args)
+    save_final_figures = save_final_result_figures(args)
     all_preds, all_targets = [], []
     episode_accuracies = []
     episode_times = []
@@ -10042,7 +10058,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     q1_limit = max(0, int(getattr(args, "q1_num_episodes", 0)))
     q1_queries_per_episode = max(1, int(getattr(args, "q1_queries_per_episode", 1)))
     q1_misclassified_only = _bool_flag(getattr(args, "q1_misclassified_only", "true"), default=True)
-    uot_evidence_enabled = resolve_uot_evidence_enabled(args)
+    uot_evidence_enabled = save_final_figures and resolve_uot_evidence_enabled(args)
     uot_evidence_limit = max(0, int(getattr(args, "uot_evidence_num_episodes", 0)))
     uot_evidence_queries_per_episode = max(1, int(getattr(args, "uot_evidence_queries_per_episode", 1)))
     uot_evidence_correct_only = _bool_flag(getattr(args, "uot_evidence_correct_only", "true"), default=True)
@@ -10554,12 +10570,13 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         args.path_results,
         f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot{tag_suffix}{protocol_suffix}",
     )
-    try:
-        plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base, class_names=args.class_names)
-        if os.path.exists(f"{cm_base}_2col.png"):
-            wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
-    except RuntimeError as exc:
-        print(f"Skipping confusion matrix plot: {exc}")
+    if save_final_figures:
+        try:
+            plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base, class_names=args.class_names)
+            if os.path.exists(f"{cm_base}_2col.png"):
+                wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
+        except RuntimeError as exc:
+            print(f"Skipping confusion matrix plot: {exc}")
 
     if save_aux_artifacts and q1_rows:
         q1_csv_path = os.path.join(
@@ -10784,7 +10801,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         print(f"Saved confusion-pair summary: {pair_path}")
         print(f"Saved per-file misclassification report: {mis_path}")
 
-    if test_X is not None and test_y is not None:
+    if save_final_figures and test_X is not None and test_y is not None:
         print(f"\n{'=' * 60}")
         print("Extracting features for t-SNE from unique test samples")
         print(f"Test set size: {len(test_X)} samples ({len(test_X) // args.way_num}/class)")

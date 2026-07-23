@@ -355,8 +355,11 @@ def get_args():
         "--result_artifacts",
         type=str,
         default="figures_only",
-        choices=["figures_only", "all"],
-        help="Forwarded to main.py. figures_only keeps results_*.txt and only saves confusion matrix + t-SNE figures.",
+        choices=["figures_only", "training_only", "all"],
+        help=(
+            "Forwarded to main.py. training_only saves only train/validation curves "
+            "and the learned-T-over-epoch figure."
+        ),
     )
     parser.add_argument(
         "--log_cli_command",
@@ -664,12 +667,14 @@ def get_args():
         ]
     if "--result_artifacts" not in extra:
         extra += ["--result_artifacts", args.result_artifacts]
-    if args.result_artifacts == "figures_only":
+    if args.result_artifacts in {"figures_only", "training_only"}:
         if "--save_last_checkpoint" not in extra:
             extra += ["--save_last_checkpoint", "false"]
         if "--jecot_m2_val_save_hist_fig" not in extra:
             extra += ["--jecot_m2_val_save_hist_fig", "false"]
     export_uot_evidence = str(getattr(args, "export_uot_evidence_figure", "auto")).lower()
+    if args.result_artifacts == "training_only":
+        export_uot_evidence = "false"
     if export_uot_evidence in {"true", "false"}:
         extra += ["--export_uot_evidence_figure", export_uot_evidence]
     if export_uot_evidence == "true":
@@ -5907,7 +5912,7 @@ def main():
         and args.result_artifacts != "all"
     ):
         print("\n" + "=" * 60)
-        print("Skipping comparison charts because result_artifacts=figures_only.")
+        print(f"Skipping comparison charts because result_artifacts={args.result_artifacts}.")
         print("=" * 60)
     elif (
         args.spifce_ablation_suite != "none"
