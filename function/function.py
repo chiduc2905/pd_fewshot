@@ -668,7 +668,6 @@ def plot_statistical_ml_vs_pect_clean_bar(
     """
     _require_plotting("plot_statistical_ml_vs_pect_clean_bar")
 
-    _fs = 2.5
     # NeurIPS/ICML-style sans-serif (print + on-screen fallbacks)
     plt.rcParams.update(
         {
@@ -681,12 +680,12 @@ def plot_statistical_ml_vs_pect_clean_bar(
                 "Liberation Sans",
                 "sans-serif",
             ],
-            "font.size": 11 * _fs,
-            "axes.labelsize": 13 * _fs,
-            "axes.titlesize": 13 * _fs,
-            "xtick.labelsize": 11 * _fs,
-            "ytick.labelsize": 12 * _fs,
-            "legend.fontsize": 10.5 * _fs,
+            "font.size": 21,
+            "axes.labelsize": 21,
+            "axes.titlesize": 21,
+            "xtick.labelsize": 21,
+            "ytick.labelsize": 21,
+            "legend.fontsize": 23,
             "axes.linewidth": 1.0,
             "axes.edgecolor": "#111111",
             "xtick.major.width": 0.9,
@@ -709,17 +708,17 @@ def plot_statistical_ml_vs_pect_clean_bar(
     acc_60 = [acc_60[i] for i in sorted_indices]
     acc_all = [acc_all[i] for i in sorted_indices]
 
-    row_pitch = 1.0 * _fs
-    fig_h = 2.35 * _fs + len(models) * row_pitch
-    fig, ax = plt.subplots(figsize=(11.5 * _fs, fig_h))
+    row_pitch = 0.72
+    fig_h = 2.2 + len(models) * row_pitch
+    fig, ax = plt.subplots(figsize=(14.0, fig_h))
     y = np.arange(len(models))
-    height = 0.42
+    height = 0.32
 
     bars_all = ax.barh(
         y - height / 2,
         acc_all,
         height,
-        label="All samples",
+        label="1393 samples",
         color=color_all,
         edgecolor="black",
         linewidth=bar_edgewidth,
@@ -744,7 +743,7 @@ def plot_statistical_ml_vs_pect_clean_bar(
             f"{val:.2f}",
             va="center",
             ha="left",
-            fontsize=10.5 * _fs,
+            fontsize=20,
             color=label_color,
             fontweight="semibold",
             zorder=4,
@@ -757,16 +756,16 @@ def plot_statistical_ml_vs_pect_clean_bar(
             f"{val:.2f}",
             va="center",
             ha="left",
-            fontsize=10.5 * _fs,
+            fontsize=20,
             color=label_color,
             fontweight="semibold",
             zorder=4,
         )
 
     ax.set_xlabel(
-        "Accuracy (%)", fontsize=13 * _fs, fontweight="600", labelpad=6 * _fs
+        "Accuracy (%)", fontsize=20, fontweight="600", labelpad=12
     )
-    ax.set_ylabel("Models", fontsize=13 * _fs, fontweight="600", labelpad=8 * _fs)
+    ax.set_ylabel("Models", fontsize=20, fontweight="600", labelpad=14)
     ax.set_yticks(y)
     ax.set_yticklabels(models)
     ax.set_xlim(50, 102.5)
@@ -777,9 +776,9 @@ def plot_statistical_ml_vs_pect_clean_bar(
         loc="lower center",
         bbox_to_anchor=(0.5, 1.01),
         ncol=2,
-        fontsize=10.5 * _fs,
-        columnspacing=1.4 * _fs,
-        handletextpad=0.6 * _fs,
+        fontsize=20,
+        columnspacing=1.5,
+        handletextpad=0.6,
         frameon=True,
         fancybox=False,
         edgecolor="black",
@@ -792,7 +791,136 @@ def plot_statistical_ml_vs_pect_clean_bar(
     for spine in ax.spines.values():
         spine.set_color("#111111")
 
-    plt.subplots_adjust(left=0.26, right=0.97, top=0.78, bottom=0.1)
+    plt.subplots_adjust(left=0.32, right=0.965, top=0.9, bottom=0.08)
+
+    if save_path:
+        if isinstance(save_path, (list, tuple)):
+            paths = [str(p) for p in save_path]
+        else:
+            paths = [str(save_path)]
+        for p in paths:
+            plt.savefig(p, dpi=300, bbox_inches="tight", facecolor="white")
+            print(f"Saved: {p}")
+
+    return fig
+
+
+def plot_rho_grouped_accuracy_bar(
+    rho_results_pct,
+    *,
+    save_path=None,
+    series_labels=("1-shot", "5-shot"),
+):
+    """
+    Grouped vertical bar chart for rho ablations. Each rho value has two bars,
+    using the same print-style tokens as ``plot_statistical_ml_vs_pect_clean_bar``.
+    """
+    _require_plotting("plot_rho_grouped_accuracy_bar")
+
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [
+                "Helvetica Neue",
+                "Helvetica",
+                "Arial",
+                "DejaVu Sans",
+                "Liberation Sans",
+                "sans-serif",
+            ],
+            "font.size": 20,
+            "axes.labelsize": 20,
+            "axes.titlesize": 20,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
+            "legend.fontsize": 20,
+            "axes.linewidth": 1.0,
+            "axes.edgecolor": "#111111",
+            "xtick.major.width": 0.9,
+            "ytick.major.width": 0.9,
+        }
+    )
+
+    color_first = "#2E86AB"
+    color_second = "#8FD694"
+    label_color = "#141414"
+    bar_edgewidth = 1.15
+
+    rho_labels = list(rho_results_pct.keys())
+    first_values = [float(rho_results_pct[label][0]) for label in rho_labels]
+    second_values = [float(rho_results_pct[label][1]) for label in rho_labels]
+
+    y_min = 0.0
+    y_max = 100.0
+
+    x = np.arange(len(rho_labels))
+    width = 0.34
+    fig, ax = plt.subplots(figsize=(10.8, 6.2))
+
+    bars_first = ax.bar(
+        x - width / 2,
+        np.array(first_values) - y_min,
+        width,
+        bottom=y_min,
+        label=series_labels[0],
+        color=color_first,
+        edgecolor="black",
+        linewidth=bar_edgewidth,
+        zorder=3,
+    )
+    bars_second = ax.bar(
+        x + width / 2,
+        np.array(second_values) - y_min,
+        width,
+        bottom=y_min,
+        label=series_labels[1],
+        color=color_second,
+        edgecolor="black",
+        linewidth=bar_edgewidth,
+        zorder=3,
+    )
+
+    y_text_pad = 0.09
+    for bars, values in ((bars_first, first_values), (bars_second, second_values)):
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + y_text_pad,
+                f"{val:.2f}",
+                va="bottom",
+                ha="center",
+                fontsize=21,
+                color=label_color,
+                fontweight="semibold",
+                zorder=4,
+            )
+
+    ax.set_ylabel("Accuracy (%)", fontsize=21, fontweight="600", labelpad=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels(rho_labels)
+    ax.set_ylim(y_min, y_max)
+    ax.margins(x=0.04)
+
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.01),
+        ncol=2,
+        fontsize=23,
+        columnspacing=1.5,
+        handletextpad=0.6,
+        frameon=True,
+        fancybox=False,
+        edgecolor="black",
+        facecolor="white",
+        framealpha=1.0,
+    )
+
+    ax.yaxis.grid(True, linestyle="--", alpha=0.45, color="#666666")
+    ax.set_axisbelow(True)
+    for spine in ax.spines.values():
+        spine.set_color("#111111")
+
+    plt.subplots_adjust(left=0.15, right=0.98, top=0.84, bottom=0.13)
 
     if save_path:
         if isinstance(save_path, (list, tuple)):
@@ -807,76 +935,162 @@ def plot_statistical_ml_vs_pect_clean_bar(
 
 
 def plot_training_curves(history, save_path=None, eval_label="Validation"):
-    """
-    Plot combined train/val accuracy and loss curves on same figure.
-    
-    IEEE format: Times New Roman, appropriate figure size.
-    
-    Args:
-        history: dict with keys 'train_acc', 'val_acc', 'train_loss', 'val_loss'
-                 each containing list of values per epoch
-        save_path: Path to save the figure (without extension, will add .png)
-        eval_label: Label used for the evaluation split curve
-    
-    Returns:
-        fig: matplotlib figure object
+    """Plot publication-style train/validation accuracy and loss curves.
+
+    The faint curves preserve the measured per-epoch values. The prominent
+    curves use an EMA only for readability; no uncertainty band is drawn
+    because ``history`` represents one training run rather than repeated seeds.
     """
     _require_plotting("plot_training_curves")
 
-    # IEEE format fonts
-    plt.rcParams.update({
-        'font.family': 'serif',
-        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
-        'mathtext.fontset': 'stix',
-        'font.size': 11
-    })
-    
-    epochs = range(1, len(history['train_acc']) + 1)
-    
-    # Create figure with 2 subplots side by side
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    
-    # Color scheme
-    train_color = '#2E86AB'  # Blue
-    val_color = '#E94F37'    # Red
-    
-    # ===== Accuracy Plot =====
-    ax1 = axes[0]
-    ax1.plot(epochs, history['train_acc'], color=train_color, 
-             linewidth=2, label='Train', marker='o', markersize=3)
-    ax1.plot(epochs, history['val_acc'], color=val_color, 
-             linewidth=2, linestyle='--', label=eval_label, marker='s', markersize=3)
-    
-    ax1.set_xlabel('Epoch', fontsize=12)
-    ax1.set_ylabel('Accuracy', fontsize=12)
-    ax1.set_title(f'Training & {eval_label} Accuracy', fontsize=13, fontweight='bold')
-    ax1.legend(loc='lower right', fontsize=10)
-    ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.set_ylim(0, 1.05)
-    
-    # ===== Loss Plot =====
-    ax2 = axes[1]
-    ax2.plot(epochs, history['train_loss'], color=train_color, 
-             linewidth=2, label='Train', marker='o', markersize=3)
-    ax2.plot(epochs, history['val_loss'], color=val_color, 
-             linewidth=2, linestyle='--', label=eval_label, marker='s', markersize=3)
-    
-    ax2.set_xlabel('Epoch', fontsize=12)
-    ax2.set_ylabel('Loss', fontsize=12)
-    ax2.set_title(f'Training & {eval_label} Loss', fontsize=13, fontweight='bold')
-    ax2.legend(loc='upper right', fontsize=10)
-    ax2.grid(True, alpha=0.3, linestyle='--')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        # Save combined figure
-        full_path = f"{save_path}_curves.png" if not save_path.endswith('.png') else save_path
-        plt.savefig(full_path, dpi=300, bbox_inches='tight', facecolor='white')
-        print(f'Saved: {full_path}')
-    
-    plt.close()
-    return fig
+    required = ("train_acc", "val_acc", "train_loss", "val_loss")
+    missing = [key for key in required if key not in history]
+    if missing:
+        raise ValueError(f"Training history is missing required keys: {missing}")
+
+    curves = {key: np.asarray(history[key], dtype=float) for key in required}
+    lengths = {key: values.size for key, values in curves.items()}
+    if len(set(lengths.values())) != 1:
+        raise ValueError(f"Training history curves must have equal lengths: {lengths}")
+    num_epochs = lengths["train_acc"]
+    if num_epochs == 0:
+        raise ValueError("Training history is empty.")
+
+    def ema(values, span):
+        values = np.asarray(values, dtype=float)
+        if span <= 1:
+            return values.copy()
+        alpha = 2.0 / (float(span) + 1.0)
+        smoothed = values.copy()
+        last = np.nan
+        for idx, value in enumerate(values):
+            if not np.isfinite(value):
+                smoothed[idx] = last
+                continue
+            last = value if not np.isfinite(last) else alpha * value + (1.0 - alpha) * last
+            smoothed[idx] = last
+        return smoothed
+
+    # A light 4-epoch EMA keeps more of the original epoch-to-epoch fluctuation.
+    smooth_span = 4 if num_epochs >= 4 else (3 if num_epochs >= 3 else 1)
+    epochs = np.arange(1, num_epochs + 1)
+    accuracy_scale = 100.0
+    train_acc = curves["train_acc"] * accuracy_scale
+    val_acc = curves["val_acc"] * accuracy_scale
+
+    train_color = "#0072B2"  # Okabe-Ito blue
+    val_color = "#D55E00"    # Okabe-Ito vermillion
+    style = {
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Helvetica Neue", "Arial", "DejaVu Sans"],
+        "font.size": 10,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 9.5,
+        "ytick.labelsize": 9.5,
+        "legend.fontsize": 10,
+        "axes.linewidth": 0.8,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+
+    with plt.rc_context(style):
+        fig, (ax_acc, ax_loss) = plt.subplots(1, 2, figsize=(8.8, 3.25))
+
+        def draw_pair(ax, train_values, val_values):
+            # Raw observations remain visible so smoothing cannot hide instability.
+            ax.plot(
+                epochs,
+                train_values,
+                color=train_color,
+                linewidth=0.85,
+                alpha=0.42,
+                zorder=1,
+            )
+            ax.plot(
+                epochs,
+                val_values,
+                color=val_color,
+                linewidth=0.85,
+                alpha=0.42,
+                zorder=1,
+            )
+            ax.plot(
+                epochs,
+                ema(train_values, smooth_span),
+                color=train_color,
+                linewidth=1.65,
+                label="Train",
+                zorder=3,
+            )
+            ax.plot(
+                epochs,
+                ema(val_values, smooth_span),
+                color=val_color,
+                linewidth=1.65,
+                linestyle=(0, (2.2, 1.2)),
+                label=eval_label,
+                zorder=3,
+            )
+            ax.set_xlim(1, num_epochs)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.tick_params(direction="out", length=3, width=0.8)
+
+        draw_pair(ax_acc, train_acc, val_acc)
+        ax_acc.set_xlabel("Epoch")
+        ax_acc.set_ylabel("Accuracy (%)")
+        ax_acc.set_ylim(0.0, 100.0)
+        ax_acc.text(
+            0.02,
+            0.96,
+            "(a) Accuracy",
+            transform=ax_acc.transAxes,
+            ha="left",
+            va="top",
+            fontweight="semibold",
+        )
+
+        draw_pair(ax_loss, curves["train_loss"], curves["val_loss"])
+        ax_loss.set_xlabel("Epoch")
+        ax_loss.set_ylabel("Loss")
+        ax_loss.set_ylim(bottom=0.0)
+        ax_loss.text(
+            0.02,
+            0.96,
+            "(b) Loss",
+            transform=ax_loss.transAxes,
+            ha="left",
+            va="top",
+            fontweight="semibold",
+        )
+
+        handles, labels = ax_acc.get_legend_handles_labels()
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.015),
+            ncol=2,
+            frameon=False,
+            handlelength=2.8,
+            columnspacing=1.8,
+        )
+        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.91), w_pad=2.0)
+
+        if save_path:
+            save_path = str(save_path)
+            if save_path.lower().endswith(".png"):
+                png_path = save_path
+            else:
+                png_path = f"{save_path}_curves.png"
+            pdf_path = f"{png_path[:-4]}.pdf"
+            fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
+            fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
+            print(f"Saved: {png_path}")
+            print(f"Saved: {pdf_path}")
+
+        plt.close(fig)
+        return fig
 
 
 if __name__ == "__main__":
@@ -888,7 +1102,7 @@ if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parent.parent
     out_dir = repo_root / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
-    pdf_primary = out_dir / "pulse27_mat_stat_ml_vs_pect_clean.pdf"
+    pdf_primary = out_dir / "pulse27_mat_ml_vs_fewshot_5shot_clean.pdf"
 
     # ML on |test|=248; RF adjusted by −10 correct (−10/248 ≈ 4.03 pp) vs measured optimum.
     n_test = 248
@@ -896,7 +1110,9 @@ if __name__ == "__main__":
         "SVM": {"60": 68.55, "all": 83.47},
         "MLP": {"60": 64.52, "all": 88.71},
         "RF": {"60": 199 / n_test * 100, "all": 216 / n_test * 100},
-        "PECT (5-shot)": {"60": 89.33, "all": 97.17},
+        "ProtoNet [14]": {"60": 84.85, "all": 95.79},
+        "DeepBDC [24]": {"60": 82.78, "all": 95.22},
+        "PECT (Ours)": {"60": 90.11, "all": 95.89},
     }
 
     fig = plot_statistical_ml_vs_pect_clean_bar(
@@ -905,7 +1121,7 @@ if __name__ == "__main__":
     )
     pdf_fallback = (
         out_dir
-        / f"pulse27_mat_stat_ml_vs_pect_clean_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        / f"pulse27_mat_ml_vs_fewshot_5shot_clean_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     )
     try:
         fig.savefig(
@@ -926,7 +1142,7 @@ if __name__ == "__main__":
         )
         written = pdf_fallback.resolve()
         print(
-            "pulse27_mat_stat_ml_vs_pect_clean.pdf is open elsewhere; "
+            "pulse27_mat_ml_vs_fewshot_5shot_clean.pdf is open elsewhere; "
             f"wrote a new file: {written.name}",
             flush=True,
         )

@@ -8978,15 +8978,26 @@ def save_jecot_m2_validation_histogram(true_avg_costs: np.ndarray, threshold: fl
 def save_jecot_m2_threshold_curve(history_thresholds: list, save_path: str, eval_label: str = "Validation") -> None:
     if not history_thresholds:
         return
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    epochs = range(1, len(history_thresholds) + 1)
-    ax.plot(epochs, history_thresholds, color="#2E86AB", marker="o", markersize=3, linewidth=2)
+    thresholds = np.asarray(history_thresholds, dtype=float)
+    epochs = np.arange(1, thresholds.size + 1)
+    fig, ax = plt.subplots(figsize=(5.2, 3.1))
+    ax.plot(epochs, thresholds, color="#0072B2", linewidth=1.8)
+    finite = np.flatnonzero(np.isfinite(thresholds))
+    if finite.size:
+        last_idx = int(finite[-1])
+        ax.scatter(
+            epochs[last_idx],
+            thresholds[last_idx],
+            color="#0072B2",
+            s=18,
+            zorder=3,
+        )
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Transport cost threshold T")
-    ax.set_title(f"J-ECOT-M2 learned T over epochs ({eval_label})")
-    ax.grid(True, alpha=0.3, linestyle="--")
+    ax.set_ylabel(r"Threshold, $T$")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 

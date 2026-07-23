@@ -29,6 +29,11 @@ MATRICES = {
         [[140, 6, 0, 4], [12, 121, 16, 1], [0, 10, 137, 3], [6, 6, 0, 138]],
         [[139, 3, 0, 8], [14, 108, 27, 1], [0, 5, 145, 0], [7, 6, 1, 136]],
     ],
+    "pect_160train_5shot_mean_confusion": [
+        [[139, 3, 0, 8], [6, 132, 12, 0], [0, 5, 141, 4], [3, 1, 0, 146]],
+        [[143, 0, 0, 7], [25, 118, 7, 0], [0, 3, 143, 4], [2, 0, 0, 148]],
+        [[149, 0, 0, 1], [7, 133, 10, 0], [0, 3, 143, 4], [3, 0, 0, 147]],
+    ],
 }
 
 
@@ -38,7 +43,7 @@ def row_percent(matrix: np.ndarray) -> np.ndarray:
     return matrix / row_sums * 100.0
 
 
-def plot_mean_confusion(mean_pct: np.ndarray, save_path: Path) -> None:
+def plot_mean_confusion(mean_pct: np.ndarray, save_path: Path, cmap: str = "YlGnBu") -> None:
     plt.rcParams.update(
         {
             "font.family": "sans-serif",
@@ -59,7 +64,7 @@ def plot_mean_confusion(mean_pct: np.ndarray, save_path: Path) -> None:
         mean_pct,
         annot=annot,
         fmt="",
-        cmap="Greens",
+        cmap=cmap,
         linewidths=0.5,
         linecolor="white",
         ax=ax,
@@ -81,6 +86,9 @@ def plot_mean_confusion(mean_pct: np.ndarray, save_path: Path) -> None:
 
     plt.tight_layout()
     plt.savefig(save_path, format="pdf", bbox_inches="tight", facecolor="white")
+    preview_dir = save_path.parent / "preview_ylgnbu_5shot"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(preview_dir / f"{save_path.stem}.png", format="png", dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -88,6 +96,8 @@ def main() -> None:
     out_dir = Path(r"C:\Users\Admin\Downloads\mean_confusion_pdfs")
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, seed_matrices in MATRICES.items():
+        if "5shot" not in name:
+            continue
         matrices = np.array(seed_matrices, dtype=float)
         mean_pct = np.stack([row_percent(m) for m in matrices], axis=0).mean(axis=0)
         out_path = out_dir / f"{name}.pdf"
