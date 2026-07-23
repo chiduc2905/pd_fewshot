@@ -937,9 +937,9 @@ def plot_rho_grouped_accuracy_bar(
 def plot_training_curves(history, save_path=None, eval_label="Validation"):
     """Plot publication-style train/validation accuracy and loss curves.
 
-    The faint curves preserve the measured per-epoch values. The prominent
-    curves use an EMA only for readability; no uncertainty band is drawn
-    because ``history`` represents one training run rather than repeated seeds.
+    The displayed curves use a light EMA for readability. Values are not
+    clipped or altered; small axis margins keep boundary values from touching
+    the plot frame without disguising perfect accuracy or zero training loss.
     """
     _require_plotting("plot_training_curves")
 
@@ -997,23 +997,6 @@ def plot_training_curves(history, save_path=None, eval_label="Validation"):
         fig, (ax_acc, ax_loss) = plt.subplots(1, 2, figsize=(8.8, 3.25))
 
         def draw_pair(ax, train_values, val_values):
-            # Raw observations remain visible so smoothing cannot hide instability.
-            ax.plot(
-                epochs,
-                train_values,
-                color=train_color,
-                linewidth=0.85,
-                alpha=0.42,
-                zorder=1,
-            )
-            ax.plot(
-                epochs,
-                val_values,
-                color=val_color,
-                linewidth=0.85,
-                alpha=0.42,
-                zorder=1,
-            )
             ax.plot(
                 epochs,
                 ema(train_values, smooth_span),
@@ -1039,7 +1022,8 @@ def plot_training_curves(history, save_path=None, eval_label="Validation"):
         draw_pair(ax_acc, train_acc, val_acc)
         ax_acc.set_xlabel("Epoch")
         ax_acc.set_ylabel("Accuracy (%)")
-        ax_acc.set_ylim(0.0, 100.0)
+        # Keep a little honest headroom above a true 100% value.
+        ax_acc.set_ylim(0.0, 101.5)
         ax_acc.text(
             0.02,
             0.96,
@@ -1053,7 +1037,16 @@ def plot_training_curves(history, save_path=None, eval_label="Validation"):
         draw_pair(ax_loss, curves["train_loss"], curves["val_loss"])
         ax_loss.set_xlabel("Epoch")
         ax_loss.set_ylabel("Loss")
-        ax_loss.set_ylim(bottom=0.0)
+        finite_losses = np.concatenate(
+            [
+                curves["train_loss"][np.isfinite(curves["train_loss"])],
+                curves["val_loss"][np.isfinite(curves["val_loss"])],
+            ]
+        )
+        if finite_losses.size:
+            loss_span = max(float(np.ptp(finite_losses)), 0.1)
+            # Preserve a true zero while keeping it visually clear of the axis.
+            ax_loss.set_ylim(bottom=min(0.0, float(finite_losses.min())) - 0.025 * loss_span)
         ax_loss.text(
             0.02,
             0.96,
